@@ -592,4 +592,240 @@ mod tests {
         let value = cell_to_clickhouse_value(Cell::Time(etl::data::PgTime::EndOfDay)).unwrap();
         assert!(matches!(value, ClickHouseValue::String(value) if value == "24:00:00"));
     }
+
+    /// Generated rows decoded with ClickHouse's documented RowBinary layout.
+    mod properties {
+        use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime};
+        use etl::{
+            data::{ArrayCell, Cell, Date, Timestamp},
+            test_utils::property::{any_f32, any_f64, pg_text, run_property},
+        };
+        use proptest::{collection::vec, prelude::*};
+        use uuid::Uuid;
+
+        use crate::clickhouse::encoding::{
+            ColumnEncoding, cell_to_clickhouse_value, encode_to_row_binary,
+        };
+
+        /// Reads RowBinary bytes as the ClickHouse format documentation
+        /// describes them.
+        struct Reader<'a>(&'a [u8]);
+
+        impl Reader<'_> {
+            fn take<const N: usize>(&mut self) -> Result<[u8; N], String> {
+                let (head, rest) = self.0.split_first_chunk::<N>().ok_or("row ended early")?;
+                self.0 = rest;
+                Ok(*head)
+            }
+
+            /// Reads an unsigned LEB128 length.
+            fn length(&mut self) -> Result<usize, String> {
+                let mut value = 0usize;
+                for shift in (0..64).step_by(7) {
+                    let [byte] = self.take::<1>()?;
+                    value |= usize::from(byte & 0x7f) << shift;
+                    if byte & 0x80 == 0 {
+                        return Ok(value);
+                    }
+                }
+                Err("length varint too long".to_owned())
+            }
+
+            fn string(&mut self) -> Result<String, String> {
+                let length = self.length()?;
+                let bytes = self.0.get(..length).ok_or("string ended early")?;
+                self.0 = &self.0[length..];
+                String::from_utf8(bytes.to_vec()).map_err(|error| error.to_string())
+            }
+        }
+
+        /// Hex text of `bytes`, written independently of the encoder.
+        fn hex(bytes: &[u8]) -> String {
+            bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+        }
+
+        /// Reads one non-null value and checks that it encodes `cell`.
+        fn check_value(reader: &mut Reader<'_>, cell: &Cell) -> Result<(), String> {
+            let ok = match cell {
+                Cell::Bool(value) => reader.take::<1>()? == [u8::from(*value)],
+                Cell::I16(value) => i16::from_le_bytes(reader.take()?) == *value,
+                Cell::I32(value) => i32::from_le_bytes(reader.take()?) == *value,
+                Cell::I64(value) => i64::from_le_bytes(reader.take()?) == *value,
+                Cell::U32(value) => u32::from_le_bytes(reader.take()?) == *value,
+                Cell::F32(value) => f32::from_le_bytes(reader.take()?).to_bits() == value.to_bits(),
+                Cell::F64(value) => f64::from_le_bytes(reader.take()?).to_bits() == value.to_bits(),
+                Cell::String(value) => reader.string()? == *value,
+                Cell::Bytes(value) => reader.string()? == hex(value),
+                Cell::Date(Date::Value(date)) => {
+                    let days = i32::from_le_bytes(reader.take()?);
+                    NaiveDate::from_ymd_opt(1970, 1, 1)
+                        .unwrap()
+                        .checked_add_signed(chrono::TimeDelta::days(i64::from(days)))
+                        == Some(*date)
+                }
+                Cell::Timestamp(Timestamp::Value(timestamp)) => {
+                    let micros = i64::from_le_bytes(reader.take()?);
+                    DateTime::from_timestamp_micros(micros).map(|value| value.naive_utc())
+                        == Some(*timestamp)
+                }
+                Cell::TimestampTz(Timestamp::Value(timestamp)) => {
+                    DateTime::from_timestamp_micros(i64::from_le_bytes(reader.take()?))
+                        == Some(*timestamp)
+                }
+                Cell::Uuid(value) => {
+                    let high = u64::from_le_bytes(reader.take()?);
+                    let low = u64::from_le_bytes(reader.take()?);
+                    Uuid::from_u128(u128::from(high) << 64 | u128::from(low)) == *value
+                }
+                Cell::Array(array) => {
+                    let elements = array_elements(array);
+                    if reader.length()? != elements.len() {
+                        return Err(format!("array length differs for {cell:?}"));
+                    }
+                    for element in &elements {
+                        check_nullable(reader, element)?;
+                    }
+                    true
+                }
+                other => return Err(format!("generator produced unexpected cell {other:?}")),
+            };
+            if ok { Ok(()) } else { Err(format!("value differs for {cell:?}")) }
+        }
+
+        /// Reads a `Nullable(T)` value: a null byte, then the value if present.
+        fn check_nullable(reader: &mut Reader<'_>, cell: &Cell) -> Result<(), String> {
+            let [null] = reader.take::<1>()?;
+            match (null, cell) {
+                (1, Cell::Null) => Ok(()),
+                (0, cell) if !matches!(cell, Cell::Null) => check_value(reader, cell),
+                _ => Err(format!("null byte {null} does not match {cell:?}")),
+            }
+        }
+
+        /// Array elements as scalar cells, `None` as SQL NULL.
+        fn array_elements(array: &ArrayCell) -> Vec<Cell> {
+            fn cells<T: Clone>(values: &[Option<T>], cell: fn(T) -> Cell) -> Vec<Cell> {
+                values.iter().map(|value| value.clone().map_or(Cell::Null, cell)).collect()
+            }
+            match array {
+                ArrayCell::Bool(values) => cells(values, Cell::Bool),
+                ArrayCell::String(values) => cells(values, Cell::String),
+                ArrayCell::I64(values) => cells(values, Cell::I64),
+                ArrayCell::F64(values) => cells(values, Cell::F64),
+                ArrayCell::Date(values) => cells(values, Cell::Date),
+                ArrayCell::Uuid(values) => cells(values, Cell::Uuid),
+                other => panic!("generator produced unexpected array {other:?}"),
+            }
+        }
+
+        /// Dates across chrono's whole range, which includes every Postgres
+        /// date.
+        fn date() -> impl Strategy<Value = NaiveDate> {
+            (NaiveDate::MIN.num_days_from_ce()..=NaiveDate::MAX.num_days_from_ce())
+                .prop_map(|days| NaiveDate::from_num_days_from_ce_opt(days).unwrap())
+        }
+
+        /// Microsecond timestamps across chrono's whole range.
+        fn timestamp() -> impl Strategy<Value = NaiveDateTime> {
+            let min = NaiveDate::MIN.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_micros();
+            let max = NaiveDate::MAX
+                .and_hms_micro_opt(23, 59, 59, 999_999)
+                .unwrap()
+                .and_utc()
+                .timestamp_micros();
+            (min..=max)
+                .prop_map(|micros| DateTime::from_timestamp_micros(micros).unwrap().naive_utc())
+        }
+
+        /// Text long enough to need multi-byte LEB128 lengths.
+        fn text() -> impl Strategy<Value = String> {
+            prop_oneof![pg_text(), "[a-z]{120,400}"]
+        }
+
+        /// Arrays of 0 to 200 elements with SQL NULL mixed in.
+        fn array<T: Clone + std::fmt::Debug + 'static>(
+            element: impl Strategy<Value = T> + 'static,
+            wrap: fn(Vec<Option<T>>) -> ArrayCell,
+        ) -> BoxedStrategy<Cell> {
+            let element = element.boxed();
+            prop_oneof![
+                vec(proptest::option::of(element.clone()), 0..4),
+                vec(proptest::option::of(element), 120..200)
+            ]
+            .prop_map(move |values| Cell::Array(wrap(values)))
+            .boxed()
+        }
+
+        /// A non-null cell of any type the encoder supports.
+        fn value() -> BoxedStrategy<Cell> {
+            prop_oneof![
+                any::<bool>().prop_map(Cell::Bool),
+                any::<i16>().prop_map(Cell::I16),
+                any::<i32>().prop_map(Cell::I32),
+                any::<i64>().prop_map(Cell::I64),
+                any::<u32>().prop_map(Cell::U32),
+                any_f32().prop_map(Cell::F32),
+                any_f64().prop_map(Cell::F64),
+                text().prop_map(Cell::String),
+                vec(any::<u8>(), 0..80).prop_map(Cell::Bytes),
+                date().prop_map(|date| Cell::Date(Date::Value(date))),
+                timestamp().prop_map(|value| Cell::Timestamp(Timestamp::Value(value))),
+                timestamp().prop_map(|value| Cell::TimestampTz(Timestamp::Value(value.and_utc()))),
+                any::<u128>().prop_map(|value| Cell::Uuid(Uuid::from_u128(value))),
+            ]
+            .boxed()
+        }
+
+        /// A column: how ClickHouse stores it and the cell written to it.
+        fn column() -> impl Strategy<Value = (ColumnEncoding, Cell)> {
+            let arrays = prop_oneof![
+                array(any::<bool>(), ArrayCell::Bool),
+                array(text(), ArrayCell::String),
+                array(any::<i64>(), ArrayCell::I64),
+                array(any_f64(), ArrayCell::F64),
+                array(date().prop_map(Date::Value), ArrayCell::Date),
+                array(any::<u128>().prop_map(Uuid::from_u128), ArrayCell::Uuid),
+            ];
+            prop_oneof![
+                3 => (value(), any::<bool>()).prop_map(|(cell, null)| {
+                    (ColumnEncoding::Nullable, if null { Cell::Null } else { cell })
+                }),
+                3 => value().prop_map(|cell| (ColumnEncoding::Required, cell)),
+                2 => (arrays, proptest::bool::weighted(0.2)).prop_map(|(cell, null)| {
+                    (ColumnEncoding::Array, if null { Cell::Null } else { cell })
+                }),
+            ]
+        }
+
+        /// Every generated row encodes to exactly the RowBinary bytes the
+        /// ClickHouse documentation describes, with nothing left over.
+        #[test]
+        fn rows_decode_with_documented_row_binary_layout() {
+            run_property("clickhouse row binary layout", &vec(column(), 1..6), |columns| {
+                let encodings: Vec<_> = columns.iter().map(|(encoding, _)| *encoding).collect();
+                let values = columns
+                    .iter()
+                    .map(|(_, cell)| cell_to_clickhouse_value(cell.clone()))
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                let mut bytes = Vec::new();
+                encode_to_row_binary(values, &encodings, &mut bytes).unwrap();
+
+                let mut reader = Reader(&bytes);
+                for (encoding, cell) in columns {
+                    let checked = match (encoding, cell) {
+                        (ColumnEncoding::Nullable, cell) => check_nullable(&mut reader, cell),
+                        (ColumnEncoding::Array, Cell::Null) => match reader.length() {
+                            Ok(0) => Ok(()),
+                            other => Err(format!("NULL array encoded as {other:?}")),
+                        },
+                        (_, cell) => check_value(&mut reader, cell),
+                    };
+                    checked.map_err(TestCaseError::fail)?;
+                }
+                prop_assert!(reader.0.is_empty(), "{} trailing bytes", reader.0.len());
+                Ok(())
+            });
+        }
+    }
 }
