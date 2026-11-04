@@ -19,11 +19,13 @@ use etl_config::shared::{
     BigQueryPartitionBy, BigQueryTableOptions, BigQueryTableOptionsConfig,
     BigQueryTimePartitionGranularity,
 };
-use etl_destinations::bigquery::test_utils::{
-    setup_bigquery_database, skip_if_missing_bigquery_env_vars,
+use etl_destinations::bigquery::{
+    BigQueryClient,
+    test_utils::{parse_table_cell, setup_bigquery_database, skip_if_missing_bigquery_env_vars},
 };
 use etl_postgres::{below_version, tokio::test_utils::TableModification, version::POSTGRES_15};
 use etl_telemetry::tracing::init_test_tracing;
+use gcp_bigquery_client::model::query_request::QueryRequest;
 use rand::{Rng, distr::Alphanumeric};
 
 use crate::support::{
@@ -1750,6 +1752,211 @@ async fn table_non_nullable_array_columns() {
     assert!(bigquery_database.wait_for_no_rows(table_name.clone()).await);
 
     pipeline.shutdown_and_wait().await.unwrap();
+}
+
+/// Literal defaults preserve source values during copy, CDC, and default DDL.
+#[tokio::test(flavor = "multi_thread")]
+async fn literal_defaults_preserve_unicode_and_numeric_values() {
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+
+    init_test_tracing();
+    install_crypto_provider();
+
+    let database = spawn_source_database().await;
+    let bigquery_database = setup_bigquery_database().await;
+    let table_name = test_table_name("literal_defaults");
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            true,
+            &[
+                ("message_template", "text default 'Hello 😀 ''quoted'' \\path'"),
+                ("payload", r#"jsonb default '{"message": "😀"}'::jsonb"#),
+                ("amount", "numeric default 12345678901234567890123456789012345678"),
+                ("ratio", "real default 0.1"),
+            ],
+        )
+        .await
+        .unwrap();
+    let publication_name = "test_pub_bq_literal_defaults";
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
+    for statement in [
+        format!("insert into {} default values", table_name.as_quoted_identifier()),
+        format!(
+            "insert into {} (message_template) values (null)",
+            table_name.as_quoted_identifier()
+        ),
+    ] {
+        database.run_sql(&statement).await.unwrap();
+    }
+
+    let store = NotifyingStore::new();
+    let pipeline_id = random_pipeline_id();
+    let raw_destination =
+        bigquery_database.build_destination(pipeline_id.as_str().into(), store.clone()).await;
+    let destination = TestDestinationWrapper::wrap(raw_destination);
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id.as_str(),
+        publication_name.to_owned(),
+        store.clone(),
+        destination.clone(),
+    );
+    let copy_complete = store.notify_on_table_sync_complete(table_id).await;
+
+    pipeline.start().await.unwrap();
+
+    copy_complete.notified().await;
+
+    let streamed = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 2)])
+        .await;
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[
+                TableModification::AlterColumn {
+                    name: "message_template",
+                    alteration: "set default 'Updated 🐘'",
+                },
+                TableModification::AlterColumn {
+                    name: "amount",
+                    alteration: "set default 0.123456789012345678901234567890123456789",
+                },
+                TableModification::AddColumn {
+                    name: "added_message",
+                    data_type: "text default 'Added 👋'",
+                },
+            ],
+        )
+        .await
+        .unwrap();
+    // Keep row values representable to isolate higher-scale default DDL from
+    // the Storage Write API's separate numeric value handling.
+    for statement in [
+        format!(
+            "insert into {} (amount) values (0.12345678901234567890123456789012345679)",
+            table_name.as_quoted_identifier()
+        ),
+        format!(
+            "insert into {} (message_template, amount) values (null, \
+             0.12345678901234567890123456789012345679)",
+            table_name.as_quoted_identifier()
+        ),
+    ] {
+        database.run_sql(&statement).await.unwrap();
+    }
+
+    streamed.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let mut rows = bigquery_database
+        .query_table(table_name)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| {
+            let columns = row.columns.unwrap();
+            (
+                parse_table_cell::<i32>(columns[0].clone()).unwrap(),
+                parse_table_cell::<String>(columns[1].clone()),
+                serde_json::from_str::<serde_json::Value>(
+                    &parse_table_cell::<String>(columns[2].clone()).unwrap(),
+                )
+                .unwrap(),
+                PgNumeric::from_str(&parse_table_cell::<String>(columns[3].clone()).unwrap())
+                    .unwrap(),
+                parse_table_cell::<f64>(columns[4].clone()).unwrap(),
+                parse_table_cell::<String>(columns[5].clone()),
+            )
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|row| row.0);
+    assert_eq!(
+        rows,
+        vec![
+            (
+                1,
+                Some("Hello 😀 'quoted' \\path".to_owned()),
+                serde_json::json!({"message": "😀"}),
+                PgNumeric::from_str("12345678901234567890123456789012345678").unwrap(),
+                f64::from(0.1_f32),
+                None,
+            ),
+            (
+                2,
+                None,
+                serde_json::json!({"message": "😀"}),
+                PgNumeric::from_str("12345678901234567890123456789012345678").unwrap(),
+                f64::from(0.1_f32),
+                None,
+            ),
+            (
+                3,
+                Some("Updated 🐘".to_owned()),
+                serde_json::json!({"message": "😀"}),
+                PgNumeric::from_str("0.12345678901234567890123456789012345679").unwrap(),
+                f64::from(0.1_f32),
+                Some("Added 👋".to_owned()),
+            ),
+            (
+                4,
+                None,
+                serde_json::json!({"message": "😀"}),
+                PgNumeric::from_str("0.12345678901234567890123456789012345679").unwrap(),
+                f64::from(0.1_f32),
+                Some("Added 👋".to_owned()),
+            ),
+        ]
+    );
+
+    // Evaluate the stored defaults independently of the source-evaluated row
+    // values so successful replication cannot hide divergent metadata.
+    let metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    let defaults = bigquery_database.query_column_defaults_by_id(metadata.table_id()).await;
+    let expressions = defaults
+        .iter()
+        .filter_map(|column| {
+            column
+                .column_default
+                .as_ref()
+                .map(|expression| format!("{expression} as `{}`", column.column_name))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(expressions.len(), 5);
+    let client = BigQueryClient::new_with_key_path(
+        bigquery_database.project_id().to_owned(),
+        bigquery_database.sa_key_path(),
+        1,
+    )
+    .await
+    .unwrap();
+    let mut defaults = client
+        .query(QueryRequest::new(format!("select {}", expressions.join(", "))))
+        .await
+        .unwrap();
+    assert!(defaults.next_row());
+    assert_eq!(
+        defaults.get_string_by_name("message_template").unwrap().as_deref(),
+        Some("Updated 🐘")
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(
+            &defaults.get_string_by_name("payload").unwrap().unwrap()
+        )
+        .unwrap(),
+        serde_json::json!({"message": "😀"})
+    );
+    assert_eq!(
+        defaults.get_string_by_name("amount").unwrap().as_deref(),
+        Some("0.12345678901234567890123456789012345679")
+    );
+    assert_eq!(defaults.get_f64_by_name("ratio").unwrap(), Some(f64::from(0.1_f32)));
+    assert_eq!(defaults.get_string_by_name("added_message").unwrap().as_deref(), Some("Added 👋"));
+    assert!(!defaults.next_row());
 }
 
 #[tokio::test(flavor = "multi_thread")]

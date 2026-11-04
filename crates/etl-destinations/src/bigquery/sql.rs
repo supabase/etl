@@ -54,6 +54,9 @@ pub(super) fn quote_identifier(identifier: &str, context: &str) -> EtlResult<Str
 /// quotes and treats a backslash as an ordinary character, while GoogleSQL
 /// rejects doubled quotes, treats a backslash as an escape, and does not allow
 /// raw newlines inside single-quoted literals.
+/// Supplementary Unicode characters use eight-digit escapes because BigQuery's
+/// default-expression validation corrupts their literal UTF-8 into surrogate
+/// encodings, even though the same literals work in SELECT expressions.
 pub(super) fn quote_string_literal(value: &str) -> String {
     let mut quoted = String::with_capacity(value.len() + 2);
     quoted.push('\'');
@@ -66,6 +69,9 @@ pub(super) fn quote_string_literal(value: &str) -> String {
             '\r' => quoted.push_str("\\r"),
             '\t' => quoted.push_str("\\t"),
             ch if ch.is_control() => quoted.push_str(&format!("\\u{:04x}", u32::from(ch))),
+            ch if u32::from(ch) > 0xffff => {
+                quoted.push_str(&format!("\\U{:08x}", u32::from(ch)));
+            }
             _ => quoted.push(ch),
         }
     }
@@ -132,6 +138,15 @@ mod tests {
     fn quote_string_literal_escapes_quotes_backslashes_and_controls() {
         assert_eq!(quote_string_literal(r"don't C:\temp"), r"'don\'t C:\\temp'");
         assert_eq!(quote_string_literal("line\nnext\ttab\u{1}"), r"'line\nnext\ttab\u0001'");
+    }
+
+    #[test]
+    fn quote_string_literal_escapes_supplementary_unicode_as_scalar_values() {
+        assert_eq!(
+            quote_string_literal("é 中文 \u{ffff}\u{10000}😀\u{10ffff}"),
+            "'é 中文 \u{ffff}\\U00010000\\U0001f600\\U0010ffff'"
+        );
+        assert_eq!(quote_string_literal(r"\U0001f600"), r"'\\U0001f600'");
     }
 
     #[test]
