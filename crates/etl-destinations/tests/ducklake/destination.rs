@@ -5732,6 +5732,7 @@ async fn catalog_pooler_roundtrip(direct: Url, writer: Url, pooler: Url) {
     drop(destination);
     reset_ducklake_test_hooks();
     assert_eq!(guard.replay_epoch_queries(), 0, "replay bookkeeping must bypass the pooler");
+    assert_eq!(guard.sort_order_queries(), 0, "foreground DDL must bypass the pooler");
     let metadata_queries_before_maintenance = guard.prepared_queries();
 
     let writer_config = DuckLakeWriterConfig::default();

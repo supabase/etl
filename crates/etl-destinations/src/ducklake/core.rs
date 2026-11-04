@@ -194,7 +194,18 @@ fn build_ducklake_metadata_pg_pool(
     catalog_pooler_url: Option<&Url>,
 ) -> EtlResult<PgPool> {
     match catalog_pooler_url {
-        Some(url) => build_ducklake_catalog_pg_pool(url),
+        Some(url) => {
+            let options = ducklake_catalog_metadata_connect_options(url).map_err(|source| {
+                classified_error(
+                    ErrorKind::ConfigError,
+                    "DuckLake catalog pool configuration failed",
+                    source,
+                )
+            })?;
+            // PgBouncer rejects untracked startup parameters by default.
+            let options = options.extra_float_digits(None);
+            Ok(direct_pg_pool.options().clone().connect_lazy_with(options))
+        }
         None => Ok(direct_pg_pool.clone()),
     }
 }
@@ -574,7 +585,7 @@ pub struct DuckLakeDestination<S> {
     metrics_sampler: Arc<Option<DuckLakeMetricsSampler>>,
     metadata_schema: Arc<str>,
     expire_snapshots_older_than: Arc<str>,
-    /// Direct connection shared by replay bookkeeping and Postgres
+    /// Direct connection shared by foreground catalog queries and Postgres
     /// coordination.
     direct_pg_pool: PgPool,
     /// Pooler connection for background metadata reads, or the direct pool.
@@ -619,7 +630,7 @@ pub struct DuckLakeDestination<S> {
 /// policies start with their existing defaults and can be configured without
 /// adding another constructor for each combination.
 pub struct DuckLakeDestinationBuilder<S> {
-    /// Direct catalog URL for DuckDB writes, replay bookkeeping, and
+    /// Direct catalog URL for DuckDB writes, foreground catalog queries, and
     /// coordination.
     catalog_url: Url,
     /// Optional transaction-pooler URL for background SQLx metadata queries.
@@ -673,7 +684,7 @@ impl<S> DuckLakeDestinationBuilder<S> {
     }
 
     /// Routes background SQLx metadata queries through a transaction pooler.
-    /// DuckDB writes, replay bookkeeping, and coordination keep the direct URL.
+    /// DuckDB writes, foreground catalog queries, and coordination stay direct.
     pub fn catalog_pooler_url(mut self, catalog_pooler_url: Option<Url>) -> Self {
         self.catalog_pooler_url = catalog_pooler_url;
         self
@@ -3001,26 +3012,20 @@ where
             quote_postgres_identifier(self.metadata_schema.as_ref()),
             quote_postgres_identifier("ducklake_schema")
         );
-        let active: Vec<(String, String, String)> = async {
-            let mut transaction = self.metadata_pg_pool.begin().await?;
-            let result = sqlx::query_as(AssertSqlSafe(sql))
-                .persistent(false)
-                .bind(table_name.schema())
-                .bind(table_name.table())
-                .fetch_all(&mut *transaction)
-                .await?;
-            transaction.commit().await?;
-            Ok::<_, sqlx::Error>(result)
-        }
-        .await
-        .map_err(|source| {
-            classified_error_with_detail(
-                ErrorKind::DestinationQueryFailed,
-                "DuckLake table sort order query failed",
-                format!("table={table_name}"),
-                source,
-            )
-        })?;
+        // Foreground DDL must remain available when the metadata pooler is not.
+        let active: Vec<(String, String, String)> = sqlx::query_as(AssertSqlSafe(sql))
+            .bind(table_name.schema())
+            .bind(table_name.table())
+            .fetch_all(&self.direct_pg_pool)
+            .await
+            .map_err(|source| {
+                classified_error_with_detail(
+                    ErrorKind::DestinationQueryFailed,
+                    "DuckLake table sort order query failed",
+                    format!("table={table_name}"),
+                    source,
+                )
+            })?;
         let active = active
             .into_iter()
             .map(|(expression, direction, null_order)| ActiveDuckLakeSortColumn {

@@ -1667,18 +1667,22 @@ pub async fn run_maintenance_once(
         metadata_schema = %metadata_schema,
         "ducklake external maintenance metadata schema resolved"
     );
-    let metadata_pg_pool = PgPoolOptions::new().max_connections(1).connect_lazy_with(
-        ducklake_catalog_metadata_connect_options(
-            config.catalog_pooler_url.as_ref().unwrap_or(&config.catalog_url),
+    let mut metadata_options = ducklake_catalog_metadata_connect_options(
+        config.catalog_pooler_url.as_ref().unwrap_or(&config.catalog_url),
+    )
+    .map_err(|source| {
+        etl_error!(
+            ErrorKind::ConfigError,
+            "Invalid DuckLake PostgreSQL catalog URL",
+            source: source
         )
-        .map_err(|source| {
-            etl_error!(
-                ErrorKind::ConfigError,
-                "Invalid DuckLake PostgreSQL catalog URL",
-                source: source
-            )
-        })?,
-    );
+    })?;
+    if config.catalog_pooler_url.is_some() {
+        // PgBouncer rejects untracked startup parameters by default.
+        metadata_options = metadata_options.extra_float_digits(None);
+    }
+    let metadata_pg_pool =
+        PgPoolOptions::new().max_connections(1).connect_lazy_with(metadata_options);
     let table_names = list_ducklake_tables(&metadata_pg_pool, &metadata_schema).await?;
     info!(
         table_count = table_names.len(),

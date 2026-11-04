@@ -1,4 +1,5 @@
-//! A local Postgres protocol proxy that rejects session-dependent queries.
+//! A local Postgres protocol proxy that enforces transaction-pooler
+//! compatibility.
 
 use std::{
     io,
@@ -22,10 +23,12 @@ struct ProtocolStats {
     violations: AtomicUsize,
     preparations: AtomicUsize,
     replay_epoch_queries: AtomicUsize,
+    /// Foreground sort-order reads observed on pooled connections.
+    sort_order_queries: AtomicUsize,
 }
 
-/// Rejects named statements and preparation that releases a backend before
-/// bind.
+/// Rejects untracked startup parameters, named statements, and preparation
+/// that releases a backend before bind.
 ///
 /// Unlike a lightly loaded pooler, this detects the prepare/execute gap on
 /// every connection. The upstream must be a disposable local server accepting
@@ -98,6 +101,11 @@ impl TransactionPoolerGuard {
         self.stats.replay_epoch_queries.load(Ordering::Relaxed)
     }
 
+    /// Returns the number of pooled statements accessing foreground sort state.
+    pub fn sort_order_queries(&self) -> usize {
+        self.stats.sort_order_queries.load(Ordering::Relaxed)
+    }
+
     /// Joins all connections and verifies that no query required session state.
     pub async fn shutdown(self) {
         self.stop.cancel();
@@ -134,10 +142,14 @@ async fn forward_messages(
             stats.preparations.fetch_add(1, Ordering::Relaxed);
             let mut fields = body[4..].split(|byte| *byte == 0);
             let _statement_name = fields.next();
-            if let Some(sql) = fields.next()
-                && String::from_utf8_lossy(sql).contains("__etl_replay_epochs")
-            {
-                stats.replay_epoch_queries.fetch_add(1, Ordering::Relaxed);
+            if let Some(sql) = fields.next() {
+                let sql = String::from_utf8_lossy(sql);
+                if sql.contains("__etl_replay_epochs") {
+                    stats.replay_epoch_queries.fetch_add(1, Ordering::Relaxed);
+                }
+                if sql.contains("ducklake_sort_expression") {
+                    stats.sort_order_queries.fetch_add(1, Ordering::Relaxed);
+                }
             }
         }
         if from_server && tag == b'1' {
@@ -167,6 +179,13 @@ async fn guard_connection(
     client.set_nodelay(true)?;
     server.set_nodelay(true)?;
     let startup = read_body(&mut client).await?;
+    // Match PgBouncer's rejection of this untracked startup parameter.
+    if startup.get(8..).is_some_and(|parameters| {
+        parameters.split(|byte| *byte == 0).step_by(2).any(|key| key == b"extra_float_digits")
+    }) {
+        stats.violations.fetch_add(1, Ordering::Relaxed);
+        return Ok(());
+    }
     server.write_all(&startup).await?;
     let (client_read, client_write) = client.split();
     let (server_read, server_write) = server.split();
