@@ -57,6 +57,12 @@ use url::Url;
 /// Default batch fill time for benchmark runs.
 pub const BENCHMARK_DEFAULT_BATCH_MAX_FILL_MS: u64 = 1_000;
 
+/// Default pipeline ID for the table-copy benchmark.
+pub(crate) const DEFAULT_COPY_PIPELINE_ID: &str = "03dg2o5teb2eucxr9ggh3uie6";
+
+/// Default pipeline ID for the table-streaming benchmark.
+pub(crate) const DEFAULT_STREAMING_PIPELINE_ID: &str = "03dg2o5teb2eucxr9ggh3uie7";
+
 /// Age after which a leftover Snowflake run schema is dropped.
 #[cfg(feature = "snowflake")]
 const SNOWFLAKE_STALE_RUN_SCHEMA_DAYS: u32 = 1;
@@ -110,6 +116,21 @@ mod tests {
     use clap::ValueEnum;
 
     use crate::common::{DestinationType, finish_run, parse_clickhouse_database_prefix};
+
+    #[cfg(feature = "snowflake")]
+    #[test]
+    fn snowflake_sweep_recognizes_reserved_run_schemas() {
+        use crate::common::{
+            DEFAULT_COPY_PIPELINE_ID, DEFAULT_STREAMING_PIPELINE_ID, is_snowflake_run_schema,
+        };
+
+        for id in ["1", "150", DEFAULT_COPY_PIPELINE_ID, DEFAULT_STREAMING_PIPELINE_ID] {
+            assert!(is_snowflake_run_schema(&format!("bench_{id}"), "bench_"));
+        }
+        for name in ["bench_", "bench_manual", "bench_1_archive", "other_150"] {
+            assert!(!is_snowflake_run_schema(name, "bench_"));
+        }
+    }
 
     #[test]
     fn bigquery_destination_uses_bigquery_for_cli() {
@@ -1183,9 +1204,9 @@ fn snowflake_run_target(pipeline_id: &str) -> Result<SnowflakeRunTarget> {
 /// Drops run schemas that earlier runs left behind.
 ///
 /// Failed runs drop their own schema, but cancelled, killed, or timed-out runs
-/// never reach cleanup, so each run sweeps `{base_schema}_<digits>` schemas
-/// older than [`SNOWFLAKE_STALE_RUN_SCHEMA_DAYS`]. The age bound leaves
-/// schemas of runs that are still in progress alone.
+/// never reach cleanup, so each run sweeps schemas named with numeric or
+/// default benchmark IDs older than [`SNOWFLAKE_STALE_RUN_SCHEMA_DAYS`]. The
+/// age bound leaves schemas of runs that are still in progress alone.
 #[cfg(feature = "snowflake")]
 async fn drop_stale_snowflake_run_schemas(target: &SnowflakeRunTarget) -> Result<()> {
     let prefix = format!("{}_", target.base_schema);
@@ -1203,10 +1224,7 @@ async fn drop_stale_snowflake_run_schemas(target: &SnowflakeRunTarget) -> Result
 
     for name in rows.iter().filter_map(|row| row.first()?.as_str()) {
         // Only drop names this benchmark generates.
-        let is_run_schema = name
-            .strip_prefix(&prefix)
-            .is_some_and(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()));
-        if !is_run_schema {
+        if !is_snowflake_run_schema(name, &prefix) {
             continue;
         }
 
@@ -1222,6 +1240,16 @@ async fn drop_stale_snowflake_run_schemas(target: &SnowflakeRunTarget) -> Result
     }
 
     Ok(())
+}
+
+/// Recognizes schema names reserved for numeric runs and default benchmark IDs.
+#[cfg(feature = "snowflake")]
+fn is_snowflake_run_schema(name: &str, prefix: &str) -> bool {
+    name.strip_prefix(prefix).is_some_and(|id| {
+        id == DEFAULT_COPY_PIPELINE_ID
+            || id == DEFAULT_STREAMING_PIPELINE_ID
+            || (!id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()))
+    })
 }
 
 /// Quotes a Snowflake identifier without changing its case.

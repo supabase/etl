@@ -16,10 +16,11 @@ use tokio::task::JoinSet;
 use tracing::info;
 
 use crate::common::{
-    BenchDestination, DestinationArgs, DestinationStatsSnapshot, DestinationType, LogTarget,
-    PgConnectionArgs, PipelineTuningArgs, bytes_to_mib, cleanup_destination,
-    cleanup_replication_slots, duration_millis, finish_run, format_decimal, format_duration_ms,
-    format_integer, mib_per_second, per_second, pipeline_config, run_etl_migrations, write_report,
+    BenchDestination, DEFAULT_STREAMING_PIPELINE_ID, DestinationArgs, DestinationStatsSnapshot,
+    DestinationType, LogTarget, PgConnectionArgs, PipelineTuningArgs, bytes_to_mib,
+    cleanup_destination, cleanup_replication_slots, duration_millis, finish_run, format_decimal,
+    format_duration_ms, format_integer, mib_per_second, per_second, pipeline_config,
+    run_etl_migrations, write_report,
 };
 
 /// Command-line arguments for the table-streaming benchmark.
@@ -52,7 +53,7 @@ pub struct RunArgs {
     #[command(flatten)]
     destination: DestinationArgs,
     /// Pipeline ID used by this benchmark.
-    #[arg(long = "pipeline-id", default_value = "03dg2o5teb2eucxr9ggh3uie6")]
+    #[arg(long = "pipeline-id", default_value = DEFAULT_STREAMING_PIPELINE_ID)]
     pipeline_id: String,
     /// Publication name.
     #[arg(long, default_value = "bench_streaming_pub")]

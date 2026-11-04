@@ -203,8 +203,7 @@ impl DeployLocalConfig {
             skip_build: args.skip_build,
             skip_wait: args.skip_wait,
             allow_non_local_context: args.allow_non_local_context,
-            pipeline_id: env::var("REPLICATOR_PIPELINE_ID")
-                .unwrap_or_else(|_| DEFAULT_PIPELINE_ID.to_owned()),
+            pipeline_id: env_or("REPLICATOR_PIPELINE_ID", DEFAULT_PIPELINE_ID),
             publication_name: env_or("REPLICATOR_PUBLICATION_NAME", DEFAULT_PUBLICATION_NAME),
             postgres_host: env_or("REPLICATOR_POSTGRES_HOST", DEFAULT_POSTGRES_HOST),
             postgres_port: parse_env_or("REPLICATOR_POSTGRES_PORT", DEFAULT_POSTGRES_PORT)?,
