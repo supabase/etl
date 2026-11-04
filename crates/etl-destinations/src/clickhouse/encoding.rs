@@ -644,6 +644,22 @@ mod tests {
             bytes.iter().map(|byte| format!("{byte:02x}")).collect()
         }
 
+        /// Array elements as scalar cells, `None` as SQL NULL.
+        fn array_elements(array: &ArrayCell) -> Vec<Cell> {
+            fn cells<T: Clone>(values: &[Option<T>], cell: fn(T) -> Cell) -> Vec<Cell> {
+                values.iter().map(|value| value.clone().map_or(Cell::Null, cell)).collect()
+            }
+            match array {
+                ArrayCell::Bool(values) => cells(values, Cell::Bool),
+                ArrayCell::String(values) => cells(values, Cell::String),
+                ArrayCell::I64(values) => cells(values, Cell::I64),
+                ArrayCell::F64(values) => cells(values, Cell::F64),
+                ArrayCell::Date(values) => cells(values, Cell::Date),
+                ArrayCell::Uuid(values) => cells(values, Cell::Uuid),
+                other => panic!("generator produced unexpected array {other:?}"),
+            }
+        }
+
         /// Reads one non-null value and checks that it encodes `cell`.
         fn check_value(reader: &mut Reader<'_>, cell: &Cell) -> Result<(), String> {
             let ok = match cell {
@@ -699,22 +715,6 @@ mod tests {
                 (1, Cell::Null) => Ok(()),
                 (0, cell) if !matches!(cell, Cell::Null) => check_value(reader, cell),
                 _ => Err(format!("null byte {null} does not match {cell:?}")),
-            }
-        }
-
-        /// Array elements as scalar cells, `None` as SQL NULL.
-        fn array_elements(array: &ArrayCell) -> Vec<Cell> {
-            fn cells<T: Clone>(values: &[Option<T>], cell: fn(T) -> Cell) -> Vec<Cell> {
-                values.iter().map(|value| value.clone().map_or(Cell::Null, cell)).collect()
-            }
-            match array {
-                ArrayCell::Bool(values) => cells(values, Cell::Bool),
-                ArrayCell::String(values) => cells(values, Cell::String),
-                ArrayCell::I64(values) => cells(values, Cell::I64),
-                ArrayCell::F64(values) => cells(values, Cell::F64),
-                ArrayCell::Date(values) => cells(values, Cell::Date),
-                ArrayCell::Uuid(values) => cells(values, Cell::Uuid),
-                other => panic!("generator produced unexpected array {other:?}"),
             }
         }
 
