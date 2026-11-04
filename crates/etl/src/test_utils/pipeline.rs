@@ -5,7 +5,10 @@ use etl_config::shared::{
     PipelineConfig, ReplicationSlotConfig, ReplicationSlotPersistence, TableSyncCopyConfig,
 };
 use etl_postgres::tokio::test_utils::PgDatabase;
-use rand::random;
+use rand::{
+    distr::{Alphanumeric, SampleString},
+    random,
+};
 use tokio_postgres::Client;
 use uuid::Uuid;
 
@@ -53,6 +56,11 @@ where
 pub fn test_slot_name(slot_name: &str) -> String {
     let uuid = Uuid::new_v4().simple().to_string();
     format!("test_{slot_name}_{uuid}")
+}
+
+/// Generates a random lowercase alphanumeric pipeline ID for tests.
+pub fn random_pipeline_id() -> String {
+    Alphanumeric.sample_string(&mut rand::rng(), 25).to_ascii_lowercase()
 }
 
 /// Builder for creating test pipelines with configurable options.
@@ -418,7 +426,7 @@ pub async fn create_database_and_sync_done_pipeline_with_table(
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
-    let pipeline_id = PipelineId::from(random::<u64>());
+    let pipeline_id: PipelineId = random_pipeline_id().into();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id.clone(),

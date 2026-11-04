@@ -17,6 +17,42 @@ pub const APPLY_WORKER_PREFIX: &str = "supabase_etl_apply";
 /// Prefix used for table-sync-worker replication slots.
 pub const TABLE_SYNC_WORKER_PREFIX: &str = "supabase_etl_table_sync";
 
+/// Combined length of the two underscores surrounding the pipeline ID.
+const TABLE_SYNC_SLOT_SEPARATOR_LENGTH: usize = 2;
+/// Maximum decimal length of a PostgreSQL table OID (`u32::MAX`).
+const MAX_TABLE_OID_LENGTH: usize = 10;
+
+/// Room for the pipeline ID after the slot prefix, separators, and table OID.
+const MAX_PIPELINE_ID_LENGTH: usize = MAX_SLOT_NAME_LENGTH
+    - TABLE_SYNC_WORKER_PREFIX.len()
+    - TABLE_SYNC_SLOT_SEPARATOR_LENGTH
+    - MAX_TABLE_OID_LENGTH;
+
+/// A pipeline ID cannot be represented in every generated replication slot
+/// name.
+#[derive(Debug, Error)]
+#[error(
+    "Pipeline ID must contain 1 to {} lowercase ASCII letters, numbers, or underscores.",
+    MAX_PIPELINE_ID_LENGTH
+)]
+pub struct PipelineIdError;
+
+/// Validates an exact pipeline ID against PostgreSQL replication slot bounds.
+///
+/// Reserves space for the largest table OID so any table can be synchronized.
+pub fn validate_pipeline_id(pipeline_id: &str) -> Result<(), PipelineIdError> {
+    if pipeline_id.is_empty()
+        || pipeline_id.len() > MAX_PIPELINE_ID_LENGTH
+        || !pipeline_id
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        return Err(PipelineIdError);
+    }
+
+    Ok(())
+}
+
 /// Error type for slot operations.
 #[derive(Debug, Error)]
 pub enum EtlReplicationSlotError {
@@ -260,7 +296,39 @@ pub async fn delete_pipeline_replication_slots(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::{
+        schema::TableId,
+        slots::{
+            APPLY_WORKER_PREFIX, EtlReplicationSlot, EtlReplicationSlotError,
+            MAX_PIPELINE_ID_LENGTH, MAX_SLOT_NAME_LENGTH, TABLE_SYNC_WORKER_PREFIX,
+            validate_pipeline_id,
+        },
+    };
+
+    /// IDs retain their exact contents while fitting PostgreSQL slot syntax.
+    #[test]
+    fn pipeline_id_validation_preserves_supported_strings() {
+        for id in ["1", "00150", "03dg2o5teb2eucxr9ggh3uie6", "_", "_a", "a_"] {
+            validate_pipeline_id(id).unwrap();
+        }
+        for id in ["", "A", "pipeline-example", "a.b", "a/b", "a b", "a\0b", "é"] {
+            validate_pipeline_id(id).unwrap_err();
+        }
+    }
+
+    /// The full table OID fits at the pipeline-ID length boundary.
+    #[test]
+    fn pipeline_id_validation_reserves_the_largest_table_oid() {
+        let id = "a".repeat(MAX_PIPELINE_ID_LENGTH);
+        validate_pipeline_id(&id).unwrap();
+        let apply: String = EtlReplicationSlot::for_apply_worker(&id).try_into().unwrap();
+        let sync: String = EtlReplicationSlot::for_table_sync_worker(&id, TableId::new(u32::MAX))
+            .try_into()
+            .unwrap();
+        assert!(apply.len() <= MAX_SLOT_NAME_LENGTH);
+        assert_eq!(sync.len(), MAX_SLOT_NAME_LENGTH);
+        validate_pipeline_id(&(id + "a")).unwrap_err();
+    }
 
     #[test]
     fn apply_worker_slot_name() {
