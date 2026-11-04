@@ -1926,6 +1926,7 @@ dependencies = [
  "simdutf8",
  "sqlx",
  "sysinfo",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-postgres",
  "tokio-stream",
