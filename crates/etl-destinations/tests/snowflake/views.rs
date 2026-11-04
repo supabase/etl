@@ -61,7 +61,8 @@ async fn companion_view_lifecycle_and_ownership() {
     let schema = ReplicatedTableSchema::all(Arc::new(original.clone()));
     let store = NotifyingStore::new();
     store.store_table_schema(original).await.unwrap();
-    let fresh = || Destination::new(Client::new(Arc::clone(&auth), 1178), store.clone());
+    let fresh =
+        || Destination::new(Client::new(Arc::clone(&auth), 1178.to_string().into()), store.clone());
     let destination = fresh();
     let cleanup_tables: [&str; 4] = [&physical, &keyless_physical, &long_physical, &public_name];
     with_table_cleanup(&sql, &cleanup_tables, || async {

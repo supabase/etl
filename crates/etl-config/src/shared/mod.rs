@@ -2,7 +2,6 @@ mod base;
 mod connection;
 mod destination;
 mod health;
-mod hybrid_pipeline_id;
 mod pipeline;
 mod replicator;
 mod sentry;
@@ -24,7 +23,6 @@ pub use destination::{
     IcebergConfig, IcebergConfigWithoutSecrets,
 };
 pub use health::ReplicatorHealthConfig;
-pub use hybrid_pipeline_id::HybridPipelineId;
 pub use pipeline::{
     BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PipelineConfig,
     PipelineConfigWithoutSecrets, ReplicationSlotConfig, ReplicationSlotPersistence,

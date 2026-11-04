@@ -976,7 +976,7 @@ mod tests {
             stream_client,
             config.database().to_owned(),
             config.schema().to_owned(),
-            1_u64,
+            "1".into(),
         );
         let store = NotifyingStore::new();
         let destination = Destination::new(client, store.clone());
