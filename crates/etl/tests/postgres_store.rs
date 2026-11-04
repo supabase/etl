@@ -680,12 +680,12 @@ async fn cache_preparation_loads_every_domain() {
         let identities_match: bool = client
             .query_one(
                 "select count(*) = 5 and bool_and(
-                 pipeline_id_v2 is not null and pipeline_id_v2 = $1 and pipeline_id is null
+                 pipeline_id_v2 = $1
              ) from (
-                 select pipeline_id, pipeline_id_v2 from etl.replication_state
-                 union all select pipeline_id, pipeline_id_v2 from etl.table_schemas
-                 union all select pipeline_id, pipeline_id_v2 from etl.destination_tables_metadata
-                 union all select pipeline_id, pipeline_id_v2 from etl.replication_progress
+                 select pipeline_id_v2 from etl.replication_state
+                 union all select pipeline_id_v2 from etl.table_schemas
+                 union all select pipeline_id_v2 from etl.destination_tables_metadata
+                 union all select pipeline_id_v2 from etl.replication_progress
              ) as state",
                 &[&pipeline_id],
             )
