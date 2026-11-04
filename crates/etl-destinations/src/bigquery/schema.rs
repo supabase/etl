@@ -73,6 +73,20 @@ fn render_default_expression(expression: &DefaultExpression, typ: &Type) -> Opti
         DefaultExpression::StringLiteral(expression) if is_bigquery_string_default_type(typ) => {
             bigquery_string_literal(expression)
         }
+        DefaultExpression::NumericLiteral(expression) if matches!(typ, &Type::FLOAT4) => {
+            // The wire format widens the source's single-precision value to
+            // FLOAT64. Defaults must apply the same source-side rounding.
+            expression
+                .parse::<f32>()
+                .ok()
+                .filter(|value| value.is_finite())
+                .map(|value| format!("{:e}", f64::from(value)))
+        }
+        DefaultExpression::NumericLiteral(expression) if matches!(typ, &Type::NUMERIC) => {
+            // Bare integer literals are parsed as INT64 even for BIGNUMERIC
+            // columns. A typed literal also preserves decimal precision.
+            Some(format!("BIGNUMERIC {}", quote_string_literal(expression)))
+        }
         DefaultExpression::NumericLiteral(expression) => {
             if is_bigquery_numeric_default_type(typ) {
                 Some(expression.clone())
@@ -521,6 +535,9 @@ mod tests {
             (Type::TEXT, "'don''t'::text", r"'don\'t'"),
             (Type::TEXT, r"'C:\temp\new'::text", r"'C:\\temp\\new'"),
             (Type::TEXT, "'line\nnext'::text", r"'line\nnext'"),
+            (Type::TEXT, "'Hello 👋 😀'::text", r"'Hello \U0001f44b \U0001f600'"),
+            (Type::TEXT, r"'\ud83d\ude00'::text", r"'\\ud83d\\ude00'"),
+            (Type::JSONB, r#"'{"message": "😀"}'::jsonb"#, r#"JSON '{"message": "\U0001f600"}'"#),
             (
                 Type::JSONB,
                 r#"'{"path": "C:\\temp", "note": "it''s"}'::jsonb"#,
@@ -536,6 +553,41 @@ mod tests {
                 "expression: {expression}"
             );
         }
+    }
+
+    #[test]
+    fn default_expression_types_numeric_literals_as_bignumeric() {
+        for expression in [
+            "42",
+            "9223372036854775808",
+            "-9223372036854775809",
+            "12345678901234567890123456789012345678",
+            "0.12345678901234567890123456789012345678",
+            "0.00000000000000000000000000000000000001",
+        ] {
+            assert_eq!(
+                default_expression_sql(expression, &Type::NUMERIC, -1),
+                Some(format!("BIGNUMERIC '{expression}'"))
+            );
+            assert_eq!(
+                default_expression_sql(&format!("'{expression}'::numeric"), &Type::NUMERIC, -1),
+                Some(format!("BIGNUMERIC '{expression}'"))
+            );
+        }
+    }
+
+    #[test]
+    fn default_expression_preserves_real_rounding_in_float64_columns() {
+        for (expression, expected) in
+            [("0.1", "1.0000000149011612e-1"), ("16777217", "1.6777216e7"), ("-0.0", "-0e0")]
+        {
+            assert_eq!(
+                default_expression_sql(expression, &Type::FLOAT4, -1).as_deref(),
+                Some(expected)
+            );
+        }
+
+        assert_eq!(default_expression_sql("0.1", &Type::FLOAT8, -1).as_deref(), Some("0.1"));
     }
 
     #[test]

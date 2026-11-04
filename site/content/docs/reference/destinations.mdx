@@ -220,6 +220,21 @@ treated as one destination column, while `Ä` and `ä` remain distinct. If
 BigQuery's own case-insensitivity considers such a non-ASCII pair equivalent,
 the table DDL is rejected instead of ETL silently merging the two columns.
 
+### Literal defaults
+
+ETL translates supported PostgreSQL literal defaults when it creates a table
+or applies a source default change. Text and JSON defaults preserve emoji and
+other supplementary Unicode characters through GoogleSQL's [eight-digit Unicode
+escapes](https://cloud.google.com/bigquery/docs/reference/standard-sql/lexical#escape_sequences).
+PostgreSQL `numeric` defaults use typed `BIGNUMERIC` literals, including integers
+beyond the `INT64` range. PostgreSQL `real` defaults retain the source's
+single-precision rounding when rendered for BigQuery's `FLOAT64` columns.
+
+PostgreSQL evaluates source defaults before replication. Explicit source `NULL`
+values remain `NULL` in scalar columns even when the destination has a default.
+Existing destination default metadata is updated through source schema changes
+or table resynchronization; deploying a new replicator alone does not rewrite it.
+
 ### Limitations
 
 - Every replicated source table needs a primary key, and all primary-key
@@ -235,10 +250,24 @@ the table DDL is rejected instead of ETL silently merging the two columns.
   two source values are indistinguishable in the destination.
 - Numeric and JSON values follow BigQuery's native domain, rounding, and
   canonicalization behavior. BigQuery may transform or reject values that do
-  not map exactly to its types.
+  not map exactly to its types. `BIGNUMERIC` supports a maximum scale of 38;
+  JSON numbers use BigQuery's integer and `FLOAT64` domains, so wide PostgreSQL
+  JSON numbers can lose precision. See [BigQuery data
+  types](https://cloud.google.com/bigquery/docs/reference/standard-sql/data-types).
+- BigQuery dates and timestamps are limited to years 0001 through 9999, and
+  `TIME` ends at `23:59:59.999999`. PostgreSQL BC dates, temporal infinities,
+  and `24:00:00` do not have equivalent values in those native BigQuery types.
+  Preserving such values would require a different column mapping and a table
+  resynchronization.
 - Supported schema changes are applied automatically, but PostgreSQL default
   expressions and backfill behavior are only supported where they map safely
   to BigQuery. See [Schema Changes](/explanation/schema-changes/).
+- Source type changes log a warning and skip destination type DDL. Subsequent
+  writes use the new source schema, so BigQuery may reject them or interpret
+  their values differently if the destination column is incompatible.
+  PostgreSQL data rewrites from casts or `USING` expressions are not replicated.
+  Resynchronize when a type change needs a different destination column type
+  or transforms existing values.
 - BigQuery column renames are subject to BigQuery's row-access-policy and
   metadata limitations. Review [BigQuery schema change
   behavior](https://cloud.google.com/bigquery/docs/managing-table-schemas)

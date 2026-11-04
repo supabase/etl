@@ -836,18 +836,24 @@ where
         replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
-        // Copy partitions share preparation, but append independently to the
-        // same snapshot's physical target.
-        let (table_target, table_descriptor) =
-            self.prepare_table_for_writes(replicated_table_schema, false).await?;
-
         // BigQuery requires sequence numbers consistently for custom ordering.
         // A snapshot row is older than every subsequent WAL mutation, and its
         // retries always contain the same values for a given primary key.
         let table_rows = table_rows
             .into_iter()
-            .map(|row| bigquery_upsert_row(row, BIGQUERY_COPY_SEQUENCE_NUMBER.to_owned()))
+            .map(|row| {
+                bigquery_upsert_row(
+                    replicated_table_schema,
+                    row,
+                    BIGQUERY_COPY_SEQUENCE_NUMBER.to_owned(),
+                )
+            })
             .collect::<EtlResult<Vec<BigQueryTableRow>>>()?;
+
+        // Validate and encode before preparation can create any remote state.
+        // Copy partitions share preparation, then append independently.
+        let (table_target, table_descriptor) =
+            self.prepare_table_for_writes(replicated_table_schema, false).await?;
 
         // Calculate optimal target batches based on estimated row size.
         let target_batches = calculate_target_batches_for_table_copy(&table_rows)?;
@@ -1224,22 +1230,22 @@ where
                     break;
                 };
                 match event {
-                    Event::Insert(mut insert) => {
+                    Event::Insert(insert) => {
                         let sequence_number = bigquery_sequence_number(
                             insert.event_position(),
                             BIGQUERY_SEQUENCE_ORDINAL_FIRST,
                         );
-                        insert
-                            .table_row
-                            .values_mut()
-                            .push(BigQueryOperationType::Upsert.into_cell());
-                        insert.table_row.values_mut().push(Cell::String(sequence_number));
+                        let table_row = bigquery_upsert_row(
+                            &insert.replicated_table_schema,
+                            insert.table_row,
+                            sequence_number,
+                        )?;
 
                         let table_id = insert.replicated_table_schema.id();
                         let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
                             (insert.replicated_table_schema.clone(), Vec::new())
                         });
-                        entry.1.push(BigQueryTableRow::try_from(insert.table_row)?);
+                        entry.1.push(table_row);
                     }
                     Event::Update(update) => {
                         let event_position = update.event_position();
@@ -1740,11 +1746,36 @@ fn bigquery_sequence_number(event_position: EventPosition, internal_ordinal: u64
     format!("{commit_lsn:016x}/{:016x}/{internal_ordinal:016x}", event_position.tx_ordinal)
 }
 
-/// Builds a BigQuery CDC upsert row.
+/// Checks a complete row before positional fields or CDC metadata are encoded.
+fn ensure_bigquery_full_row_matches_schema(
+    replicated_table_schema: &ReplicatedTableSchema,
+    table_row: &TableRow,
+) -> EtlResult<()> {
+    let column_count = replicated_table_schema.column_schemas().len();
+    if table_row.values().len() != column_count {
+        bail!(
+            ErrorKind::InvalidState,
+            "BigQuery full row image does not match the replicated schema",
+            format!(
+                "Expected {} values for table '{}', got {}",
+                column_count,
+                replicated_table_schema.name(),
+                table_row.values().len()
+            )
+        );
+    }
+
+    Ok(())
+}
+
+/// Builds a BigQuery CDC upsert row after checking the source row width.
 fn bigquery_upsert_row(
+    replicated_table_schema: &ReplicatedTableSchema,
     mut table_row: TableRow,
     sequence_number: String,
 ) -> EtlResult<BigQueryTableRow> {
+    ensure_bigquery_full_row_matches_schema(replicated_table_schema, &table_row)?;
+
     table_row.values_mut().push(BigQueryOperationType::Upsert.into_cell());
     table_row.values_mut().push(Cell::String(sequence_number));
 
@@ -1800,6 +1831,7 @@ fn bigquery_update_rows(
         BIGQUERY_SEQUENCE_ORDINAL_FIRST
     };
     rows.push(bigquery_upsert_row(
+        replicated_table_schema,
         new_table_row,
         bigquery_sequence_number(event_position, upsert_ordinal),
     )?);
@@ -1892,34 +1924,11 @@ fn bigquery_primary_key_changed(
     old_table_row: &OldTableRow,
     new_table_row: &TableRow,
 ) -> EtlResult<bool> {
-    let column_count = replicated_table_schema.column_schemas().len();
-    if new_table_row.values().len() != column_count {
-        bail!(
-            ErrorKind::InvalidState,
-            "BigQuery full row image does not match the replicated schema",
-            format!(
-                "Expected {} values for table '{}', got {}",
-                column_count,
-                replicated_table_schema.name(),
-                new_table_row.values().len()
-            )
-        );
-    }
+    ensure_bigquery_full_row_matches_schema(replicated_table_schema, new_table_row)?;
 
     match old_table_row {
         OldTableRow::Full(row) => {
-            if row.values().len() != column_count {
-                bail!(
-                    ErrorKind::InvalidState,
-                    "BigQuery full row image does not match the replicated schema",
-                    format!(
-                        "Expected {} values for table '{}', got {}",
-                        column_count,
-                        replicated_table_schema.name(),
-                        row.values().len()
-                    )
-                );
-            }
+            ensure_bigquery_full_row_matches_schema(replicated_table_schema, row)?;
 
             Ok(replicated_table_schema
                 .column_schemas()
@@ -3460,18 +3469,13 @@ mod tests {
         assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
     }
 
-    /// Insert and copy rows whose width differs from the schema must fail
+    /// Complete rows whose width differs from the schema must fail
     /// before any request reaches BigQuery.
     ///
-    /// Update and delete rows check their width, but the insert and copy
-    /// paths tag cells by position without comparing against the schema. A
-    /// short row moves `_CHANGE_TYPE` and `_CHANGE_SEQUENCE_NUMBER` onto user
-    /// columns, so BigQuery either rejects the batch or, when the shifted
-    /// fields happen to fit, stores the CDC metadata as user data.
-    #[ignore = "known defect: BigQuery insert and copy rows are not checked against the schema \
-                width"]
+    /// A short row would move `_CHANGE_TYPE` and `_CHANGE_SEQUENCE_NUMBER`
+    /// onto user columns instead of the CDC fields.
     #[tokio::test]
-    async fn insert_and_copy_rows_with_wrong_width_fail_before_append() {
+    async fn rows_with_wrong_width_fail_before_append() {
         let (progress, mut requests) = mpsc::unbounded_channel();
         let release = Arc::new(Semaphore::new(0));
         // A closed gate fails authentication immediately, so every append ends
@@ -3497,12 +3501,32 @@ mod tests {
         requests.recv().await.unwrap();
         while requests.try_recv().is_ok() {}
 
-        let short_row = TableRow::new(vec![Cell::I32(1)]);
-        assert!(destination.write_events(vec![insert(short_row.clone())]).await.is_err());
-        assert!(requests.try_recv().is_err(), "a short insert row was sent to BigQuery");
+        for row in [
+            TableRow::new(vec![]),
+            TableRow::new(vec![Cell::I32(1)]),
+            TableRow::new(vec![Cell::I32(1), Cell::Null, Cell::Null]),
+        ] {
+            let error = destination.write_events(vec![insert(row.clone())]).await.unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::InvalidState);
+            assert!(requests.try_recv().is_err());
 
-        assert!(destination.write_table_rows(&schema, vec![short_row]).await.is_err());
-        assert!(requests.try_recv().is_err(), "a short copy row was sent to BigQuery");
+            let error = destination.write_table_rows(&schema, vec![row.clone()]).await.unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::InvalidState);
+            assert!(requests.try_recv().is_err());
+
+            let error = destination
+                .write_events(vec![Event::Update(etl::event::UpdateEvent {
+                    commit_lsn: PgLsn::from(1),
+                    tx_ordinal: 0,
+                    replicated_table_schema: schema.clone(),
+                    updated_table_row: UpdatedTableRow::Full(row),
+                    old_table_row: None,
+                })])
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::InvalidState);
+            assert!(requests.try_recv().is_err());
+        }
 
         destination.shutdown().await.unwrap();
     }
@@ -3661,8 +3685,12 @@ mod tests {
             let mut rows = model
                 .iter()
                 .map(|(id, value)| {
-                    bigquery_upsert_row(row(*id, value), BIGQUERY_COPY_SEQUENCE_NUMBER.to_owned())
-                        .unwrap()
+                    bigquery_upsert_row(
+                        &schema,
+                        row(*id, value),
+                        BIGQUERY_COPY_SEQUENCE_NUMBER.to_owned(),
+                    )
+                    .unwrap()
                 })
                 .collect::<Vec<_>>();
             let old_image = |id: i32, value: &Option<String>| {
@@ -3689,7 +3717,8 @@ mod tests {
                             let Some(id) = pick_key(&model, *key, false) else { continue };
                             model.insert(id, value.clone());
                             rows.push(
-                                bigquery_upsert_row(row(id, value), sequence_number).unwrap(),
+                                bigquery_upsert_row(&schema, row(id, value), sequence_number)
+                                    .unwrap(),
                             );
                         }
                         Operation::Update { key, new_key, value, key_image } => {
@@ -3866,8 +3895,10 @@ mod tests {
             let a = Some("a".to_owned());
             let b = Some("b".to_owned());
             let mut rows = vec![
-                bigquery_upsert_row(row(1, &a), BIGQUERY_COPY_SEQUENCE_NUMBER.to_owned()).unwrap(),
-                bigquery_upsert_row(row(2, &b), BIGQUERY_COPY_SEQUENCE_NUMBER.to_owned()).unwrap(),
+                bigquery_upsert_row(&schema, row(1, &a), BIGQUERY_COPY_SEQUENCE_NUMBER.to_owned())
+                    .unwrap(),
+                bigquery_upsert_row(&schema, row(2, &b), BIGQUERY_COPY_SEQUENCE_NUMBER.to_owned())
+                    .unwrap(),
             ];
             let key = |id| Some(OldTableRow::Key(TableRow::new(vec![Cell::I32(id)])));
             let position = |ordinal| EventPosition::new(PgLsn::from(u64::MAX), ordinal);
