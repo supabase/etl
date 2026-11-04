@@ -12,7 +12,7 @@ use etl::{
         event::EventCondition,
         memory_destination::MemoryDestination,
         notifying_store::NotifyingStore,
-        pipeline::{PipelineBuilder, test_slot_name},
+        pipeline::{PipelineBuilder, random_pipeline_id, test_slot_name},
         test_destination_wrapper::TestDestinationWrapper,
     },
 };
@@ -105,7 +105,7 @@ async fn assert_inheritance_copy_scope(
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
     let mut pipeline = PipelineBuilder::new(
         database.config.clone(),
-        rand::random::<u64>(),
+        random_pipeline_id(),
         "inheritance_test".to_owned(),
         store.clone(),
         destination.clone(),

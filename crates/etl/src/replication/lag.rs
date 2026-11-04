@@ -363,7 +363,7 @@ mod tests {
     /// Builds a lazy monitor without opening a database connection.
     fn test_monitor() -> ReplicationLagMonitor {
         ReplicationLagMonitor::new(
-            1.into(),
+            "1".into(),
             &PgConnectionConfig {
                 host: "127.0.0.1".into(),
                 hostaddr: None,
@@ -554,9 +554,10 @@ mod tests {
         let database = crate::test_utils::database::spawn_source_database().await;
         let client = database.client.as_ref().unwrap();
         let handle = etl_telemetry::metrics::init_metrics_handle().unwrap();
-        let pipeline_id = rand::random::<u64>();
+        let pipeline_id: crate::pipeline::PipelineId =
+            crate::test_utils::pipeline::random_pipeline_id().into();
         let monitor = ReplicationLagMonitor::new(
-            pipeline_id.into(),
+            pipeline_id.clone(),
             &database.config,
             Duration::from_secs(60),
         );
@@ -566,7 +567,7 @@ mod tests {
         for table_id in [TableId::new(1), TableId::new(2)] {
             let name =
                 String::try_from(etl_postgres::slots::EtlReplicationSlot::for_table_sync_worker(
-                    pipeline_id,
+                    &pipeline_id,
                     table_id,
                 ))
                 .unwrap();
@@ -594,7 +595,7 @@ mod tests {
         let cdc =
             monitor.register_cdc(WorkerType::TableSync { table_id: TableId::new(2) }, points[1]);
         let workers = monitor.snapshot();
-        let source = monitor.source_pool.sample_pipeline_lag(&pipeline_id.into()).await.unwrap();
+        let source = monitor.source_pool.sample_pipeline_lag(&pipeline_id).await.unwrap();
         let head = source.source_wal.decoding_lsn().unwrap();
         let read = |name: &str, path: &str| {
             handle.render().lines().find_map(|line| {

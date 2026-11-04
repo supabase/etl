@@ -529,7 +529,7 @@ mod iceberg {
 mod snowflake {
     use etl::{
         destination::PipelineDestination,
-        pipeline::{LegacyPipelineId, Pipeline, PipelineId},
+        pipeline::{Pipeline, PipelineId},
     };
     use etl_config::shared::{DestinationConfig, ReplicatorConfig};
     use etl_destinations::snowflake as snowflake_destination;
@@ -544,9 +544,7 @@ mod snowflake {
         replicator_config: ReplicatorConfig,
         store: ReplicatorStore,
     ) -> ReplicatorResult<Pipeline<ReplicatorStore, impl PipelineDestination>> {
-        let legacy_pipeline_id =
-            LegacyPipelineId::try_from(&PipelineId::from(&replicator_config.pipeline.id))
-                .map_err(ReplicatorError::config)?;
+        let pipeline_id = PipelineId::from(&replicator_config.pipeline.id);
 
         let DestinationConfig::Snowflake {
             account_id,
@@ -570,7 +568,7 @@ mod snowflake {
         let auth = std::sync::Arc::new(
             snowflake_destination::AuthManager::new(config).map_err(ReplicatorError::config)?,
         );
-        let client = snowflake_destination::Client::new(auth, legacy_pipeline_id);
+        let client = snowflake_destination::Client::new(auth, pipeline_id);
         let destination = snowflake_destination::Destination::new(client, store.clone());
 
         Ok(Pipeline::new(replicator_config.pipeline, store, destination))

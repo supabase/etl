@@ -1,3 +1,4 @@
+use etl::pipeline::validate_pipeline_id;
 use etl_config::{
     load_config,
     shared::{ReplicatorConfig, Validate},
@@ -9,6 +10,7 @@ use crate::error::{ReplicatorError, ReplicatorResult};
 pub(crate) fn init() -> ReplicatorResult<ReplicatorConfig> {
     let config = load_config::<ReplicatorConfig>().map_err(ReplicatorError::config)?;
     config.validate().map_err(ReplicatorError::config)?;
+    validate_pipeline_id(&config.pipeline.id).map_err(ReplicatorError::config)?;
 
     Ok(config)
 }

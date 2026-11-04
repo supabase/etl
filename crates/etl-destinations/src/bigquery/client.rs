@@ -1546,10 +1546,11 @@ impl BigQueryClient {
         self.client.storage().invalidate_all_connections().await;
     }
 
-    /// Creates an append request for a specific table with validated rows.
+    /// Creates an append request for a specific table from already encoded
+    /// rows.
     ///
-    /// Converts TableRow instances to BigQueryTableRow and creates a properly
-    /// configured [`BigQueryAppendRequest`] for efficient append retries.
+    /// Configures the stream and trace identifiers in a
+    /// [`BigQueryAppendRequest`] for efficient append retries.
     pub(super) fn create_append_request(
         &self,
         pipeline_id: PipelineId,
@@ -1558,17 +1559,17 @@ impl BigQueryClient {
         table_id: &BigQueryTableId,
         table_descriptor: TableDescriptor,
         validated_rows: Vec<BigQueryTableRow>,
-    ) -> EtlResult<BigQueryAppendRequest> {
+    ) -> BigQueryAppendRequest {
         let stream_name =
             StreamName::new_default(self.project_id.clone(), dataset_id.clone(), table_id.clone());
 
         let trace_id = create_append_trace_id(pipeline_id, stream_name.table(), request_index);
 
-        Ok(BigQueryAppendRequest {
+        BigQueryAppendRequest {
             request: AppendRequest::new(stream_name, table_descriptor, validated_rows, trace_id),
             dataset_id: dataset_id.clone(),
             table_id: table_id.clone(),
-        })
+        }
     }
 
     /// Executes a query and waits up to ten minutes for all result pages.
