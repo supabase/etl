@@ -84,8 +84,9 @@ fn render_default_expression(expression: &DefaultExpression, typ: &Type) -> Opti
         }
         DefaultExpression::NumericLiteral(expression) if matches!(typ, &Type::NUMERIC) => {
             // Bare integer literals are parsed as INT64 even for BIGNUMERIC
-            // columns. A typed literal also preserves decimal precision.
-            Some(format!("BIGNUMERIC {}", quote_string_literal(expression)))
+            // columns. Cast decimal text to preserve precision and let BigQuery
+            // round excess fractional digits instead of rejecting a literal.
+            Some(format!("cast({} as bignumeric)", quote_string_literal(expression)))
         }
         DefaultExpression::NumericLiteral(expression) => {
             if is_bigquery_numeric_default_type(typ) {
@@ -556,7 +557,7 @@ mod tests {
     }
 
     #[test]
-    fn default_expression_types_numeric_literals_as_bignumeric() {
+    fn default_expression_casts_numeric_text_to_bignumeric() {
         for expression in [
             "42",
             "9223372036854775808",
@@ -564,14 +565,17 @@ mod tests {
             "12345678901234567890123456789012345678",
             "0.12345678901234567890123456789012345678",
             "0.00000000000000000000000000000000000001",
+            "0.123456789012345678901234567890123456789",
+            "-0.123456789012345678901234567890123456789",
+            "0.000000000000000000000000000000000000001",
         ] {
             assert_eq!(
                 default_expression_sql(expression, &Type::NUMERIC, -1),
-                Some(format!("BIGNUMERIC '{expression}'"))
+                Some(format!("cast('{expression}' as bignumeric)"))
             );
             assert_eq!(
                 default_expression_sql(&format!("'{expression}'::numeric"), &Type::NUMERIC, -1),
-                Some(format!("BIGNUMERIC '{expression}'"))
+                Some(format!("cast('{expression}' as bignumeric)"))
             );
         }
     }

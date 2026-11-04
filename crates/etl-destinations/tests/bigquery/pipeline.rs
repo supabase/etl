@@ -1824,7 +1824,7 @@ async fn literal_defaults_preserve_unicode_and_numeric_values() {
                 },
                 TableModification::AlterColumn {
                     name: "amount",
-                    alteration: "set default 0.12345678901234567890123456789012345678",
+                    alteration: "set default 0.123456789012345678901234567890123456789",
                 },
                 TableModification::AddColumn {
                     name: "added_message",
@@ -1834,10 +1834,16 @@ async fn literal_defaults_preserve_unicode_and_numeric_values() {
         )
         .await
         .unwrap();
+    // Keep row values representable to isolate higher-scale default DDL from
+    // the Storage Write API's separate numeric value handling.
     for statement in [
-        format!("insert into {} default values", table_name.as_quoted_identifier()),
         format!(
-            "insert into {} (message_template) values (null)",
+            "insert into {} (amount) values (0.12345678901234567890123456789012345679)",
+            table_name.as_quoted_identifier()
+        ),
+        format!(
+            "insert into {} (message_template, amount) values (null, \
+             0.12345678901234567890123456789012345679)",
             table_name.as_quoted_identifier()
         ),
     ] {
@@ -1892,7 +1898,7 @@ async fn literal_defaults_preserve_unicode_and_numeric_values() {
                 3,
                 Some("Updated 🐘".to_owned()),
                 serde_json::json!({"message": "😀"}),
-                PgNumeric::from_str("0.12345678901234567890123456789012345678").unwrap(),
+                PgNumeric::from_str("0.12345678901234567890123456789012345679").unwrap(),
                 f64::from(0.1_f32),
                 Some("Added 👋".to_owned()),
             ),
@@ -1900,7 +1906,7 @@ async fn literal_defaults_preserve_unicode_and_numeric_values() {
                 4,
                 None,
                 serde_json::json!({"message": "😀"}),
-                PgNumeric::from_str("0.12345678901234567890123456789012345678").unwrap(),
+                PgNumeric::from_str("0.12345678901234567890123456789012345679").unwrap(),
                 f64::from(0.1_f32),
                 Some("Added 👋".to_owned()),
             ),
@@ -1946,7 +1952,7 @@ async fn literal_defaults_preserve_unicode_and_numeric_values() {
     );
     assert_eq!(
         defaults.get_string_by_name("amount").unwrap().as_deref(),
-        Some("0.12345678901234567890123456789012345678")
+        Some("0.12345678901234567890123456789012345679")
     );
     assert_eq!(defaults.get_f64_by_name("ratio").unwrap(), Some(f64::from(0.1_f32)));
     assert_eq!(defaults.get_string_by_name("added_message").unwrap().as_deref(), Some("Added 👋"));

@@ -226,8 +226,9 @@ ETL translates supported PostgreSQL literal defaults when it creates a table
 or applies a source default change. Text and JSON defaults preserve emoji and
 other supplementary Unicode characters through GoogleSQL's [eight-digit Unicode
 escapes](https://cloud.google.com/bigquery/docs/reference/standard-sql/lexical#escape_sequences).
-PostgreSQL `numeric` defaults use typed `BIGNUMERIC` literals, including integers
-beyond the `INT64` range. PostgreSQL `real` defaults retain the source's
+PostgreSQL `numeric` defaults cast decimal text to `BIGNUMERIC`, supporting
+integers beyond the `INT64` range and BigQuery's native rounding of excess
+fractional digits. PostgreSQL `real` defaults retain the source's
 single-precision rounding when rendered for BigQuery's `FLOAT64` columns.
 
 PostgreSQL evaluates source defaults before replication. Explicit source `NULL`
