@@ -2247,7 +2247,7 @@ mod tests {
             BigQueryClient::from_test_client(client),
             "test_dataset".to_owned(),
             None,
-            1.into(),
+            "1".into(),
             MemoryStore::new(),
         )
     }

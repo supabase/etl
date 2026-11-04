@@ -814,7 +814,7 @@ pub struct DuckLakeExternalMaintenanceConfig {
 
 impl DuckLakeExternalMaintenanceConfig {
     pub fn disabled() -> Self {
-        Self { mode: DuckLakeMaintenanceMode::Disabled, pipeline_id: 0.into() }
+        Self { mode: DuckLakeMaintenanceMode::Disabled, pipeline_id: "0".into() }
     }
 
     pub fn kubernetes(pipeline_id: impl Into<PipelineId>) -> Self {

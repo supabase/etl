@@ -15,14 +15,13 @@ use etl::{
         memory_destination::MemoryDestination,
         notify::DEFAULT_NOTIFY_TIMEOUT,
         notifying_store::NotifyingStore,
-        pipeline::{PipelineBuilder, create_pipeline},
+        pipeline::{PipelineBuilder, create_pipeline, random_pipeline_id},
         test_destination_wrapper::TestDestinationWrapper,
         test_schema::{TableSelection, insert_users_data, setup_test_database_schema},
     },
 };
 use etl_config::shared::BatchConfig;
 use etl_postgres::tokio::test_utils::connect_to_pg_database;
-use rand::random;
 use tokio::time::timeout;
 
 /// Extracts the integer key and value used by the pipeline fixtures.
@@ -60,7 +59,7 @@ async fn copy_converges_with_concurrent_writers() {
     }
     let mut pipeline = PipelineBuilder::new(
         database.config.clone(),
-        random::<u64>(),
+        random_pipeline_id(),
         "copy_pub".to_owned(),
         store.clone(),
         destination.clone(),
@@ -187,7 +186,7 @@ async fn copy_retries_queued_partition_ddl() {
     let retry_drop = destination.hold_next(FaultyOp::DropTableForCopy).await;
     let mut pipeline = PipelineBuilder::new(
         database.config.clone(),
-        random::<u64>(),
+        random_pipeline_id(),
         "copy_pub".to_owned(),
         store.clone(),
         destination.clone(),
@@ -264,10 +263,10 @@ async fn table_copy_shutdown_interrupts_stalled_write_and_restarts() {
         let store = NotifyingStore::new();
         let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
         let write_hold = destination.hold_next(FaultyOp::WriteTableRows).await;
-        let pipeline_id = random::<u64>();
+        let pipeline_id = random_pipeline_id();
         let mut pipeline = create_pipeline(
             &database.config,
-            pipeline_id,
+            pipeline_id.as_str(),
             schema.publication_name(),
             store.clone(),
             destination.clone(),
@@ -292,7 +291,7 @@ async fn table_copy_shutdown_interrupts_stalled_write_and_restarts() {
 
         let mut pipeline = create_pipeline(
             &database.config,
-            pipeline_id,
+            pipeline_id.as_str(),
             schema.publication_name(),
             store.clone(),
             destination.clone(),

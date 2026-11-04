@@ -4,6 +4,7 @@ mod config;
 mod core;
 mod encoding;
 mod error;
+mod identity;
 mod materialization;
 mod metrics;
 mod schema;

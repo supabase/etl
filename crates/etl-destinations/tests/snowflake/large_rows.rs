@@ -20,7 +20,7 @@ use etl::{
     destination::{DestinationWriteStatus, WriteEventsDurability},
     error::ErrorKind,
     event::{Event, EventType, InsertEvent},
-    pipeline::LegacyPipelineId,
+    pipeline::PipelineId,
     schema::{ColumnSchema, PgLsn, ReplicatedTableSchema, TableId, TableName, TableSchema, Type},
     store::{SchemaStore, TableStateType},
     test_utils::{
@@ -28,7 +28,7 @@ use etl::{
         destination::{write_events, write_table_rows},
         event::EventCondition,
         notifying_store::NotifyingStore,
-        pipeline::create_pipeline,
+        pipeline::{create_pipeline, random_pipeline_id},
         test_destination_wrapper::TestDestinationWrapper,
     },
 };
@@ -128,15 +128,12 @@ struct Harness {
 
 impl Harness {
     fn new(store: NotifyingStore) -> Self {
-        Self::with_legacy_pipeline_id(store, 1)
+        Self::with_pipeline_id(store, "1".into())
     }
 
     /// Constructs a harness with a distinct identity for a real source
     /// pipeline.
-    fn with_legacy_pipeline_id(
-        store: NotifyingStore,
-        legacy_pipeline_id: LegacyPipelineId,
-    ) -> Self {
+    fn with_pipeline_id(store: NotifyingStore, pipeline_id: PipelineId) -> Self {
         let config = load_test_config().clone_without_credentials();
         let auth = build_auth();
         let http = reqwest::Client::new();
@@ -154,7 +151,7 @@ impl Harness {
             Arc::clone(&stream),
             config.database().to_owned(),
             config.schema().to_owned(),
-            legacy_pipeline_id,
+            pipeline_id,
         );
         let destination = Destination::new(client, store.clone());
         Self {
@@ -435,14 +432,14 @@ async fn large_rows_survive_copy_insert_and_full_replica_identity_update() {
     .await
     .unwrap();
 
-    let legacy_pipeline_id = rand::random::<u64>();
-    let harness = Harness::with_legacy_pipeline_id(NotifyingStore::new(), legacy_pipeline_id);
+    let pipeline_id: PipelineId = random_pipeline_id().into();
+    let harness = Harness::with_pipeline_id(NotifyingStore::new(), pipeline_id.clone());
     let sf_table = snowflake_table_name(&name.schema, &name.name);
     with_table_cleanup(&harness.sql, &[&sf_table], || async {
         let destination = TestDestinationWrapper::wrap(harness.destination.clone());
         let mut pipeline = create_pipeline(
             &database.config,
-            legacy_pipeline_id,
+            pipeline_id,
             publication.into(),
             harness.store.clone(),
             destination.clone(),

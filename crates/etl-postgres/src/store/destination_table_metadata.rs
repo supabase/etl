@@ -65,7 +65,6 @@ pub struct StoredDestinationTableMetadataRow {
 pub async fn store_destination_table_metadata<'c, E>(
     executor: E,
     pipeline_id: &str,
-    legacy_pipeline_id: i64,
     table_id: TableId,
     destination_table_id: &str,
     snapshot_id: SnapshotId,
@@ -80,13 +79,11 @@ where
     sqlx::query(
         r#"
         insert into etl.destination_tables_metadata
-            (pipeline_id, table_id, destination_table_id, snapshot_id,
-             replication_mask, previous_snapshot_id, previous_replication_mask, schema_status,
-             pipeline_id_v2)
-        values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        on conflict (pipeline_id, table_id)
+            (pipeline_id_v2, table_id, destination_table_id, snapshot_id,
+             replication_mask, previous_snapshot_id, previous_replication_mask, schema_status)
+        values ($1, $2, $3, $4, $5, $6, $7, $8)
+        on conflict (pipeline_id_v2, table_id)
         do update set
-            pipeline_id_v2 = excluded.pipeline_id_v2,
             destination_table_id = excluded.destination_table_id,
             snapshot_id = excluded.snapshot_id,
             replication_mask = excluded.replication_mask,
@@ -96,7 +93,7 @@ where
             updated_at = now()
         "#,
     )
-    .bind(legacy_pipeline_id)
+    .bind(pipeline_id)
     .bind(SqlxTableId(table_id.into_inner()))
     .bind(destination_table_id)
     .bind(snapshot_id.to_string())
@@ -104,7 +101,6 @@ where
     .bind(previous_snapshot_id.map(|snapshot_id| snapshot_id.to_string()))
     .bind(previous_replication_mask)
     .bind(schema_status)
-    .bind(pipeline_id)
     .execute(executor)
     .await?;
 
@@ -116,7 +112,7 @@ where
 /// Returns a map from table_id to the complete metadata row.
 pub async fn load_destination_tables_metadata<'c, E>(
     executor: E,
-    legacy_pipeline_id: i64,
+    pipeline_id: &str,
 ) -> Result<HashMap<TableId, StoredDestinationTableMetadataRow>, sqlx::Error>
 where
     E: PgExecutor<'c>,
@@ -126,10 +122,10 @@ where
         select table_id, destination_table_id, snapshot_id,
                replication_mask, previous_snapshot_id, previous_replication_mask, schema_status
         from etl.destination_tables_metadata
-        where pipeline_id = $1
+        where pipeline_id_v2 = $1
         "#,
     )
-    .bind(legacy_pipeline_id)
+    .bind(pipeline_id)
     .fetch_all(executor)
     .await?;
 
@@ -162,7 +158,7 @@ where
 /// Gets destination table metadata for a single table.
 pub async fn get_destination_table_metadata<'c, E>(
     executor: E,
-    legacy_pipeline_id: i64,
+    pipeline_id: &str,
     table_id: TableId,
 ) -> Result<Option<StoredDestinationTableMetadataRow>, sqlx::Error>
 where
@@ -173,10 +169,10 @@ where
         select table_id, destination_table_id, snapshot_id,
                replication_mask, previous_snapshot_id, previous_replication_mask, schema_status
         from etl.destination_tables_metadata
-        where pipeline_id = $1 and table_id = $2
+        where pipeline_id_v2 = $1 and table_id = $2
         "#,
     )
-    .bind(legacy_pipeline_id)
+    .bind(pipeline_id)
     .bind(SqlxTableId(table_id.into_inner()))
     .fetch_optional(executor)
     .await?;
@@ -208,7 +204,7 @@ where
 /// Used during pipeline cleanup.
 pub async fn delete_destination_tables_metadata_for_all_tables<'c, E>(
     executor: E,
-    legacy_pipeline_id: i64,
+    pipeline_id: &str,
 ) -> Result<u64, sqlx::Error>
 where
     E: PgExecutor<'c>,
@@ -216,10 +212,10 @@ where
     let result = sqlx::query(
         r#"
         delete from etl.destination_tables_metadata
-        where pipeline_id = $1
+        where pipeline_id_v2 = $1
         "#,
     )
-    .bind(legacy_pipeline_id)
+    .bind(pipeline_id)
     .execute(executor)
     .await?;
 
@@ -229,7 +225,7 @@ where
 /// Deletes destination table metadata for a single table.
 pub async fn delete_destination_table_metadata<'c, E>(
     executor: E,
-    legacy_pipeline_id: i64,
+    pipeline_id: &str,
     table_id: TableId,
 ) -> Result<u64, sqlx::Error>
 where
@@ -238,10 +234,10 @@ where
     let result = sqlx::query(
         r#"
         delete from etl.destination_tables_metadata
-        where pipeline_id = $1 and table_id = $2
+        where pipeline_id_v2 = $1 and table_id = $2
         "#,
     )
-    .bind(legacy_pipeline_id)
+    .bind(pipeline_id)
     .bind(SqlxTableId(table_id.into_inner()))
     .execute(executor)
     .await?;

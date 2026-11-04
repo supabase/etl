@@ -7,9 +7,12 @@ use etl::{
     schema::TableId,
     store::TableStateType,
     test_utils::{
-        database::spawn_source_database, event::EventCondition,
-        memory_destination::MemoryDestination, notifying_store::NotifyingStore,
-        pipeline::PipelineBuilder, test_destination_wrapper::TestDestinationWrapper,
+        database::spawn_source_database,
+        event::EventCondition,
+        memory_destination::MemoryDestination,
+        notifying_store::NotifyingStore,
+        pipeline::{PipelineBuilder, random_pipeline_id},
+        test_destination_wrapper::TestDestinationWrapper,
     },
 };
 use etl_postgres::{below_version, version::POSTGRES_15};
@@ -101,7 +104,7 @@ async fn assert_inheritance_copy_scope(
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
     let mut pipeline = PipelineBuilder::new(
         database.config.clone(),
-        rand::random::<u64>(),
+        random_pipeline_id(),
         "inheritance_test".to_owned(),
         store.clone(),
         destination.clone(),

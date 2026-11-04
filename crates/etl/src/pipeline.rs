@@ -39,7 +39,8 @@ use crate::{
 
 mod identity;
 
-pub use identity::{LegacyPipelineId, PipelineId};
+pub use etl_postgres::slots::{PipelineIdError, validate_pipeline_id};
+pub use identity::PipelineId;
 
 /// Task ownership transferred together so a failed or cancelled wait drops
 /// every remaining pipeline-owned handle.
@@ -145,15 +146,20 @@ where
     /// store cache, creates the table synchronization worker pool, and starts
     /// the apply worker for processing replication stream events.
     ///
-    /// Invalid copy concurrency, an unsupported retry delay, a zero monitor
-    /// interval, invalid slot options, or a blank trust bundle with source TLS
-    /// enabled returns [`ErrorKind::ConfigError`] before any startup work.
+    /// An invalid pipeline ID, invalid copy concurrency, an unsupported retry
+    /// delay, a zero monitor interval, invalid slot options, or a blank trust
+    /// bundle with source TLS enabled returns [`ErrorKind::ConfigError`]
+    /// before any startup work.
     /// After this method succeeds, subsequent calls return
     /// [`ErrorKind::InvalidState`] without performing any startup work.
     pub async fn start(&mut self) -> EtlResult<()> {
         if !matches!(&self.state, PipelineState::NotStarted) {
             bail!(ErrorKind::InvalidState, "Pipeline has already been started");
         }
+
+        validate_pipeline_id(self.pipeline_id.as_str()).map_err(
+            |err| etl_error!(ErrorKind::ConfigError, "Invalid pipeline ID", source: err),
+        )?;
 
         validate_copy_concurrency(
             self.config.max_table_sync_workers,
@@ -534,7 +540,7 @@ mod tests {
         let store = NotifyingStore::new();
         let pipeline = PipelineBuilder::new(
             config,
-            1,
+            "1",
             "test".to_owned(),
             store.clone(),
             MemoryDestination::new(store),
