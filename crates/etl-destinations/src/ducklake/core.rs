@@ -568,6 +568,9 @@ pub struct DuckLakeDestination<S> {
     table_sorting: Arc<HashMap<DuckLakeTableName, DuckLakeSortBy>>,
     /// Explicit desired partition specifications, including clear operations.
     table_partitioning: Arc<HashMap<DuckLakeTableName, Vec<DuckLakePartitionColumn>>>,
+    /// Applied tables whose startup layout reconciliation must succeed before
+    /// their next write. This never authorizes physical schema repair.
+    pending_table_layouts: Arc<Mutex<HashSet<DuckLakeTableName>>>,
     table_creation_slots: Arc<Semaphore>,
     table_write_slots: Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
     /// Experimental initial-copy buffering policy.
@@ -2103,6 +2106,7 @@ where
             metadata_pg_pool: metadata_pg_pool.clone(),
             table_sorting,
             table_partitioning,
+            pending_table_layouts: Arc::default(),
             table_creation_slots,
             table_write_slots: Arc::default(),
             copy_buffer_config,
@@ -2877,7 +2881,8 @@ where
         }
         self.reconcile_missing_replicated_columns(&table_name, new_replicated_table_schema).await?;
         self.reconcile_table_sorting(&table_name, new_replicated_table_schema).await?;
-        self.reconcile_table_partitioning(&table_name, new_replicated_table_schema).await?;
+        self.reconcile_existing_table_partitioning(&table_name, new_replicated_table_schema)
+            .await?;
 
         let applied_metadata = updated_metadata.to_applied();
         self.store.store_destination_table_metadata(table_id, applied_metadata).await?;
@@ -3150,6 +3155,45 @@ where
         .await
     }
 
+    /// Preserves the active partition specification when source DDL makes a
+    /// saved rule stale. Validation finishes before any partition mutation, so
+    /// rejecting a missing column or incompatible transform leaves DuckLake's
+    /// column-ID-based specification intact. Catalog and DDL failures
+    /// propagate.
+    async fn reconcile_existing_table_partitioning(
+        &self,
+        table_name: &DuckLakeTableName,
+        table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        match self.reconcile_table_partitioning(table_name, table_schema).await {
+            Err(error) if error.kind() == ErrorKind::ConfigError => {
+                warn!(
+                    error = %error,
+                    table = %table_name,
+                    "ducklake partition rule no longer matches source schema, preserving active partition specification"
+                );
+                Ok(())
+            }
+            result => result,
+        }
+    }
+
+    /// Retries an applied table's deferred layout before acknowledging writes.
+    /// A failed attempt remains pending until a later attempt succeeds.
+    async fn retry_pending_table_layout(
+        &self,
+        table_name: &DuckLakeTableName,
+        table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        if !self.pending_table_layouts.lock().contains(table_name) {
+            return Ok(());
+        }
+        self.reconcile_table_sorting(table_name, table_schema).await?;
+        self.reconcile_existing_table_partitioning(table_name, table_schema).await?;
+        self.pending_table_layouts.lock().remove(table_name);
+        Ok(())
+    }
+
     /// Adds target replicated columns missing from the physical DuckLake table.
     async fn reconcile_missing_replicated_columns(
         &self,
@@ -3289,7 +3333,8 @@ where
     ///
     /// [`DestinationTableSchema::Applied`] is authoritative: startup trusts the
     /// recorded destination table and does not inspect or repair its physical
-    /// schema. Missing or externally modified tables fail on ordinary use.
+    /// schema. Explicit layout updates are attempted independently; failures
+    /// are retried on the affected table's next write without blocking startup.
     async fn prepare_tables_after_restart(&self) -> EtlResult<()> {
         let table_schemas = self.store.get_table_schemas().await?;
         let table_ids: HashSet<_> = table_schemas.iter().map(|schema| schema.id).collect();
@@ -3319,11 +3364,19 @@ where
             if self.table_sorting.contains_key(&table_name)
                 || self.table_partitioning.contains_key(&table_name)
             {
-                let schema = self.target_schema_for_recovery(table_id, &metadata, None).await?;
-                if self.table_sorting.contains_key(&table_name) {
-                    self.reconcile_table_sorting(&table_name, &schema).await?;
+                self.pending_table_layouts.lock().insert(table_name.clone());
+                let result = async {
+                    let schema = self.target_schema_for_recovery(table_id, &metadata, None).await?;
+                    self.retry_pending_table_layout(&table_name, &schema).await
                 }
-                self.reconcile_table_partitioning(&table_name, &schema).await?;
+                .await;
+                if let Err(error) = result {
+                    warn!(
+                        error = %error,
+                        table = %table_name,
+                        "ducklake startup layout reconciliation failed, deferring to table writes"
+                    );
+                }
             }
             self.applied_tables.lock().insert(table_name);
         }
@@ -3840,7 +3893,11 @@ where
         }
         self.reconcile_missing_replicated_columns(table_name, &target_schema).await?;
         self.reconcile_table_sorting(table_name, &target_schema).await?;
-        self.reconcile_table_partitioning(table_name, &target_schema).await?;
+        if matches!(metadata.table_schema(), DestinationTableSchema::Creating { .. }) {
+            self.reconcile_table_partitioning(table_name, &target_schema).await?;
+        } else {
+            self.reconcile_existing_table_partitioning(table_name, &target_schema).await?;
+        }
 
         let metadata = metadata.to_applied();
         self.store.store_destination_table_metadata(table_id, metadata.clone()).await?;
@@ -3852,8 +3909,8 @@ where
 
     /// Resolves the ETL-owned destination table and completes pending setup.
     ///
-    /// Applied metadata is authoritative and only repopulates process state;
-    /// it never causes physical table inspection or repair.
+    /// Applied metadata is authoritative for the physical schema. Deferred
+    /// layout updates are retried before use, without repairing that schema.
     async fn prepare_table_for_writes(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
@@ -3873,6 +3930,7 @@ where
                 replicated_table_schema,
             )?;
             if metadata.is_applied() {
+                self.retry_pending_table_layout(&table_name, replicated_table_schema).await?;
                 self.applied_tables.lock().insert(table_name.clone());
                 return Ok(table_name);
             }
@@ -3907,6 +3965,7 @@ where
                 replicated_table_schema,
             )?;
             if metadata.is_applied() {
+                self.retry_pending_table_layout(&table_name, replicated_table_schema).await?;
                 self.applied_tables.lock().insert(table_name.clone());
                 return Ok(table_name);
             }

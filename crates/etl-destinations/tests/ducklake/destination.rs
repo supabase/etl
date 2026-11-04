@@ -5778,7 +5778,7 @@ async fn partition_layout_rejects_unreplicated_and_incompatible_columns() {
             1,
             store.clone(),
         )
-        .table_partitioning(config)
+        .table_partitioning(config.clone())
         .build()
         .await
         .unwrap();
@@ -5792,6 +5792,19 @@ async fn partition_layout_rejects_unreplicated_and_incompatible_columns() {
         assert_eq!(error.kind(), ErrorKind::ConfigError);
         destination.shutdown().await.unwrap();
         drop(destination);
+        let pending = DuckLakeDestination::builder(
+            lake.catalog_url.clone(),
+            lake.data_url.clone(),
+            1,
+            store.clone(),
+        )
+        .table_partitioning(config)
+        .build()
+        .await
+        .unwrap();
+        assert_eq!(pending.startup().await.unwrap_err().kind(), ErrorKind::ConfigError);
+        pending.shutdown().await.unwrap();
+        drop(pending);
         let corrected =
             DuckLakeDestination::builder(lake.catalog_url.clone(), lake.data_url.clone(), 1, store)
                 .table_partitioning(DuckLakeTablePartitioningConfig::new(vec![
@@ -5868,4 +5881,290 @@ async fn partition_layout_applies_calendar_transforms_with_quoted_columns() {
     destination.shutdown().await.unwrap();
     let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
     assert_eq!(count_rows(&conn, &table_name), 1);
+}
+
+/// Stale rules preserve active partitions after renames and type changes,
+/// while native errors such as dropping a partition key still propagate.
+#[tokio::test(flavor = "multi_thread")]
+async fn partition_layout_handles_source_schema_changes() {
+    use etl::event::{InsertEvent, RelationEvent};
+
+    for (change, recover_pending) in [
+        ("rename", false),
+        ("rename", true),
+        ("drop", false),
+        ("drop", true),
+        ("retype", false),
+        ("retype", true),
+    ] {
+        let lake = create_test_lake("partition_layout_source_changes").await;
+        let old_schema = TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "events".to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("name".to_owned(), PgType::TIMESTAMP, -1, 2, true),
+            ],
+        );
+        let mut columns = vec![
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+        ];
+        if change != "drop" {
+            columns.push(ColumnSchema::new(
+                if change == "rename" { "label" } else { "name" }.to_owned(),
+                if change == "retype" { PgType::TEXT } else { PgType::TIMESTAMP },
+                -1,
+                2,
+                true,
+            ));
+        }
+        let new_schema = TableSchema::with_snapshot_id(
+            old_schema.id,
+            old_schema.name.clone(),
+            columns,
+            test_snapshot_id(100, 100),
+        );
+        let old_replicated = make_replicated_table_schema(&old_schema);
+        let new_replicated = make_replicated_table_schema(&new_schema);
+        let table_name = table_name_to_ducklake_table_name(&old_schema.name).unwrap();
+        let store = MemoryStore::new();
+        store.store_table_schema(old_schema.clone()).await.unwrap();
+        store.store_table_schema(new_schema.clone()).await.unwrap();
+        let config = DuckLakeTablePartitioningConfig::new(vec![DuckLakeTablePartitionConfig::new(
+            "public".to_owned(),
+            "events".to_owned(),
+            vec![DuckLakePartitionColumn::new(
+                "name".to_owned(),
+                DuckLakePartitionTransform::Year {},
+            )],
+        )]);
+        let build = || {
+            DuckLakeDestination::builder(
+                lake.catalog_url.clone(),
+                lake.data_url.clone(),
+                1,
+                store.clone(),
+            )
+            .copy_buffer(DuckLakeCopyBufferConfig { enabled: false, ..Default::default() })
+            .table_partitioning(config.clone())
+            .build()
+        };
+        let timestamp =
+            NaiveDate::from_ymd_opt(2026, 11, 4).unwrap().and_hms_opt(15, 30, 0).unwrap();
+        let mut destination = build().await.unwrap();
+        destination
+            .write_table_rows_for_tests(
+                &old_replicated,
+                vec![TableRow::new(vec![
+                    Cell::I32(1),
+                    Cell::Timestamp(etl::data::Timestamp::Value(timestamp)),
+                ])],
+            )
+            .await
+            .unwrap();
+
+        let result = if recover_pending {
+            let metadata =
+                store.get_destination_table_metadata(old_schema.id).await.unwrap().unwrap();
+            store
+                .store_destination_table_metadata(
+                    old_schema.id,
+                    metadata
+                        .with_schema_change(
+                            new_schema.snapshot_id,
+                            new_replicated.replication_mask().clone(),
+                        )
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            destination.shutdown().await.unwrap();
+            drop(destination);
+            destination = build().await.unwrap();
+            destination.startup().await
+        } else {
+            destination
+                .write_events(vec![Event::Relation(RelationEvent {
+                    replicated_table_schema: new_replicated.clone(),
+                })])
+                .await
+        };
+        if change == "drop" {
+            // DuckLake itself rejects dropping an active partition key. The
+            // stale-rule fallback must not swallow this physical DDL error.
+            assert_eq!(result.unwrap_err().kind(), ErrorKind::DestinationQueryFailed);
+            let metadata =
+                store.get_destination_table_metadata(old_schema.id).await.unwrap().unwrap();
+            assert!(metadata.is_pending());
+            destination.shutdown().await.unwrap();
+            continue;
+        }
+        result.unwrap();
+        let metadata = store.get_destination_table_metadata(old_schema.id).await.unwrap().unwrap();
+        assert!(metadata.is_applied());
+        assert_eq!(metadata.snapshot_id(), new_schema.snapshot_id);
+        destination.shutdown().await.unwrap();
+        drop(destination);
+
+        let restarted = build().await.unwrap();
+        restarted.startup().await.unwrap();
+        let mut row = vec![Cell::I32(2)];
+        match change {
+            "rename" => row.push(Cell::Timestamp(etl::data::Timestamp::Value(timestamp))),
+            "retype" => row.push(Cell::String("2026-11-04 15:30:00".to_owned())),
+            _ => {}
+        }
+        restarted
+            .write_events(vec![Event::Insert(InsertEvent {
+                commit_lsn: PgLsn::from(101_u64),
+                tx_ordinal: 0,
+                replicated_table_schema: new_replicated,
+                table_row: TableRow::new(row),
+            })])
+            .await
+            .unwrap();
+        restarted.shutdown().await.unwrap();
+        drop(restarted);
+        let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
+        assert_eq!(count_rows(&conn, &table_name), 2);
+        assert_eq!(
+            table_column_names(&conn, &table_name),
+            match change {
+                "rename" => vec!["id", "label"],
+                _ => vec!["id", "name"],
+            }
+        );
+        let partition_columns: Vec<String> = conn
+            .prepare(
+                "select c.column_name from __ducklake_metadata_lake.ducklake_partition_column p \
+                 join __ducklake_metadata_lake.ducklake_partition_info i using (partition_id, \
+                 table_id) join __ducklake_metadata_lake.ducklake_column c using (table_id, \
+                 column_id) where i.end_snapshot is null and c.end_snapshot is null",
+            )
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            partition_columns,
+            match change {
+                "rename" => vec!["label"],
+                _ => vec!["name"],
+            }
+        );
+    }
+}
+
+/// Failed startup layouts block only their own table and are retried before
+/// writes can be acknowledged after the physical schema is repaired.
+#[tokio::test(flavor = "multi_thread")]
+async fn startup_layout_failure_is_isolated_and_retried() {
+    for sorting in [false, true] {
+        let lake = create_test_lake("startup_layout_failure_isolated").await;
+        let healthy = make_schema(1, "public", "healthy");
+        let broken = make_schema(2, "public", "broken");
+        let healthy_replicated = make_replicated_table_schema(&healthy);
+        let broken_replicated = make_replicated_table_schema(&broken);
+        let store = MemoryStore::new();
+        store.store_table_schema(healthy).await.unwrap();
+        store.store_table_schema(broken).await.unwrap();
+        let initial = new_test_destination(&lake.catalog_url, &lake.data_url, store.clone()).await;
+        for schema in [&healthy_replicated, &broken_replicated] {
+            initial
+                .write_table_rows_for_tests(
+                    schema,
+                    vec![TableRow::new(vec![Cell::I32(1), Cell::String("before".to_owned())])],
+                )
+                .await
+                .unwrap();
+        }
+        initial.shutdown().await.unwrap();
+        drop(initial);
+        {
+            let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
+            conn.execute_batch("alter table lake.public.broken rename name to other").unwrap();
+        }
+
+        let mut builder =
+            DuckLakeDestination::builder(lake.catalog_url.clone(), lake.data_url.clone(), 1, store)
+                .copy_buffer(DuckLakeCopyBufferConfig { enabled: false, ..Default::default() });
+        if sorting {
+            builder = builder
+                .external_maintenance(DuckLakeExternalMaintenanceConfig::postgres("layout-test"))
+                .table_sorting(DuckLakeTableSortingConfig {
+                    tables: vec![DuckLakeTableSortConfig {
+                        schema: "public".to_owned(),
+                        table: "broken".to_owned(),
+                        sort_by: DuckLakeSortBy::Columns {
+                            columns: vec![DuckLakeSortColumn {
+                                name: "name".to_owned(),
+                                direction: DuckLakeSortDirection::Asc,
+                                nulls: None,
+                            }],
+                        },
+                    }],
+                });
+        } else {
+            builder = builder.table_partitioning(DuckLakeTablePartitioningConfig::new(vec![
+                DuckLakeTablePartitionConfig::new(
+                    "public".to_owned(),
+                    "broken".to_owned(),
+                    vec![DuckLakePartitionColumn::new(
+                        "name".to_owned(),
+                        DuckLakePartitionTransform::Identity {},
+                    )],
+                ),
+            ]));
+        }
+        let destination = builder.build().await.unwrap();
+        destination.startup().await.unwrap();
+        destination
+            .write_table_rows_for_tests(
+                &healthy_replicated,
+                vec![TableRow::new(vec![Cell::I32(2), Cell::String("after".to_owned())])],
+            )
+            .await
+            .unwrap();
+        let error = destination
+            .write_table_rows_for_tests(
+                &broken_replicated,
+                vec![TableRow::new(vec![Cell::I32(2), Cell::String("after".to_owned())])],
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::DestinationQueryFailed);
+        {
+            let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
+            conn.execute_batch("alter table lake.public.broken rename other to name").unwrap();
+        }
+        destination
+            .write_table_rows_for_tests(
+                &broken_replicated,
+                vec![TableRow::new(vec![Cell::I32(2), Cell::String("after".to_owned())])],
+            )
+            .await
+            .unwrap();
+        destination.shutdown().await.unwrap();
+        drop(destination);
+        let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
+        for table in ["healthy", "broken"] {
+            assert_eq!(
+                count_rows(&conn, &DuckLakeTableName::new("public".to_owned(), table.to_owned())),
+                2
+            );
+        }
+        let info_table = if sorting { "ducklake_sort_info" } else { "ducklake_partition_info" };
+        let active_layouts: i64 = conn
+            .query_row(
+                &format!(
+                    "select count(*) from __ducklake_metadata_lake.{info_table} where \
+                     end_snapshot is null"
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(active_layouts, 1);
+    }
 }
