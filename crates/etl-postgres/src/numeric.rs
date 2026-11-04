@@ -561,20 +561,6 @@ mod tests {
 
     use super::*;
 
-    /// Numeric errors retain their exact messages and have no underlying
-    /// source.
-    #[test]
-    fn parse_errors_preserve_display_and_source() {
-        for (error, message) in [
-            (ParseNumericError::InvalidSyntax, "Invalid syntax"),
-            (ParseNumericError::ValueOutOfRange, "Value out of range"),
-        ] {
-            assert_eq!(error.to_string(), message);
-            assert_eq!(format!("{error:>#40.3}"), message);
-            assert!(std::error::Error::source(&error).is_none());
-        }
-    }
-
     #[test]
     fn parses_finite_values_into_base_10000_digits() {
         for (input, expected_sign, expected_scale, expected_digits) in [

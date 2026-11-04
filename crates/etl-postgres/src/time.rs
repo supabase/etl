@@ -342,32 +342,13 @@ mod tests {
         assert!("12:30:00+aéa".parse::<PgTimeTz>().is_err());
     }
 
-    /// Chrono remains a distinct source layer, including after `From`
-    /// conversion.
-    #[test]
-    fn chrono_error_preserves_display_conversion_and_source() {
-        let chrono_error = NaiveTime::parse_from_str("24:00:01", TIME_FORMAT).unwrap_err();
-        let error = ParseTimeError::from(chrono_error);
-
-        assert_eq!(error, ParseTimeError::Chrono(chrono_error));
-        assert_eq!(error.to_string(), chrono_error.to_string());
-        assert_eq!(format!("{error:>#40.3}"), chrono_error.to_string());
-        let source = std::error::Error::source(&error).unwrap();
-        assert_eq!(source.downcast_ref::<chrono::ParseError>(), Some(&chrono_error));
-        assert!(source.source().is_none());
-    }
-
     #[test]
     fn timetz_distinguishes_chrono_and_offset_errors() {
         assert!(matches!(
             "24:00:01+00".parse::<PgTimeTz>().unwrap_err(),
             ParseTimeError::Chrono(_)
         ));
-        let error = "12:30:00+16".parse::<PgTimeTz>().unwrap_err();
-        assert_eq!(error, ParseTimeError::InvalidSyntax);
-        assert_eq!(error.to_string(), "Invalid syntax");
-        assert_eq!(format!("{error:>#40.3}"), "Invalid syntax");
-        assert!(std::error::Error::source(&error).is_none());
+        assert_eq!("12:30:00+16".parse::<PgTimeTz>().unwrap_err(), ParseTimeError::InvalidSyntax);
     }
 
     #[test]

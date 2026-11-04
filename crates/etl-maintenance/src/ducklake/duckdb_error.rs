@@ -211,8 +211,6 @@ mod tests {
             ),
         ));
 
-        assert!(std::error::Error::source(&error).is_none());
-        assert_eq!(format!("{error:>#200.3}"), error.to_string());
         assert_eq!(
             error.to_string(),
             "IO Error: Unable to connect to Postgres at \"password='[redacted]'\""

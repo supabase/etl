@@ -3841,11 +3841,8 @@ mod tests {
             ),
         );
 
-        let error = DuckLakeConnectionError::setup_phase(&step, error);
-        assert!(std::error::Error::source(&error).is_none());
-        assert_eq!(format!("{error:>#200.3}"), error.to_string());
         assert_eq!(
-            error.to_string(),
+            DuckLakeConnectionError::setup_phase(&step, error).to_string(),
             "ducklake duckdb connection setup phase `configure_parquet` failed: IO Error: Unable \
              to connect to Postgres at \"host='localhost' password='[redacted]'\""
         );

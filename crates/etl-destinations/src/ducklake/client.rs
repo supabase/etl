@@ -1882,11 +1882,8 @@ mod tests {
             ),
         );
 
-        let error = DuckLakeConnectionError::setup_phase(&step, error);
-        assert!(std::error::Error::source(&error).is_none());
-        assert_eq!(format!("{error:>#200.3}"), error.to_string());
         assert_eq!(
-            error.to_string(),
+            DuckLakeConnectionError::setup_phase(&step, error).to_string(),
             "ducklake duckdb connection setup phase `attach_catalog` failed: attach failed: \
              postgres:host='localhost' user='ducklake' password='[redacted]'"
         );

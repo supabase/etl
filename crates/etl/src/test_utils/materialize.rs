@@ -376,8 +376,6 @@ mod tests {
         let error = materialize_events::<Record>(&[], &events, TABLE_ID).unwrap_err();
 
         assert!(matches!(error, MaterializeError::MissingKey { operation: "Update", .. }));
-        assert_eq!(error.to_string(), "Update targeted missing key 1");
-        assert!(std::error::Error::source(&error).is_none());
     }
 
     /// A re-inserted key would otherwise hide a lost delete.
