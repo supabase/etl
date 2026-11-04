@@ -94,15 +94,13 @@ struct SnowflakeArgs {
     max_table_sync_workers: u16,
 }
 
-// Entry point - handles error reporting and process exit
+/// Entry point — handles error reporting and process exit.
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() {
     if let Err(err) = main_impl().await {
         error!(error = %err, "fatal error");
         std::process::exit(1);
     }
-
-    Ok(())
 }
 
 // Initialize structured logging with configurable log levels via RUST_LOG
@@ -158,12 +156,12 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
     // Create a persistent store for tracking table states and schemas. This
     // runs the Postgres store migrations; Pipeline::start() runs the source
     // migrations required by replication.
-    let legacy_pipeline_id = 1;
-    let store = PostgresStore::new(legacy_pipeline_id, pg_connection_config.clone()).await?;
+    let pipeline_id = "03dg2o5teb2eucxr9ggh3uie6";
+    let store = PostgresStore::new(pipeline_id, pg_connection_config.clone()).await?;
 
     // Create pipeline configuration with batching and retry settings
     let pipeline_config = PipelineConfig {
-        id: legacy_pipeline_id.into(), // Using a simple ID for the example
+        id: pipeline_id.into(), // Using a simple ID for the example
         publication_name: args.publication,
         replication_slot: Default::default(),
         pg_connection: pg_connection_config,
@@ -197,7 +195,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
 
     // Initialize Snowflake destination -- tables will be automatically created
     // to match the Postgres schema
-    let client = Client::new(Arc::clone(&auth), legacy_pipeline_id);
+    let client = Client::new(Arc::clone(&auth), pipeline_id.into());
     let destination = Destination::new(client, store.clone());
 
     // Create the pipeline instance with all components

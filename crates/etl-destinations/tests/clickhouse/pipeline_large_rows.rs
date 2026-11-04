@@ -15,14 +15,13 @@ use etl::{
         database::{spawn_source_database, test_table_name},
         event::EventCondition,
         notifying_store::NotifyingStore,
-        pipeline::create_pipeline,
+        pipeline::{create_pipeline, random_pipeline_id},
         test_destination_wrapper::TestDestinationWrapper,
     },
 };
 use etl_config::shared::ClickHouseEngine;
 use etl_destinations::clickhouse::test_utils::setup_clickhouse_database;
 use etl_telemetry::tracing::init_test_tracing;
-use rand::random;
 
 use crate::support::{clickhouse::current_state_query, crypto::install_crypto_provider};
 
@@ -134,7 +133,7 @@ async fn large_row_inner(engine: ClickHouseEngine, field_chars: usize) {
     // --- WHEN: pipeline copies row 1 and row 2 streams as an INSERT event ---
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let destination = TestDestinationWrapper::wrap(
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );
@@ -143,7 +142,7 @@ async fn large_row_inner(engine: ClickHouseEngine, field_chars: usize) {
 
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         PUBLICATION_NAME.to_owned(),
         store,
         destination.clone(),

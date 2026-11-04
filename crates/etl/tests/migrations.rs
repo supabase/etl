@@ -5,7 +5,6 @@ use etl::{
         BatchConfig, IntoConnectOptions, InvalidatedSlotBehavior, MemoryBackpressureConfig,
         PgConnectionConfig, PgConnectionOptions, PipelineConfig, TableSyncCopyConfig,
     },
-    error::ErrorKind,
     pipeline::Pipeline,
     postgres::migrations::{ETL_SCHEMA_LOCK_ID, run_source_migrations},
     store::{MemoryStore, PostgresStore, StateStore, WorkerType},
@@ -160,7 +159,7 @@ fn assert_migration_set_is_reversible(migration_set: &str, migrator: Migrator) {
 
 fn pipeline_config(pg_connection: PgConnectionConfig) -> PipelineConfig {
     PipelineConfig {
-        id: 1.into(),
+        id: "1".into(),
         publication_name: "missing_publication".to_owned(),
         pg_connection,
         store_pg_connection: None,
@@ -238,62 +237,15 @@ async fn postgres_store_startup_runs_only_postgres_store_migrations() {
     assert!(!source_helper_exists(&database).await);
     assert!(!postgres_store_table_exists(&database).await);
 
-    let _store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    let _store = PostgresStore::new("1", database.config.clone()).await.unwrap();
 
     assert!(!source_helper_exists(&database).await);
     assert!(postgres_store_table_exists(&database).await);
     assert_eq!(applied_migration_versions(&database).await, postgres_store_migration_versions());
 }
 
-/// Invalid numeric identities fail before store initialization migrates the
-/// database.
-#[tokio::test(flavor = "multi_thread")]
-async fn postgres_store_rejects_pipeline_ids_outside_bigint_range_before_migrations() {
-    let database = spawn_unmigrated_database().await;
-    let max_pipeline_id = u64::try_from(i64::MAX).unwrap();
-
-    for pipeline_id in [max_pipeline_id + 1, u64::MAX] {
-        let error = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::ConfigError);
-        assert_eq!(
-            error.description(),
-            Some("Postgres store pipeline identity exceeds the bigint range")
-        );
-    }
-
-    assert!(!postgres_store_table_exists(&database).await);
-}
-
-/// Numeric boundary identities retain matching keys across checkpoint writes
-/// and reloads.
-#[tokio::test(flavor = "multi_thread")]
-async fn postgres_store_accepts_pipeline_ids_at_bigint_boundaries() {
-    let database = spawn_unmigrated_database().await;
-
-    for pipeline_id in [0, u64::try_from(i64::MAX).unwrap()] {
-        let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
-        store.upsert_replication_checkpoint(WorkerType::Apply, PgLsn::from(100)).await.unwrap();
-        drop(store);
-
-        let reloaded = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
-        assert_eq!(
-            reloaded.get_replication_checkpoint(WorkerType::Apply).await.unwrap(),
-            Some(PgLsn::from(100))
-        );
-    }
-
-    assert!(
-        query_bool(
-            &database,
-            "select count(*) = 2 and bool_and(pipeline_id_v2 = pipeline_id::text) from \
-             etl.replication_progress"
-        )
-        .await
-    );
-}
-
-/// Backfilled keys preserve shared checkpoints and require dual-writing
-/// clients.
+/// Backfilled string keys preserve shared checkpoints and reject legacy-only
+/// writes.
 #[tokio::test(flavor = "multi_thread")]
 async fn pipeline_id_v2_preserves_shared_state() {
     let database = spawn_unmigrated_database().await;
@@ -310,15 +262,15 @@ async fn pipeline_id_v2_preserves_shared_state() {
     .unwrap();
 
     let (first, second) = tokio::join!(
-        PostgresStore::new(150, database.config.clone()),
-        PostgresStore::new(151, database.config.clone()),
+        PostgresStore::new("150", database.config.clone()),
+        PostgresStore::new("151", database.config.clone()),
     );
     let first = first.unwrap();
     let second = second.unwrap();
     assert!(
         query_bool(
             &database,
-            "select count(*) = 2 and bool_and(pipeline_id_v2 = pipeline_id::text) from \
+            "select array_agg(pipeline_id_v2 order by pipeline_id_v2) = array['150', '151'] from \
              etl.replication_progress"
         )
         .await
@@ -347,7 +299,7 @@ async fn pipeline_id_v2_preserves_shared_state() {
     assert!(
         query_bool(
             &database,
-            "select count(*) = 2 and bool_and(pipeline_id_v2 = pipeline_id::text) from \
+            "select array_agg(pipeline_id_v2 order by pipeline_id_v2) = array['150', '151'] from \
              etl.replication_progress"
         )
         .await
@@ -366,7 +318,8 @@ async fn pipeline_id_v2_preserves_shared_state() {
     assert!(
         query_bool(
             &database,
-            "select bool_and(pipeline_id_v2 = pipeline_id::text) from etl.replication_progress"
+            "select array_agg(pipeline_id_v2 order by pipeline_id_v2) = array['150', '151'] from \
+             etl.replication_progress"
         )
         .await
     );
@@ -599,8 +552,8 @@ async fn composite_snapshot_migration_preserves_legacy_message_lsn_ordering() {
 
     let schema_snapshot_id: String = client
         .query_one(
-            "select snapshot_id from etl.table_schemas where pipeline_id = $1 and table_id = $2",
-            &[&1_i64, &table_id],
+            "select snapshot_id from etl.table_schemas where pipeline_id_v2 = $1 and table_id = $2",
+            &[&"1", &table_id],
         )
         .await
         .unwrap()
@@ -608,8 +561,8 @@ async fn composite_snapshot_migration_preserves_legacy_message_lsn_ordering() {
     assert_eq!(schema_snapshot_id, "2:2");
     let initial_schema_snapshot_id: String = client
         .query_one(
-            "select snapshot_id from etl.table_schemas where pipeline_id = $1 and table_id = $2",
-            &[&1_i64, &initial_table_id],
+            "select snapshot_id from etl.table_schemas where pipeline_id_v2 = $1 and table_id = $2",
+            &[&"1", &initial_table_id],
         )
         .await
         .unwrap()
@@ -617,8 +570,8 @@ async fn composite_snapshot_migration_preserves_legacy_message_lsn_ordering() {
     assert_eq!(initial_schema_snapshot_id, "0:0");
     let max_schema_snapshot_id: String = client
         .query_one(
-            "select snapshot_id from etl.table_schemas where pipeline_id = $1 and table_id = $2",
-            &[&1_i64, &max_table_id],
+            "select snapshot_id from etl.table_schemas where pipeline_id_v2 = $1 and table_id = $2",
+            &[&"1", &max_table_id],
         )
         .await
         .unwrap()
@@ -626,8 +579,8 @@ async fn composite_snapshot_migration_preserves_legacy_message_lsn_ordering() {
     assert_eq!(max_schema_snapshot_id, "18446744073709551615:18446744073709551615");
     let above_i64_schema_snapshot_id: String = client
         .query_one(
-            "select snapshot_id from etl.table_schemas where pipeline_id = $1 and table_id = $2",
-            &[&1_i64, &above_i64_table_id],
+            "select snapshot_id from etl.table_schemas where pipeline_id_v2 = $1 and table_id = $2",
+            &[&"1", &above_i64_table_id],
         )
         .await
         .unwrap()
@@ -638,8 +591,8 @@ async fn composite_snapshot_migration_preserves_legacy_message_lsn_ordering() {
         .query_one(
             "select snapshot_id, previous_snapshot_id
             from etl.destination_tables_metadata
-            where pipeline_id = $1 and table_id = $2",
-            &[&1_i64, &table_id],
+            where pipeline_id_v2 = $1 and table_id = $2",
+            &[&"1", &table_id],
         )
         .await
         .unwrap();
@@ -650,8 +603,8 @@ async fn composite_snapshot_migration_preserves_legacy_message_lsn_ordering() {
         .query_one(
             "select snapshot_id, previous_snapshot_id
             from etl.destination_tables_metadata
-            where pipeline_id = $1 and table_id = $2",
-            &[&1_i64, &initial_table_id],
+            where pipeline_id_v2 = $1 and table_id = $2",
+            &[&"1", &initial_table_id],
         )
         .await
         .unwrap();
@@ -662,8 +615,8 @@ async fn composite_snapshot_migration_preserves_legacy_message_lsn_ordering() {
         .query_one(
             "select snapshot_id, previous_snapshot_id
             from etl.destination_tables_metadata
-            where pipeline_id = $1 and table_id = $2",
-            &[&1_i64, &max_table_id],
+            where pipeline_id_v2 = $1 and table_id = $2",
+            &[&"1", &max_table_id],
         )
         .await
         .unwrap();
@@ -681,15 +634,14 @@ async fn composite_snapshot_migration_preserves_legacy_message_lsn_ordering() {
     let new_initial_snapshot_id: String = client
         .query_one(
             "insert into etl.table_schemas (
-                pipeline_id,
+                pipeline_id_v2,
                 table_id,
                 schema_name,
-                table_name,
-                pipeline_id_v2
+                table_name
             )
-            values ($1, $2, 'public', 'new_initial_items', $1::bigint::text)
+            values ($1, $2, 'public', 'new_initial_items')
             returning snapshot_id",
-            &[&1_i64, &new_initial_table_id],
+            &[&"1", &new_initial_table_id],
         )
         .await
         .unwrap()
@@ -700,11 +652,11 @@ async fn composite_snapshot_migration_preserves_legacy_message_lsn_ordering() {
         .query(
             "select snapshot_id
             from etl.table_schemas
-            where pipeline_id = $1 and table_id in ($2, $3, $4, $5)
+            where pipeline_id_v2 = $1 and table_id in ($2, $3, $4, $5)
             order by
                 pg_catalog.split_part(snapshot_id, ':', 1)::pg_catalog.numeric,
                 pg_catalog.split_part(snapshot_id, ':', 2)::pg_catalog.numeric",
-            &[&1_i64, &initial_table_id, &table_id, &above_i64_table_id, &max_table_id],
+            &[&"1", &initial_table_id, &table_id, &above_i64_table_id, &max_table_id],
         )
         .await
         .unwrap()
@@ -854,7 +806,7 @@ async fn source_then_postgres_store_migrations_can_share_sqlx_history() {
     run_source_migrations(&database.config).await.unwrap();
     assert_eq!(applied_migration_versions(&database).await, source_migration_versions());
 
-    let _store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    let _store = PostgresStore::new("1", database.config.clone()).await.unwrap();
     run_source_migrations(&database.config).await.unwrap();
 
     assert!(source_helper_exists(&database).await);
@@ -868,9 +820,9 @@ async fn postgres_store_then_source_migrations_can_share_sqlx_history() {
 
     let database = spawn_unmigrated_database().await;
 
-    let _store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    let _store = PostgresStore::new("1", database.config.clone()).await.unwrap();
     run_source_migrations(&database.config).await.unwrap();
-    let _store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    let _store = PostgresStore::new("1", database.config.clone()).await.unwrap();
 
     assert!(source_helper_exists(&database).await);
     assert!(postgres_store_table_exists(&database).await);
@@ -990,8 +942,8 @@ async fn postgres_store_schema_storage_migration_round_trips_old_state() {
         .query_one(
             "select destination_table_id, encode(replication_mask, 'hex')
             from etl.destination_tables_metadata
-            where pipeline_id = $1 and table_id = $2",
-            &[&7_i64, &table_id],
+            where pipeline_id_v2 = $1 and table_id = $2",
+            &[&"7", &table_id],
         )
         .await
         .unwrap();
@@ -1053,7 +1005,7 @@ async fn postgres_store_schema_storage_down_migration_keeps_destination_snapshot
     init_test_tracing();
 
     let database = spawn_unmigrated_database().await;
-    let _store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    let _store = PostgresStore::new("1", database.config.clone()).await.unwrap();
 
     let client = database.client.as_ref().expect("database client should be initialized");
     client
@@ -1076,16 +1028,15 @@ async fn postgres_store_schema_storage_down_migration_keeps_destination_snapshot
     let first_schema_id: i64 = client
         .query_one(
             "insert into etl.table_schemas (
-                pipeline_id,
+                pipeline_id_v2,
                 table_id,
                 schema_name,
                 table_name,
-                snapshot_id,
-                pipeline_id_v2
+                snapshot_id
             )
-            values ($1, $2, $3, $4, '0:1', $1::bigint::text)
+            values ($1, $2, $3, $4, '0:1')
             returning id",
-            &[&11_i64, &table_id, &"public", &"migration_snapshot_items"],
+            &[&"11", &table_id, &"public", &"migration_snapshot_items"],
         )
         .await
         .unwrap()
@@ -1093,16 +1044,15 @@ async fn postgres_store_schema_storage_down_migration_keeps_destination_snapshot
     let second_schema_id: i64 = client
         .query_one(
             "insert into etl.table_schemas (
-                pipeline_id,
+                pipeline_id_v2,
                 table_id,
                 schema_name,
                 table_name,
-                snapshot_id,
-                pipeline_id_v2
+                snapshot_id
             )
-            values ($1, $2, $3, $4, '0:2', $1::bigint::text)
+            values ($1, $2, $3, $4, '0:2')
             returning id",
-            &[&11_i64, &table_id, &"public", &"migration_snapshot_items"],
+            &[&"11", &table_id, &"public", &"migration_snapshot_items"],
         )
         .await
         .unwrap()
@@ -1143,14 +1093,13 @@ async fn postgres_store_schema_storage_down_migration_keeps_destination_snapshot
     client
         .execute(
             "insert into etl.destination_tables_metadata (
-                pipeline_id,
+                pipeline_id_v2,
                 table_id,
                 destination_table_id,
                 snapshot_id,
                 previous_snapshot_id,
                 schema_status,
-                replication_mask,
-                pipeline_id_v2
+                replication_mask
             )
             values (
                 $1,
@@ -1159,10 +1108,9 @@ async fn postgres_store_schema_storage_down_migration_keeps_destination_snapshot
                 '0:2',
                 '0:1',
                 'applied',
-                decode('0101', 'hex'),
-                $1::bigint::text
+                decode('0101', 'hex')
             )",
-            &[&11_i64, &table_id, &"destination_snapshot_items"],
+            &[&"11", &table_id, &"destination_snapshot_items"],
         )
         .await
         .unwrap();
@@ -1221,7 +1169,7 @@ async fn split_migrations_can_be_reverted_independently() {
 
     let database = spawn_unmigrated_database().await;
 
-    let _store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    let _store = PostgresStore::new("1", database.config.clone()).await.unwrap();
     run_source_migrations(&database.config).await.unwrap();
 
     assert!(source_helper_exists(&database).await);

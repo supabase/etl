@@ -127,7 +127,7 @@ mod tests {
             let state = pool.get_slot_state(&name).await.unwrap();
             assert!(matches!(state, SlotState::NotInvalidated));
             assert!(
-                pool.sample_pipeline_lag(&1.into())
+                pool.sample_pipeline_lag(&"1".into())
                     .await
                     .unwrap()
                     .source_wal
@@ -162,7 +162,7 @@ mod tests {
         let pool = OutOfBandSourcePool::new(&config, TEST_MONITOR_REFRESH_INTERVAL);
         let state = pool.get_slot_state(&name).await.unwrap();
         assert!(matches!(state, SlotState::NotInvalidated));
-        let sample = pool.sample_pipeline_lag(&1.into()).await.unwrap();
+        let sample = pool.sample_pipeline_lag(&"1".into()).await.unwrap();
         assert!(sample.source_wal.decoding_lsn().is_some());
         assert!(sample.source_wal.write_lsn().is_none());
         sqlx::query("select pg_drop_replication_slot($1)")

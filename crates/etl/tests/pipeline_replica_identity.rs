@@ -6,14 +6,14 @@ use etl::{
         event::EventCondition,
         memory_destination::MemoryDestination,
         notifying_store::NotifyingStore,
-        pipeline::create_pipeline,
+        pipeline::{create_pipeline, random_pipeline_id},
         test_destination_wrapper::TestDestinationWrapper,
     },
 };
 use etl_postgres::tokio::test_utils::TableModification;
 use etl_telemetry::tracing::init_test_tracing;
 use pg_escape::{quote_identifier, quote_literal};
-use rand::{Rng, distr::Alphanumeric, random};
+use rand::{Rng, distr::Alphanumeric};
 
 const LARGE_TEXT_SIZE_BYTES: usize = 8192;
 const INITIAL_ID: i64 = 1;
@@ -230,10 +230,10 @@ async fn run_replica_identity_scenario(
         .await
         .unwrap();
 
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name,
         store.clone(),
         destination.clone(),

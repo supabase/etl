@@ -175,14 +175,13 @@ struct DuckLakeArgs {
     duckdb_log_dump_path: Option<String>,
 }
 
+/// Entry point — handles error reporting and process exit.
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() {
     if let Err(e) = main_impl().await {
         error!("{e}");
         std::process::exit(1);
     }
-
-    Ok(())
 }
 
 fn init_tracing() {
@@ -209,7 +208,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
     install_crypto_provider();
 
     let args = AppArgs::parse();
-    let legacy_pipeline_id = 1;
+    let pipeline_id = "03dg2o5teb2eucxr9ggh3uie6";
 
     let pg_connection_config = PgConnectionConfig {
         host: args.db_args.db_host,
@@ -222,10 +221,10 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         keepalive: TcpKeepaliveConfig::default(),
     };
 
-    let store = PostgresStore::new(legacy_pipeline_id, pg_connection_config.clone()).await?;
+    let store = PostgresStore::new(pipeline_id, pg_connection_config.clone()).await?;
 
     let pipeline_config = PipelineConfig {
-        id: legacy_pipeline_id.into(),
+        id: pipeline_id.into(),
         publication_name: args.publication,
         run_source_migrations: true,
         drain_on_shutdown: true,
