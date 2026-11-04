@@ -116,3 +116,23 @@ after all writers have stopped referencing it.
 
 After V2-only writes begin, an older ETL image needs its legacy keys restored
 before it can resume that pipeline. Use the new image for rollout retries.
+
+## Legacy column removal
+
+All readers must use V2 and all writers must stop populating legacy keys before
+deploying this migration. This includes running pipelines, stopped pipelines
+when they resume, and applications using the shared metadata helpers.
+
+The first cleanup replicator sharing a database drops the four legacy columns
+and their dependent indexes in one transaction. Other string-key replicators
+continue using V2. The migration retains the V2 column names, identities, indexes,
+and constraints, and does not rewrite rows or rebuild retained indexes. Metadata
+operations wait while the migration holds its DDL locks.
+
+Rollback restores nullable compatibility columns and indexes for the preceding
+string-key release. The restored columns contain nulls; discarded legacy values
+are not reconstructed. V2 data remains authoritative. Restore this schema before
+reverting any writer to a version that populates legacy keys.
+
+Snowflake ownership and retry identity compatibility is independent of these
+Postgres columns and remains in place.

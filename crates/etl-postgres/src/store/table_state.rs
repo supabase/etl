@@ -154,13 +154,9 @@ where
 /// callers can use them to delete the existing destination object before a
 /// fresh copy. Requiring an explicit transaction lets callers replace multiple
 /// table states as one atomic operation.
-///
-/// Supply `legacy_pipeline_id` only while older ETL readers remain deployed.
-/// Passing `None` writes only V2 and does not reference the legacy column.
 pub async fn replace_table_state_raw(
     txn: &mut Transaction<'_, Postgres>,
     pipeline_id: &str,
-    legacy_pipeline_id: Option<i64>,
     table_id: TableId,
     state: StoredTableStateType,
     metadata: serde_json::Value,
@@ -176,34 +172,20 @@ pub async fn replace_table_state_raw(
     .execute(&mut **txn)
     .await?;
 
-    let query = if legacy_pipeline_id.is_some() {
-        r#"
-        insert into etl.replication_state
-            (pipeline_id_v2, table_id, state, metadata, prev, is_current, pipeline_id)
-        values ($1, $2, $3, $4, null, true, $5)
-        returning id, pipeline_id_v2 as pipeline_id, table_id, state, metadata, prev, is_current
-        "#
-    } else {
+    sqlx::query_as(
         r#"
         insert into etl.replication_state
             (pipeline_id_v2, table_id, state, metadata, prev, is_current)
         values ($1, $2, $3, $4, null, true)
         returning id, pipeline_id_v2 as pipeline_id, table_id, state, metadata, prev, is_current
-        "#
-    };
-    let query = sqlx::query_as(query)
-        .bind(pipeline_id)
-        .bind(SqlxTableId(table_id.into_inner()))
-        .bind(state)
-        .bind(metadata);
-    let query = if let Some(legacy_pipeline_id) = legacy_pipeline_id {
-        query.bind(legacy_pipeline_id)
-    } else {
-        query
-    };
-    let row = query.fetch_one(&mut **txn).await?;
-
-    Ok(row)
+        "#,
+    )
+    .bind(pipeline_id)
+    .bind(SqlxTableId(table_id.into_inner()))
+    .bind(state)
+    .bind(metadata)
+    .fetch_one(&mut **txn)
+    .await
 }
 
 /// Deletes all table state entries for a pipeline.

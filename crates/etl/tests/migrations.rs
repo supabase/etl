@@ -244,8 +244,8 @@ async fn postgres_store_startup_runs_only_postgres_store_migrations() {
     assert_eq!(applied_migration_versions(&database).await, postgres_store_migration_versions());
 }
 
-/// Backfilled keys preserve shared checkpoints and require dual-writing
-/// clients.
+/// Backfilled string keys preserve shared checkpoints and reject legacy-only
+/// writes.
 #[tokio::test(flavor = "multi_thread")]
 async fn pipeline_id_v2_preserves_shared_state() {
     let database = spawn_unmigrated_database().await;
@@ -270,7 +270,7 @@ async fn pipeline_id_v2_preserves_shared_state() {
     assert!(
         query_bool(
             &database,
-            "select count(*) = 2 and bool_and(pipeline_id_v2 = pipeline_id::text) from \
+            "select array_agg(pipeline_id_v2 order by pipeline_id_v2) = array['150', '151'] from \
              etl.replication_progress"
         )
         .await
@@ -299,7 +299,7 @@ async fn pipeline_id_v2_preserves_shared_state() {
     assert!(
         query_bool(
             &database,
-            "select count(*) = 2 and bool_and(pipeline_id_v2 = pipeline_id::text) from \
+            "select array_agg(pipeline_id_v2 order by pipeline_id_v2) = array['150', '151'] from \
              etl.replication_progress"
         )
         .await
@@ -318,7 +318,8 @@ async fn pipeline_id_v2_preserves_shared_state() {
     assert!(
         query_bool(
             &database,
-            "select bool_and(pipeline_id_v2 = pipeline_id::text) from etl.replication_progress"
+            "select array_agg(pipeline_id_v2 order by pipeline_id_v2) = array['150', '151'] from \
+             etl.replication_progress"
         )
         .await
     );
@@ -551,8 +552,8 @@ async fn composite_snapshot_migration_preserves_legacy_message_lsn_ordering() {
 
     let schema_snapshot_id: String = client
         .query_one(
-            "select snapshot_id from etl.table_schemas where pipeline_id = $1 and table_id = $2",
-            &[&1_i64, &table_id],
+            "select snapshot_id from etl.table_schemas where pipeline_id_v2 = $1 and table_id = $2",
+            &[&"1", &table_id],
         )
         .await
         .unwrap()
@@ -560,8 +561,8 @@ async fn composite_snapshot_migration_preserves_legacy_message_lsn_ordering() {
     assert_eq!(schema_snapshot_id, "2:2");
     let initial_schema_snapshot_id: String = client
         .query_one(
-            "select snapshot_id from etl.table_schemas where pipeline_id = $1 and table_id = $2",
-            &[&1_i64, &initial_table_id],
+            "select snapshot_id from etl.table_schemas where pipeline_id_v2 = $1 and table_id = $2",
+            &[&"1", &initial_table_id],
         )
         .await
         .unwrap()
@@ -569,8 +570,8 @@ async fn composite_snapshot_migration_preserves_legacy_message_lsn_ordering() {
     assert_eq!(initial_schema_snapshot_id, "0:0");
     let max_schema_snapshot_id: String = client
         .query_one(
-            "select snapshot_id from etl.table_schemas where pipeline_id = $1 and table_id = $2",
-            &[&1_i64, &max_table_id],
+            "select snapshot_id from etl.table_schemas where pipeline_id_v2 = $1 and table_id = $2",
+            &[&"1", &max_table_id],
         )
         .await
         .unwrap()
@@ -578,8 +579,8 @@ async fn composite_snapshot_migration_preserves_legacy_message_lsn_ordering() {
     assert_eq!(max_schema_snapshot_id, "18446744073709551615:18446744073709551615");
     let above_i64_schema_snapshot_id: String = client
         .query_one(
-            "select snapshot_id from etl.table_schemas where pipeline_id = $1 and table_id = $2",
-            &[&1_i64, &above_i64_table_id],
+            "select snapshot_id from etl.table_schemas where pipeline_id_v2 = $1 and table_id = $2",
+            &[&"1", &above_i64_table_id],
         )
         .await
         .unwrap()
@@ -590,8 +591,8 @@ async fn composite_snapshot_migration_preserves_legacy_message_lsn_ordering() {
         .query_one(
             "select snapshot_id, previous_snapshot_id
             from etl.destination_tables_metadata
-            where pipeline_id = $1 and table_id = $2",
-            &[&1_i64, &table_id],
+            where pipeline_id_v2 = $1 and table_id = $2",
+            &[&"1", &table_id],
         )
         .await
         .unwrap();
@@ -602,8 +603,8 @@ async fn composite_snapshot_migration_preserves_legacy_message_lsn_ordering() {
         .query_one(
             "select snapshot_id, previous_snapshot_id
             from etl.destination_tables_metadata
-            where pipeline_id = $1 and table_id = $2",
-            &[&1_i64, &initial_table_id],
+            where pipeline_id_v2 = $1 and table_id = $2",
+            &[&"1", &initial_table_id],
         )
         .await
         .unwrap();
@@ -614,8 +615,8 @@ async fn composite_snapshot_migration_preserves_legacy_message_lsn_ordering() {
         .query_one(
             "select snapshot_id, previous_snapshot_id
             from etl.destination_tables_metadata
-            where pipeline_id = $1 and table_id = $2",
-            &[&1_i64, &max_table_id],
+            where pipeline_id_v2 = $1 and table_id = $2",
+            &[&"1", &max_table_id],
         )
         .await
         .unwrap();
@@ -633,15 +634,14 @@ async fn composite_snapshot_migration_preserves_legacy_message_lsn_ordering() {
     let new_initial_snapshot_id: String = client
         .query_one(
             "insert into etl.table_schemas (
-                pipeline_id,
+                pipeline_id_v2,
                 table_id,
                 schema_name,
-                table_name,
-                pipeline_id_v2
+                table_name
             )
-            values ($1, $2, 'public', 'new_initial_items', $1::bigint::text)
+            values ($1, $2, 'public', 'new_initial_items')
             returning snapshot_id",
-            &[&1_i64, &new_initial_table_id],
+            &[&"1", &new_initial_table_id],
         )
         .await
         .unwrap()
@@ -652,11 +652,11 @@ async fn composite_snapshot_migration_preserves_legacy_message_lsn_ordering() {
         .query(
             "select snapshot_id
             from etl.table_schemas
-            where pipeline_id = $1 and table_id in ($2, $3, $4, $5)
+            where pipeline_id_v2 = $1 and table_id in ($2, $3, $4, $5)
             order by
                 pg_catalog.split_part(snapshot_id, ':', 1)::pg_catalog.numeric,
                 pg_catalog.split_part(snapshot_id, ':', 2)::pg_catalog.numeric",
-            &[&1_i64, &initial_table_id, &table_id, &above_i64_table_id, &max_table_id],
+            &[&"1", &initial_table_id, &table_id, &above_i64_table_id, &max_table_id],
         )
         .await
         .unwrap()
@@ -942,8 +942,8 @@ async fn postgres_store_schema_storage_migration_round_trips_old_state() {
         .query_one(
             "select destination_table_id, encode(replication_mask, 'hex')
             from etl.destination_tables_metadata
-            where pipeline_id = $1 and table_id = $2",
-            &[&7_i64, &table_id],
+            where pipeline_id_v2 = $1 and table_id = $2",
+            &[&"7", &table_id],
         )
         .await
         .unwrap();
@@ -1028,16 +1028,15 @@ async fn postgres_store_schema_storage_down_migration_keeps_destination_snapshot
     let first_schema_id: i64 = client
         .query_one(
             "insert into etl.table_schemas (
-                pipeline_id,
+                pipeline_id_v2,
                 table_id,
                 schema_name,
                 table_name,
-                snapshot_id,
-                pipeline_id_v2
+                snapshot_id
             )
-            values ($1, $2, $3, $4, '0:1', $1::bigint::text)
+            values ($1, $2, $3, $4, '0:1')
             returning id",
-            &[&11_i64, &table_id, &"public", &"migration_snapshot_items"],
+            &[&"11", &table_id, &"public", &"migration_snapshot_items"],
         )
         .await
         .unwrap()
@@ -1045,16 +1044,15 @@ async fn postgres_store_schema_storage_down_migration_keeps_destination_snapshot
     let second_schema_id: i64 = client
         .query_one(
             "insert into etl.table_schemas (
-                pipeline_id,
+                pipeline_id_v2,
                 table_id,
                 schema_name,
                 table_name,
-                snapshot_id,
-                pipeline_id_v2
+                snapshot_id
             )
-            values ($1, $2, $3, $4, '0:2', $1::bigint::text)
+            values ($1, $2, $3, $4, '0:2')
             returning id",
-            &[&11_i64, &table_id, &"public", &"migration_snapshot_items"],
+            &[&"11", &table_id, &"public", &"migration_snapshot_items"],
         )
         .await
         .unwrap()
@@ -1095,14 +1093,13 @@ async fn postgres_store_schema_storage_down_migration_keeps_destination_snapshot
     client
         .execute(
             "insert into etl.destination_tables_metadata (
-                pipeline_id,
+                pipeline_id_v2,
                 table_id,
                 destination_table_id,
                 snapshot_id,
                 previous_snapshot_id,
                 schema_status,
-                replication_mask,
-                pipeline_id_v2
+                replication_mask
             )
             values (
                 $1,
@@ -1111,10 +1108,9 @@ async fn postgres_store_schema_storage_down_migration_keeps_destination_snapshot
                 '0:2',
                 '0:1',
                 'applied',
-                decode('0101', 'hex'),
-                $1::bigint::text
+                decode('0101', 'hex')
             )",
-            &[&11_i64, &table_id, &"destination_snapshot_items"],
+            &[&"11", &table_id, &"destination_snapshot_items"],
         )
         .await
         .unwrap();
