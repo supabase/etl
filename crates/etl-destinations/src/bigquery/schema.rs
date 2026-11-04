@@ -820,6 +820,9 @@ mod tests {
                     escaped @ ('\\' | '?' | '"' | '\'' | '`') => escaped,
                     'u' => {
                         let hex: String = chars.by_ref().take(4).collect();
+                        if hex.len() != 4 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                            return None;
+                        }
                         char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?
                     }
                     _ => return None,
