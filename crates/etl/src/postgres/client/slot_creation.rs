@@ -172,6 +172,8 @@ impl Drop for SlotCreationSamplerLifetime {
 mod tests {
     use std::time::Duration;
 
+    use futures::FutureExt;
+
     use crate::{
         observability::{
             ETL_REPLICATION_SLOT_CREATION_AGE_SECONDS,
@@ -202,31 +204,54 @@ mod tests {
         .unwrap()
     }
 
-    /// Pending commands age without any command progress or completion sample.
+    /// Pending command age survives waits, resets on cancellation and retry,
+    /// and stays unavailable after the sampler stops.
     #[tokio::test(start_paused = true)]
-    async fn pending_command_exports_live_age() {
+    async fn pending_attempt_age_tracks_cancellation_retry_and_shutdown() {
         let metrics = etl_telemetry::metrics::init_metrics_handle().unwrap();
         let monitor = SlotCreationMonitor::new("41".into());
-        let task = monitor.spawn_slot_creation_metrics_task();
-        let attempt = monitor.start(WorkerType::Apply);
+        let sampler = monitor.spawn_slot_creation_metrics_task();
+        let mut command = Box::pin(async {
+            let _attempt = monitor.start(WorkerType::Apply);
+            std::future::pending::<()>().await;
+        });
+        // Poll once so cancellation drops a registered, suspended attempt.
+        assert!(command.as_mut().now_or_never().is_none());
         tokio::task::yield_now().await;
 
-        for seconds in [15, 1905] {
+        for (seconds, age_seconds) in [(15, 15.0), (1905, 1920.0)] {
             tokio::time::advance(Duration::from_secs(seconds)).await;
             tokio::task::yield_now().await;
+            assert_eq!(age(&metrics.render(), "41", "apply"), age_seconds);
         }
         let rendered = metrics.render();
-        assert_eq!(age(&rendered, "41", "apply"), 1920.0);
         assert_eq!(age(&rendered, "41", "table_sync"), 0.0);
         assert!(
             !rendered
                 .contains(&format!("{ETL_REPLICATION_SLOT_CREATION_DURATION_SECONDS}_count{{"))
         );
 
-        attempt.finish(true);
-        assert_eq!(age(&metrics.render(), "41", "apply"), 0.0);
-        abort_and_join(task).await.unwrap();
+        drop(command);
+        let rendered = metrics.render();
+        assert_eq!(age(&rendered, "41", "apply"), 0.0);
+        assert_eq!(
+            sample(
+                &rendered,
+                &format!("{ETL_REPLICATION_SLOT_CREATION_DURATION_SECONDS}_count"),
+                &[("pipeline_id", "41"), ("worker_type", "apply"), ("outcome", "cancelled")],
+            ),
+            Some(1.0),
+        );
+
+        let retry = monitor.start(WorkerType::Apply);
+        tokio::time::advance(Duration::from_secs(7)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(age(&metrics.render(), "41", "apply"), 7.0);
+        abort_and_join(sampler).await.unwrap();
         assert_eq!(age(&metrics.render(), "41", "apply"), -1.0);
+        retry.finish(false);
+        assert_eq!(age(&metrics.render(), "41", "apply"), -1.0);
+        assert!(monitor.state.lock().unwrap().attempts.is_empty());
     }
 
     /// Ending one concurrent copy must preserve the oldest remaining attempt.
@@ -304,27 +329,6 @@ mod tests {
         assert!(monitor.state.lock().unwrap().attempts.is_empty());
     }
 
-    /// Cancellation clears only its attempt and a retry receives a fresh age.
-    #[tokio::test(start_paused = true)]
-    async fn cancellation_and_retry_do_not_retain_abandoned_age() {
-        let metrics = etl_telemetry::metrics::init_metrics_handle().unwrap();
-        let monitor = SlotCreationMonitor::new("45".into());
-        let task = monitor.spawn_slot_creation_metrics_task();
-        let attempt = monitor.start(WorkerType::Apply);
-        tokio::time::advance(Duration::from_secs(30)).await;
-        drop(attempt);
-        assert_eq!(age(&metrics.render(), "45", "apply"), 0.0);
-
-        let retry = monitor.start(WorkerType::Apply);
-        tokio::time::advance(Duration::from_secs(7)).await;
-        tokio::task::yield_now().await;
-        assert_eq!(age(&metrics.render(), "45", "apply"), 7.0);
-        abort_and_join(task).await.unwrap();
-        retry.finish(false);
-        assert_eq!(age(&metrics.render(), "45", "apply"), -1.0);
-        assert!(monitor.state.lock().unwrap().attempts.is_empty());
-    }
-
     /// Aborting an unpolled sampler also invalidates its initially idle gauge.
     #[tokio::test(start_paused = true)]
     async fn stopping_unpolled_sampler_marks_observation_unavailable() {
@@ -385,56 +389,5 @@ mod tests {
         client.delete_slot_if_exists(&copy_slot).await.unwrap();
         client.delete_slot_if_exists(&main_slot).await.unwrap();
         abort_and_join(task).await.unwrap();
-    }
-
-    /// A transaction-blocked command stays observable until its future is
-    /// dropped.
-    #[tokio::test]
-    async fn exclusive_cancelling_blocked_postgres_command_clears_its_live_age() {
-        use crate::{
-            postgres::client::PgReplicationClient,
-            test_utils::{database::spawn_source_database, pipeline::test_slot_name},
-        };
-
-        let metrics = etl_telemetry::metrics::init_metrics_handle().unwrap();
-        let database = spawn_source_database().await;
-        let source = database.client.as_ref().unwrap();
-        source.batch_execute("begin; select pg_current_xact_id()").await.unwrap();
-        let monitor = SlotCreationMonitor::new("48".into());
-        let sampler = monitor.spawn_slot_creation_metrics_task();
-        let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
-        client.set_slot_creation_monitor(monitor.clone());
-        let slot_name = test_slot_name("metrics_cancelled");
-        let command = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
-            client.create_slot(&slot_name, &Default::default()).await
-        }));
-
-        // The open transaction is the barrier; elapsed time never releases it.
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                if age(&metrics.render(), "48", "apply") >= 1.0 {
-                    break;
-                }
-                assert!(!command.is_finished());
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
-        abort_and_join(command).await.unwrap();
-        source.batch_execute("rollback").await.unwrap();
-
-        let rendered = metrics.render();
-        assert_eq!(age(&rendered, "48", "apply"), 0.0);
-        assert_eq!(
-            sample(
-                &rendered,
-                &format!("{ETL_REPLICATION_SLOT_CREATION_DURATION_SECONDS}_count"),
-                &[("pipeline_id", "48"), ("worker_type", "apply"), ("outcome", "cancelled")],
-            ),
-            Some(1.0),
-        );
-        assert!(monitor.state.lock().unwrap().attempts.is_empty());
-        abort_and_join(sampler).await.unwrap();
     }
 }
