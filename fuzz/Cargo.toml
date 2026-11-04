@@ -47,3 +47,10 @@ path = "fuzz_targets/decode_pgoutput_tuple.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "time_fast_paths"
+path = "fuzz_targets/time_fast_paths.rs"
+test = false
+doc = false
+bench = false

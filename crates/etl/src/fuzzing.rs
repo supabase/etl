@@ -119,6 +119,16 @@ pub fn parse_copy_row(data: &[u8]) -> EtlResult<TableRow> {
     codec::parse_table_row_from_postgres_copy_bytes(row, &column_schemas)
 }
 
+/// Checks that the date, time and timestamp fast paths agree with chrono.
+///
+/// # Panics
+///
+/// Panics when a fast path accepts input that chrono rejects or decodes
+/// differently; that panic is the fuzz target's finding signal.
+pub fn check_time_fast_paths(value: &str) {
+    codec::check_fast_paths_match_chrono(value);
+}
+
 /// Checks the parse, print, parse stability of a numeric text value.
 ///
 /// # Panics
