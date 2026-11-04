@@ -850,7 +850,7 @@ where
             .collect::<EtlResult<Vec<BigQueryTableRow>>>()?;
 
         // Calculate optimal target batches based on estimated row size.
-        let target_batches = calculate_target_batches_for_table_copy(&table_rows)?;
+        let target_batches = calculate_target_batches_for_table_copy(&table_rows);
 
         // Split table rows into optimal batches for parallel execution.
         let table_rows_batches = split_table_rows(table_rows, target_batches);
@@ -868,7 +868,7 @@ where
                     physical_table_id,
                     table_descriptor.as_ref().clone(),
                     table_rows,
-                )?;
+                );
                 append_requests.push(append_request);
             }
         }
@@ -1305,7 +1305,7 @@ where
                         physical_table_id,
                         table_descriptor.as_ref().clone(),
                         table_rows,
-                    )?;
+                    );
                     append_requests.push(append_request);
                 }
 
@@ -2088,11 +2088,11 @@ fn bigquery_delete_row(
 
 /// Calculates the optimal number of batches for table copy operations.
 ///
-/// Estimates the size of a single row by encoding the first row, then
-/// calculates how many rows would fit within the client's batch target.
-fn calculate_target_batches_for_table_copy(table_rows: &[BigQueryTableRow]) -> EtlResult<usize> {
+/// Uses the first row's cached encoded length to estimate how many rows
+/// would fit within the client's batch target.
+fn calculate_target_batches_for_table_copy(table_rows: &[BigQueryTableRow]) -> usize {
     let Some(encoded_row) = table_rows.first() else {
-        return Ok(0);
+        return 0;
     };
     let total_rows = table_rows.len();
 
@@ -2114,7 +2114,7 @@ fn calculate_target_batches_for_table_copy(table_rows: &[BigQueryTableRow]) -> E
         "calculated target batches for table copy"
     );
 
-    Ok(target_batches)
+    target_batches
 }
 
 /// Splits table rows into optimal sub-batches for parallel execution.
@@ -3210,18 +3210,18 @@ mod tests {
 
     #[test]
     fn calculate_target_batches_handles_empty_small_and_oversized_rows() {
-        assert_eq!(calculate_target_batches_for_table_copy(&[]).unwrap(), 0);
+        assert_eq!(calculate_target_batches_for_table_copy(&[]), 0);
 
         let small_row =
             BigQueryTableRow::try_from(TableRow::new(vec![Cell::String("test".to_owned())]))
                 .unwrap();
-        assert_eq!(calculate_target_batches_for_table_copy(&[small_row]).unwrap(), 1);
+        assert_eq!(calculate_target_batches_for_table_copy(&[small_row]), 1);
 
         let oversized_row = BigQueryTableRow::try_from(TableRow::new(vec![Cell::String(
             "x".repeat(MAX_BATCH_SIZE_BYTES + 1),
         )]))
         .unwrap();
-        assert_eq!(calculate_target_batches_for_table_copy(&[oversized_row]).unwrap(), 1);
+        assert_eq!(calculate_target_batches_for_table_copy(&[oversized_row]), 1);
     }
 
     #[test]
@@ -3236,7 +3236,7 @@ mod tests {
             BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap(),
         ];
 
-        assert_eq!(calculate_target_batches_for_table_copy(&rows).unwrap(), 3);
+        assert_eq!(calculate_target_batches_for_table_copy(&rows), 3);
     }
 
     #[test]

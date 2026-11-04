@@ -156,13 +156,11 @@ impl From<ClickHouseEngineArg> for ClickHouseEngine {
 
 /// Entry point — handles error reporting and process exit.
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() {
     if let Err(e) = main_impl().await {
         error!("{e}");
         std::process::exit(1);
     }
-
-    Ok(())
 }
 
 /// Initialize structured logging with configurable log levels via RUST_LOG

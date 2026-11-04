@@ -181,7 +181,7 @@ async fn run(args: RunArgs) -> Result<()> {
     // Everything after destination setup runs in one block so slot and
     // destination cleanup happen whether it succeeds or fails.
     let run_result: Result<StreamingPhaseTimings> = async {
-        let notifications = register_table_sync_notifications(&store, &table_ids).await?;
+        let notifications = register_table_sync_notifications(&store, &table_ids).await;
 
         let config = pipeline_config(
             &args.pipeline_id,
@@ -450,10 +450,12 @@ struct TableSyncNotifications {
     errored: etl::test_utils::notify::TimedNotify,
 }
 
+/// Registers completion and error notifications before table synchronization
+/// starts.
 async fn register_table_sync_notifications(
     store: &NotifyingStore,
     table_ids: &[u32],
-) -> Result<Vec<TableSyncNotifications>> {
+) -> Vec<TableSyncNotifications> {
     let mut notifications = Vec::with_capacity(table_ids.len());
     for table_id in table_ids {
         let table_id = *table_id;
@@ -463,7 +465,7 @@ async fn register_table_sync_notifications(
         notifications.push(TableSyncNotifications { table_id, sync_complete, errored });
     }
 
-    Ok(notifications)
+    notifications
 }
 
 async fn wait_for_table_sync(notifications: Vec<TableSyncNotifications>) -> Result<()> {

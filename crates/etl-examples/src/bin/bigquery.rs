@@ -118,15 +118,13 @@ struct BqArgs {
     max_table_sync_workers: u16,
 }
 
-// Entry point - handles error reporting and process exit
+/// Entry point — handles error reporting and process exit.
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() {
     if let Err(err) = main_impl().await {
         error!(error = %err, "fatal error");
         std::process::exit(1);
     }
-
-    Ok(())
 }
 
 // Initialize structured logging with configurable log levels via RUST_LOG

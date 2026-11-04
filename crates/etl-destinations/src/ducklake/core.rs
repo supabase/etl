@@ -2083,7 +2083,7 @@ where
                 metadata_schema.to_string(),
                 metadata_pg_pool.clone(),
                 Arc::clone(&applied_tables),
-            )?
+            )
             .into(),
         );
         match external_maintenance.mode {

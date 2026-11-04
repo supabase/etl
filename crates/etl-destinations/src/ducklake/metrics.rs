@@ -327,14 +327,14 @@ pub(super) fn spawn_ducklake_metrics_sampler(
     metadata_schema: String,
     metadata_pg_pool: PgPool,
     applied_tables: Arc<Mutex<HashSet<DuckLakeTableName>>>,
-) -> EtlResult<DuckLakeMetricsSampler> {
+) -> DuckLakeMetricsSampler {
     let handle = AbortOnDropHandle::new(tokio::spawn(run_ducklake_metrics_sampler(
         metadata_schema,
         metadata_pg_pool,
         applied_tables,
     )));
 
-    Ok(DuckLakeMetricsSampler { handle: Mutex::new(handle.into()) })
+    DuckLakeMetricsSampler { handle: Mutex::new(handle.into()) }
 }
 
 /// Periodically samples DuckLake metadata from PostgreSQL.
