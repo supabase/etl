@@ -1254,160 +1254,31 @@ async fn source_migrations_use_shared_connection_defaults() {
     assert_eq!(captured, TEST_MIGRATION_OPTIONS.extra_float_digits.to_string());
 }
 
-/// Replacing a SECURITY DEFINER function retains its owner, even when another
-/// admin installs new private helpers needed by that function.
+/// Upgrades replace the trigger function in place, so an operator-disabled
+/// event trigger stays disabled.
 #[tokio::test(flavor = "multi_thread")]
-async fn source_upgrade_preserves_trigger_owner_helper_access() {
+async fn source_upgrade_preserves_disabled_ddl_trigger() {
     let database = spawn_unmigrated_database().await;
     let mut conn = migration_connection(&database.config).await;
     source_migrator().run_to(SOURCE_PRE_SYNTHETIC_RELATION_VERSION, &mut conn).await.unwrap();
     drop(conn);
-
-    let owner = format!("ddl_owner_{}", Uuid::new_v4().simple());
-    let quoted_owner = quote_identifier(&owner);
     let client = database.client.as_ref().unwrap();
     client
-        .batch_execute(&format!(
-            "create role {quoted_owner};
-             grant usage on schema etl to {quoted_owner};
-             grant execute on function etl.describe_table_schema(oid), \
-             etl.describe_table_identity(oid) to {quoted_owner};
-             create table public.owner_table (id integer primary key);
-             create publication owner_pub for table public.owner_table;
-             alter function etl.emit_schema_change_messages() owner to {quoted_owner};
-             alter table public.owner_table add column before_upgrade integer"
-        ))
+        .batch_execute("alter event trigger supabase_etl_ddl_message_trigger disable")
         .await
         .unwrap();
 
     run_source_migrations(&database.config).await.unwrap();
 
-    let retained_owner: String = client
-        .query_one(
-            "select pg_catalog.pg_get_userbyid(proowner) from pg_catalog.pg_proc where oid = \
-             'etl.emit_schema_change_messages()'::pg_catalog.regprocedure",
-            &[],
-        )
-        .await
-        .unwrap()
-        .get(0);
-    assert_eq!(retained_owner, owner);
-    client
-        .batch_execute(
-            "alter table public.owner_table add column after_upgrade integer;
-             alter publication owner_pub set (publish = 'insert')",
-        )
-        .await
-        .unwrap();
-
-    client
-        .batch_execute(&format!(
-            "alter function etl.emit_schema_change_messages() owner to current_user;
-             drop owned by {quoted_owner}; drop role {quoted_owner}"
-        ))
-        .await
-        .unwrap();
-}
-
-/// Admin-installed source upgrades retain role access without exposing helpers
-/// to PUBLIC or granting readers access to trigger-only functions.
-#[tokio::test(flavor = "multi_thread")]
-async fn source_upgrade_preserves_reader_helper_grants() {
-    let database = spawn_unmigrated_database().await;
-    let mut conn = migration_connection(&database.config).await;
-    // Start with exactly the source migrations shipped before synthetic DDL.
-    source_migrator().run_to(SOURCE_PRE_SYNTHETIC_RELATION_VERSION, &mut conn).await.unwrap();
-    drop(conn);
     assert!(
-        query_bool(&database, "select to_regprocedure('etl.describe_table_columns(oid)') is null",)
-            .await
+        query_bool(
+            &database,
+            "select evtenabled = 'D' and evtfoid = \
+             'etl.emit_schema_change_messages()'::pg_catalog.regprocedure
+             from pg_catalog.pg_event_trigger where evtname = 'supabase_etl_ddl_message_trigger'",
+        )
+        .await
     );
-
-    let reader = format!("ddl reader's \"{}\"", Uuid::new_v4().simple());
-    let member = format!("ddl_member_{}", Uuid::new_v4().simple());
-    let quoted_reader = quote_identifier(&reader);
-    let quoted_member = quote_identifier(&member);
-    let client = database.client.as_ref().unwrap();
-    client
-        .batch_execute(&format!(
-            "create role {quoted_reader};
-             create role {quoted_member};
-             grant {quoted_reader} to {quoted_member};
-             grant usage on schema etl to {quoted_reader};
-             grant execute on function etl.describe_table_schema(oid) to {quoted_reader} with \
-             grant option;
-             grant execute on function etl.describe_table_identity(oid) to {quoted_reader};
-             create table public.reader_table (id integer primary key, value integer);
-             create publication reader_pub for table public.reader_table"
-        ))
-        .await
-        .unwrap();
-
-    run_source_migrations(&database.config).await.unwrap();
-
-    for signature in
-        ["etl.describe_table_columns(oid)", "etl.describe_table_publication_columns(oid,text)"]
-    {
-        let privileges = client
-            .query_one(
-                "select pg_catalog.has_function_privilege($1, $3, 'execute with grant option'),
-                        pg_catalog.has_function_privilege($2, $3, 'execute')",
-                &[&reader, &member, &signature],
-            )
-            .await
-            .unwrap();
-        assert!(privileges.get::<_, bool>(0));
-        assert!(privileges.get::<_, bool>(1));
-    }
-    let public_access = query_bool(
-        &database,
-        "select exists (
-            select 1 from pg_catalog.pg_proc p
-            cross join lateral pg_catalog.aclexplode(p.proacl) acl
-            where p.oid in (
-                'etl.describe_table_columns(oid)'::pg_catalog.regprocedure,
-                'etl.describe_table_publication_columns(oid,text)'::pg_catalog.regprocedure
-            ) and acl.grantee = 0
-        )",
-    )
-    .await;
-    assert!(!public_access);
-    let private_helpers = client
-        .query_one(
-            "select pg_catalog.has_function_privilege($1, \
-             'etl.publication_table_candidates(oid)', 'execute') or \
-             pg_catalog.has_function_privilege($1, 'etl.emit_schema_change_messages()', 'execute')",
-            &[&member],
-        )
-        .await
-        .unwrap();
-    assert!(!private_helpers.get::<_, bool>(0));
-
-    client.batch_execute(&format!("set role {quoted_member}")).await.unwrap();
-    let result = client
-        .query_one(
-            "select (select count(*) from \
-             etl.describe_table_columns('public.reader_table'::regclass)),
-                    etl.describe_table_identity('public.reader_table'::regclass) ? \
-             'replica_identity_attnums',
-                    (select column_attnums is null from etl.describe_table_publication_columns(
-                        'public.reader_table'::regclass, 'reader_pub'))",
-            &[],
-        )
-        .await;
-    client.batch_execute("reset role").await.unwrap();
-    let row = result.unwrap();
-    assert_eq!(row.get::<_, i64>(0), 2);
-    assert!(row.get::<_, bool>(1));
-    assert!(row.get::<_, bool>(2));
-
-    client
-        .batch_execute(&format!(
-            "drop owned by {quoted_reader}, {quoted_member};
-             drop role {quoted_member}, {quoted_reader}"
-        ))
-        .await
-        .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

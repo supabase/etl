@@ -1,10 +1,8 @@
 -- Restore legacy DDL payloads before removing the decoder helpers.
 -- Already emitted enriched messages remain self-contained in WAL.
 
--- Extend transactional schema snapshots to supported ALTER PUBLICATION events.
-
-drop event trigger if exists supabase_etl_ddl_message_trigger;
-
+-- Replace the function in place so the event trigger keeps its owner and
+-- enabled state.
 create or replace function etl.emit_schema_change_messages()
 returns pg_catalog.event_trigger
 language plpgsql
@@ -245,11 +243,6 @@ client-submitted query text. Messages are transactional, disappear if the outer
 transaction rolls back, and retain statement order relative to relation and DML
 events. The function runs with its owner's privileges so table owners do not
 need direct execute access to ETL helper functions.$$;
-
-create event trigger supabase_etl_ddl_message_trigger
-    on ddl_command_end
-    when tag in ('ALTER TABLE', 'ALTER PUBLICATION')
-    execute function etl.emit_schema_change_messages();
 
 
 drop function etl.publication_table_candidates(pg_catalog.oid);

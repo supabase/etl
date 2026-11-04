@@ -353,49 +353,10 @@ bounds discovery: describe_table_publication_columns remains authoritative for
 effective root/leaf targets and filters. Catalog reads use the caller's MVCC
 snapshot and do not lock unrelated user tables.$$;
 
--- Preserve non-PUBLIC readers when an admin installs helpers on behalf of
--- a non-owner pipeline role. New signatures do not inherit existing grants.
--- This runs once during installation, not for each captured DDL command.
-do
-$acl$
-declare
-    r record;
-    v_trigger_owner pg_catalog.text;
-begin
-    for r in
-        select roles.rolname, pg_catalog.bool_or(acl.is_grantable) as is_grantable
-        from pg_catalog.pg_proc p
-        cross join lateral pg_catalog.aclexplode(
-            coalesce(p.proacl, pg_catalog.acldefault('f', p.proowner))
-        ) acl
-        join pg_catalog.pg_roles roles on roles.oid = acl.grantee
-        where p.oid = 'etl.describe_table_schema(pg_catalog.oid)'::pg_catalog.regprocedure
-          and acl.privilege_type = 'EXECUTE'
-        group by roles.rolname
-    loop
-        execute pg_catalog.format(
-            'grant execute on function etl.describe_table_columns(pg_catalog.oid), '
-            'etl.describe_table_publication_columns(pg_catalog.oid, pg_catalog.text) to %I%s',
-            r.rolname,
-            case when r.is_grantable then ' with grant option' else '' end
-        );
-    end loop;
-
-    -- Replacement retains the trigger function's owner, which may differ
-    -- from this installer. Only that trusted owner needs the private helper.
-    select roles.rolname into v_trigger_owner
-    from pg_catalog.pg_proc p
-    join pg_catalog.pg_roles roles on roles.oid = p.proowner
-    where p.oid = 'etl.emit_schema_change_messages()'::pg_catalog.regprocedure;
-    execute pg_catalog.format(
-        'grant execute on function etl.publication_table_candidates(pg_catalog.oid) to %I',
-        v_trigger_owner
-    );
-end;
-$acl$;
-
-drop event trigger if exists supabase_etl_ddl_message_trigger;
-
+-- Replace the trigger function in place. The existing event trigger keeps its
+-- owner, tag filter, and enabled state, so an operator's DISABLE survives this
+-- upgrade. ETL objects belong to the role that runs these migrations, and no
+-- other role needs grants: copy, CDC, and the trigger all run as that owner.
 create or replace function etl.emit_schema_change_messages()
 returns pg_catalog.event_trigger
 language plpgsql
@@ -404,10 +365,13 @@ set search_path = pg_catalog, pg_temp
 as
 $fnc$
 declare
-    r record;
+    v_messages pg_catalog.jsonb[];
     v_msg_json pg_catalog.jsonb;
 begin
-    if coalesce(pg_catalog.current_setting('supabase_etl.skip_ddl_log', true), 'false')::pg_catalog.bool then
+    -- A reset placeholder reads as an empty string. Never cast the value: an
+    -- invalid setting must not make customer DDL fail.
+    if pg_catalog.lower(pg_catalog.current_setting('supabase_etl.skip_ddl_log', true))
+       in ('on', 'true', 'yes', '1') then
         return;
     end if;
 
@@ -416,125 +380,137 @@ begin
         return;
     end if;
 
-    for r in
-        with recursive event_commands as (
-            select
-                d.classid,
-                d.objid,
-                d.object_type
-            from pg_catalog.pg_event_trigger_ddl_commands() d
-            where d.objid is not null
-              and not coalesce(d.in_extension, false)
-        ),
-        base as (
-            -- Table DDL is unscoped. Per-table publication commands identify a
-            -- surviving pg_publication_rel row with both target and publication.
-            select
-                coalesce(pr.prrelid, d.objid) as table_oid,
-                p.pubname as publication_name
-            from event_commands d
-            left join pg_catalog.pg_publication_rel pr
-              on d.classid = 'pg_catalog.pg_publication_rel'::pg_catalog.regclass
-             and d.objid = pr.oid
-            left join pg_catalog.pg_publication p
-              on p.oid = pr.prpubid
-            where (
-                  d.object_type in ('table', 'table column')
-                  or pr.prrelid is not null
-              )
-            union all
-            -- Publication-level commands identify pg_publication. Expand its
-            -- post-command members without parsing submitted SQL.
-            select
-                c.oid as table_oid,
-                p.pubname as publication_name
-            from event_commands d
-            join pg_catalog.pg_publication p
-              on d.classid = 'pg_catalog.pg_publication'::pg_catalog.regclass
-             and d.objid = p.oid
-            cross join lateral etl.publication_table_candidates(p.oid) candidate
-            join pg_catalog.pg_class c on c.oid = candidate.table_oid
-        ),
-        -- A table DDL refreshes the whole containing declarative partition
-        -- tree. Ancestors can be published identities even for leaf-local DDL.
-        -- Ordinary inheritance retains its existing downward-only behavior.
-        partition_ancestors as (
-            select b.* from base b
-            union
-            select i.inhparent, a.publication_name
-            from partition_ancestors a
-            join pg_catalog.pg_class c on c.oid = a.table_oid and c.relispartition
-            join pg_catalog.pg_inherits i on i.inhrelid = a.table_oid
-            where a.publication_name is null and not i.inhdetachpending
-        ),
-        -- UNION emits each identity once, including across inheritance diamonds.
-        -- Publication DDL already supplies its scoped effective identities.
-        affected as (
-            select a.* from partition_ancestors a
-            union
-            select
-                i.inhrelid,
-                b.publication_name
-            from affected b
-            join pg_catalog.pg_inherits i on i.inhparent = b.table_oid
-            where b.publication_name is null and not i.inhdetachpending
-        )
-        select
-            c.oid as table_oid,
-            n.nspname,
-            c.relname,
-            ddl.publication_name,
-            ss.columns,
-            etl.describe_table_identity(c.oid) as identity,
-            pc.publication_column_attnums
-        from affected ddl
-        join pg_catalog.pg_class c
-          on c.oid = ddl.table_oid
-        join pg_catalog.pg_namespace n
-          on n.oid = c.relnamespace
-        cross join lateral (
-            select pg_catalog.jsonb_object_agg(
-                p.publication_name, pg_catalog.to_jsonb(p.column_attnums)
-            ) as publication_column_attnums
-            from etl.describe_table_publication_columns(c.oid, ddl.publication_name::pg_catalog.text) p
-        ) pc
-        cross join lateral (
-            select coalesce(pg_catalog.jsonb_agg(
-                pg_catalog.jsonb_build_object(
-                    'attname', s.attname,
-                    'attnum', s.attnum,
-                    'atttypid', s.atttypid::pg_catalog.int8,
-                    'atttypmod', s.atttypmod,
-                    'attnotnull', s.attnotnull,
-                    'default_expression', s.default_expression
-                ) || case when s.missing_value_expression is null then '{}'::pg_catalog.jsonb
-                          else pg_catalog.jsonb_build_object('missing_value_expression', s.missing_value_expression)
-                     end order by s.attnum
-            ), '[]'::pg_catalog.jsonb) as columns
-            from etl.describe_table_columns(c.oid) s
-            where pc.publication_column_attnums is not null
-        ) ss
-        where c.relkind in ('r', 'p') and c.relpersistence = 'p'
-          and pc.publication_column_attnums is not null
+    -- Never block customer DDL. Capture only reads catalogs inside this
+    -- exception block, so its subtransaction never takes an XID; emitting here
+    -- would give the messages a subtransaction XID and change how decoding
+    -- orders them against DML in the same transaction. On failure, the DDL
+    -- commits without a snapshot, and ETL rejects any later relation whose
+    -- columns disagree with its stored schema.
+    begin
         -- All payload fields use this one statement's catalog snapshot.
-        order by c.oid
-    loop
-        v_msg_json := pg_catalog.jsonb_build_object(
-            'command_tag', tg_tag,
-            'nspname', r.nspname,
-            'relname', r.relname,
-            'oid', r.table_oid::pg_catalog.int8,
-            'identity', r.identity,
-            'columns', r.columns,
-            'publication_column_attnums', r.publication_column_attnums
-        );
+        select coalesce(pg_catalog.array_agg(
+            pg_catalog.jsonb_build_object(
+                'command_tag', tg_tag,
+                'nspname', r.nspname,
+                'relname', r.relname,
+                'oid', r.table_oid::pg_catalog.int8,
+                'identity', r.identity,
+                'columns', r.columns,
+                'publication_column_attnums', r.publication_column_attnums
+            ) || case when r.publication_name is null then '{}'::pg_catalog.jsonb
+                      else pg_catalog.jsonb_build_object('publication_name', r.publication_name)
+                 end
+            order by r.table_oid
+        ), '{}') into v_messages
+        from (
+                with recursive event_commands as (
+                    select
+                        d.classid,
+                        d.objid,
+                        d.object_type
+                    from pg_catalog.pg_event_trigger_ddl_commands() d
+                    where d.objid is not null
+                      and not coalesce(d.in_extension, false)
+                ),
+                base as (
+                    -- Table DDL is unscoped. Per-table publication commands identify a
+                    -- surviving pg_publication_rel row with both target and publication.
+                    select
+                        coalesce(pr.prrelid, d.objid) as table_oid,
+                        p.pubname as publication_name
+                    from event_commands d
+                    left join pg_catalog.pg_publication_rel pr
+                      on d.classid = 'pg_catalog.pg_publication_rel'::pg_catalog.regclass
+                     and d.objid = pr.oid
+                    left join pg_catalog.pg_publication p
+                      on p.oid = pr.prpubid
+                    where (
+                          d.object_type in ('table', 'table column')
+                          or pr.prrelid is not null
+                      )
+                    union all
+                    -- Publication-level commands identify pg_publication. Expand its
+                    -- post-command members without parsing submitted SQL.
+                    select
+                        c.oid as table_oid,
+                        p.pubname as publication_name
+                    from event_commands d
+                    join pg_catalog.pg_publication p
+                      on d.classid = 'pg_catalog.pg_publication'::pg_catalog.regclass
+                     and d.objid = p.oid
+                    cross join lateral etl.publication_table_candidates(p.oid) candidate
+                    join pg_catalog.pg_class c on c.oid = candidate.table_oid
+                ),
+                -- A table DDL refreshes the whole containing declarative partition
+                -- tree. Ancestors can be published identities even for leaf-local DDL.
+                -- Ordinary inheritance retains its existing downward-only behavior.
+                partition_ancestors as (
+                    select b.* from base b
+                    union
+                    select i.inhparent, a.publication_name
+                    from partition_ancestors a
+                    join pg_catalog.pg_class c on c.oid = a.table_oid and c.relispartition
+                    join pg_catalog.pg_inherits i on i.inhrelid = a.table_oid
+                    where a.publication_name is null and not i.inhdetachpending
+                ),
+                -- UNION emits each identity once, including across inheritance diamonds.
+                -- Publication DDL already supplies its scoped effective identities.
+                affected as (
+                    select a.* from partition_ancestors a
+                    union
+                    select
+                        i.inhrelid,
+                        b.publication_name
+                    from affected b
+                    join pg_catalog.pg_inherits i on i.inhparent = b.table_oid
+                    where b.publication_name is null and not i.inhdetachpending
+                )
+                select
+                    c.oid as table_oid,
+                    n.nspname,
+                    c.relname,
+                    ddl.publication_name,
+                    ss.columns,
+                    etl.describe_table_identity(c.oid) as identity,
+                    pc.publication_column_attnums
+                from affected ddl
+                join pg_catalog.pg_class c
+                  on c.oid = ddl.table_oid
+                join pg_catalog.pg_namespace n
+                  on n.oid = c.relnamespace
+                cross join lateral (
+                    select pg_catalog.jsonb_object_agg(
+                        p.publication_name, pg_catalog.to_jsonb(p.column_attnums)
+                    ) as publication_column_attnums
+                    from etl.describe_table_publication_columns(c.oid, ddl.publication_name::pg_catalog.text) p
+                ) pc
+                cross join lateral (
+                    select coalesce(pg_catalog.jsonb_agg(
+                        pg_catalog.jsonb_build_object(
+                            'attname', s.attname,
+                            'attnum', s.attnum,
+                            'atttypid', s.atttypid::pg_catalog.int8,
+                            'atttypmod', s.atttypmod,
+                            'attnotnull', s.attnotnull,
+                            'default_expression', s.default_expression
+                        ) || case when s.missing_value_expression is null then '{}'::pg_catalog.jsonb
+                                  else pg_catalog.jsonb_build_object('missing_value_expression', s.missing_value_expression)
+                             end order by s.attnum
+                    ), '[]'::pg_catalog.jsonb) as columns
+                    from etl.describe_table_columns(c.oid) s
+                    where pc.publication_column_attnums is not null
+                ) ss
+                where c.relkind in ('r', 'p') and c.relpersistence = 'p'
+                  and pc.publication_column_attnums is not null
+        ) r;
+    exception when others then
+        raise warning 'supabase_etl schema change capture failed: %', sqlerrm
+            using detail = pg_catalog.format('SQLSTATE %s.', sqlstate),
+                  hint = 'Affected ETL tables may need resynchronization.';
+        return;
+    end;
 
-        if r.publication_name is not null then
-            v_msg_json := v_msg_json || pg_catalog.jsonb_build_object(
-                'publication_name', r.publication_name
-            );
-        end if;
-
+    foreach v_msg_json in array v_messages loop
         perform pg_catalog.pg_logical_emit_message(
             true,
             'supabase_etl_ddl',
@@ -556,10 +532,9 @@ Removed membership rows and other catalog object types emit no snapshots.
 Schema, identity, and publication filters share one statement snapshot through
 stable helpers. Payloads omit submitted SQL and command descriptions. Messages
 roll back with DDL and retain statement order. Capture does not synchronize rows
-for membership or partition-topology changes. The trusted function owner supplies
-helper privileges, so table owners need no direct helper grants.$$;
+for membership or partition-topology changes.
 
-create event trigger supabase_etl_ddl_message_trigger
-    on ddl_command_end
-    when tag in ('ALTER TABLE', 'ALTER PUBLICATION')
-    execute function etl.emit_schema_change_messages();
+Runs as its owner, the role that installed ETL, so DDL issuers need no helper
+grants. Capture failures raise a warning instead of aborting the DDL. Disable
+capture with ALTER EVENT TRIGGER supabase_etl_ddl_message_trigger DISABLE as
+that owner or a superuser.$$;

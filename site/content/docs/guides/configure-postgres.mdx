@@ -55,8 +55,11 @@ By default, `Pipeline::start()` also installs ETL source helpers and a
 `ddl_command_end` event trigger. Creating that event trigger requires
 superuser. Either run the pipeline as a superuser, or apply the source
 migrations in `crates/etl/migrations/source/` as an admin and set
-`run_source_migrations: false`. After installation, grant the replication role
-access to the source helpers:
+`run_source_migrations: false`.
+
+The installing role owns the `etl` schema, its helpers, and the event trigger.
+Running the pipeline as that role needs no further grants. If an admin installs
+the helpers for a different replication role, grant that role access to them:
 
 ```sql
 GRANT USAGE ON SCHEMA etl TO etl_user;
@@ -65,12 +68,15 @@ GRANT EXECUTE ON FUNCTION etl.describe_table_schema(oid),
   etl.describe_table_publication_columns(oid, text) TO etl_user;
 ```
 
-The legacy `describe_table_schema` grant supports older binaries. The source
-upgrade copies its existing role grants to the new column and publication
-helpers, including grant options. PUBLIC access remains revoked; deployments
-that granted the legacy helper only to PUBLIC must grant their replication role
-explicitly. Keep the `etl` schema and helper owner trusted; the replication
-role needs USAGE, not CREATE, on that schema.
+Repeat these grants after upgrades that add helpers; upgrades do not grant to
+other roles. The legacy `describe_table_schema` grant supports older binaries.
+Keep the `etl` schema and its owner trusted; the replication role needs USAGE,
+not CREATE, on that schema.
+
+Capture failures never block DDL: the event trigger warns and the DDL commits
+without a schema snapshot. To stop capture, the owner or a superuser runs
+`ALTER EVENT TRIGGER supabase_etl_ddl_message_trigger DISABLE`. Upgrades keep
+it disabled. DDL without a snapshot can require resynchronizing affected tables.
 
 ## Replication Slots
 

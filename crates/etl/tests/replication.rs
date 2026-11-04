@@ -3245,13 +3245,15 @@ async fn single_alter_table_statement_with_multiple_subcommands_emits_one_ddl_me
     assert_eq!(counts.insert_count, 1);
 }
 
+/// Operators can turn capture off, and capture failures never block DDL.
 #[tokio::test(flavor = "multi_thread")]
-async fn schema_change_messages_respect_skip_ddl_log_setting() {
+async fn schema_change_capture_can_be_skipped_disabled_or_fail_open() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
     let table_name = test_table_name("ddl_skip_log");
     database.create_table(table_name.clone(), true, &[("name", "text not null")]).await.unwrap();
+    let table = table_name.as_quoted_identifier();
 
     let publication_name = "ddl_skip_log_pub";
     database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
@@ -3264,20 +3266,31 @@ async fn schema_change_messages_respect_skip_ddl_log_setting() {
         .await
         .unwrap();
 
-    database.run_sql("set supabase_etl.skip_ddl_log = 'true'").await.unwrap();
-    database
-        .alter_table(
-            table_name,
-            &[TableModification::AddColumn { name: "email", data_type: "text" }],
-        )
-        .await
-        .unwrap();
+    // A session opt-out, a disabled trigger, and a failing capture each let
+    // the DDL commit without emitting a snapshot.
+    for sql in [
+        "set supabase_etl.skip_ddl_log = 'true'".to_owned(),
+        format!("alter table {table} add column skipped text"),
+        "reset supabase_etl.skip_ddl_log".to_owned(),
+        "alter event trigger supabase_etl_ddl_message_trigger disable".to_owned(),
+        format!("alter table {table} add column disabled text"),
+        "alter event trigger supabase_etl_ddl_message_trigger enable".to_owned(),
+        "alter function etl.describe_table_columns(oid) rename to describe_table_columns_moved"
+            .to_owned(),
+        format!("alter table {table} add column failed text"),
+        "alter function etl.describe_table_columns_moved(oid) rename to describe_table_columns"
+            .to_owned(),
+        format!("alter table {table} add column captured text"),
+    ] {
+        database.run_sql(&sql).await.unwrap();
+    }
 
-    let result = timeout(Duration::from_secs(2), collect_ddl_messages(stream, 1)).await;
-    assert!(
-        result.is_err(),
-        "ddl messages should be suppressed when supabase_etl.skip_ddl_log is enabled"
-    );
+    // Messages arrive in WAL order, so the first one proves the earlier DDL
+    // emitted nothing.
+    let messages = collect_ddl_messages(stream, 1).await;
+    let columns = column_schemas_from_ddl_message(&messages[0]);
+    assert_eq!(columns.last().unwrap().name, "captured");
+    assert_eq!(columns.len(), 6);
 }
 
 #[tokio::test(flavor = "multi_thread")]

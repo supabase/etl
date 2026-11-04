@@ -61,8 +61,37 @@ shared defaults later requires a migration to refresh the helper. SQLx's separat
 float-precision option is disabled so it cannot override the shared setting.
 
 Helpers use qualified catalog references and `search_path = pg_catalog, pg_temp`.
-Direct execution is revoked from PUBLIC; table owners execute the trigger with
-its trusted owner's privileges. Keep the `etl` schema and helper owner trusted.
+
+### Ownership and disabling
+
+The role that runs the source migrations owns the `etl` schema, every helper,
+and the event trigger. Run pipelines as that same role: copy, CDC, and the
+trigger need no other grants, and PUBLIC execution stays revoked. A separate
+pipeline role needs explicit grants, listed in the
+[configuration guide](../../../site/content/docs/guides/configure-postgres.mdx).
+
+The trigger function is `SECURITY DEFINER` so DDL issuers need no helper
+grants. It also matters with Supabase's `supautils`, which skips non-superuser
+event triggers for superusers: privileged `ALTER PUBLICATION` runs elevated, and
+only a definer function is checked against the outer, real user. `supautils`
+never captures DDL run directly by superusers or reserved roles, including the
+ETL role itself; tables changed that way may need resynchronization.
+
+Capture never blocks customer DDL. A capture error raises a warning and lets
+the DDL commit without a snapshot; ETL then rejects a later relation whose
+columns disagree with its stored schema. Messages are emitted outside the
+exception block, because a subtransaction XID would change their decoded order
+relative to DML in the same transaction. To turn capture
+off, the owner or a superuser runs:
+
+```sql
+alter event trigger supabase_etl_ddl_message_trigger disable;
+```
+
+Upgrades replace the trigger function in place, so a disabled trigger stays
+disabled. Re-enable it with `enable`, or remove it with `drop event trigger`.
+`set supabase_etl.skip_ddl_log = on` skips capture for one session. DDL without
+a snapshot can require resynchronizing affected tables.
 
 ### Missing values and defaults
 
@@ -147,9 +176,8 @@ and `POSTGRES_DB`; see the [development guide](../../../DEVELOPMENT.md).
 
 When source migrations are disabled, apply the latest source set before starting
 this binary: initial copy requires the new column and publication helpers. The
-upgrade preserves non-PUBLIC reader grants from `describe_table_schema`,
-including grant options, and gives the retained trigger owner access to its new
-private helper. Fresh replication roles need the grants in the
+upgrade grants nothing to other roles; a pipeline role that does not own the
+helpers needs the grants in the
 [configuration guide](../../../site/content/docs/guides/configure-postgres.mdx).
 
 Queued legacy payloads remain readable without reconstructing missing history
@@ -169,8 +197,8 @@ source migrations on the primary and allow them to replay before starting a
 pipeline against a standby.
 
 The integration tests in [`tests/migrations.rs`](../tests/migrations.rs) cover
-upgrade/rollback compatibility, queued legacy messages, helper grants, and
-shared history. With the local Postgres services running:
+upgrade/rollback compatibility, queued legacy messages, trigger state across
+upgrades, and shared history. With the local Postgres services running:
 
 ```bash
 cargo nextest run --locked -p etl --all-features --test main -E 'test(migrations::)'
