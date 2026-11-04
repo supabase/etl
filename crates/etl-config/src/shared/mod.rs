@@ -1,6 +1,7 @@
 mod base;
 mod connection;
 mod destination;
+mod ducklake;
 mod health;
 mod pipeline;
 mod replicator;
@@ -21,6 +22,10 @@ pub use destination::{
     DuckLakeMaintenanceMode, DuckLakeSortBy, DuckLakeSortColumn, DuckLakeSortDirection,
     DuckLakeSortNulls, DuckLakeTableSortConfig, DuckLakeTableSortingConfig, DuckLakeWriterConfig,
     IcebergConfig, IcebergConfigWithoutSecrets,
+};
+pub use ducklake::{
+    DuckLakePartitionColumn, DuckLakePartitionTransform, DuckLakeTablePartitionConfig,
+    DuckLakeTablePartitioningConfig,
 };
 pub use health::ReplicatorHealthConfig;
 pub use pipeline::{

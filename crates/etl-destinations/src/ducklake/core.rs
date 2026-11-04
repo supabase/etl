@@ -28,8 +28,9 @@ use etl::{
 use etl_config::{
     ducklake_catalog_metadata_connect_options,
     shared::{
-        DuckLakeCopyBufferConfig, DuckLakeSortBy, DuckLakeSortColumn, DuckLakeSortDirection,
-        DuckLakeSortNulls, DuckLakeTableSortingConfig, DuckLakeWriterConfig, Validate,
+        DuckLakeCopyBufferConfig, DuckLakePartitionColumn, DuckLakeSortBy, DuckLakeSortColumn,
+        DuckLakeSortDirection, DuckLakeSortNulls, DuckLakeTablePartitioningConfig,
+        DuckLakeTableSortingConfig, DuckLakeWriterConfig, Validate,
     },
 };
 use etl_maintenance::{
@@ -89,8 +90,9 @@ use crate::{
             build_add_column_sql_ducklake, build_create_table_sql_ducklake,
             build_disable_sort_on_insert_sql_ducklake, build_drop_column_sql_ducklake,
             build_drop_default_sql_ducklake, build_drop_not_null_sql_ducklake,
-            build_rename_column_sql_ducklake, build_reset_sorted_by_sql_ducklake,
-            build_set_default_sql_ducklake, build_set_sorted_by_sql_ducklake,
+            build_partition_by_sql_ducklake, build_rename_column_sql_ducklake,
+            build_reset_sorted_by_sql_ducklake, build_set_default_sql_ducklake,
+            build_set_sorted_by_sql_ducklake,
         },
         sql::{qualified_lake_table_name, quote_identifier},
     },
@@ -313,6 +315,7 @@ fn resolve_table_sort_columns(
     };
 
     match sort_by {
+        DuckLakeSortBy::None => Ok(None),
         DuckLakeSortBy::Columns { columns } => {
             let replicated_columns: HashSet<_> =
                 table_schema.column_schemas().map(|column| column.name.as_str()).collect();
@@ -563,6 +566,8 @@ pub struct DuckLakeDestination<S> {
     metadata_pg_pool: PgPool,
     /// Desired per-table sort orders indexed by source schema and table.
     table_sorting: Arc<HashMap<DuckLakeTableName, DuckLakeSortBy>>,
+    /// Explicit desired partition specifications, including clear operations.
+    table_partitioning: Arc<HashMap<DuckLakeTableName, Vec<DuckLakePartitionColumn>>>,
     table_creation_slots: Arc<Semaphore>,
     table_write_slots: Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
     /// Experimental initial-copy buffering policy.
@@ -623,6 +628,8 @@ pub struct DuckLakeDestinationBuilder<S> {
     copy_buffer_config: DuckLakeCopyBufferConfig,
     /// Desired per-table sort orders.
     table_sorting: DuckLakeTableSortingConfig,
+    /// Desired per-table partition specifications.
+    table_partitioning: DuckLakeTablePartitioningConfig,
     /// External-maintenance coordination policy.
     external_maintenance: DuckLakeExternalMaintenanceConfig,
     /// Durable destination store.
@@ -645,6 +652,7 @@ impl<S> DuckLakeDestinationBuilder<S> {
             expire_snapshots_older_than: None,
             copy_buffer_config: DuckLakeCopyBufferConfig::default(),
             table_sorting: DuckLakeTableSortingConfig::default(),
+            table_partitioning: DuckLakeTablePartitioningConfig::default(),
             external_maintenance: DuckLakeExternalMaintenanceConfig::default(),
             store,
         }
@@ -707,6 +715,16 @@ impl<S> DuckLakeDestinationBuilder<S> {
         self
     }
 
+    /// Sets the desired partition specifications without rewriting historical
+    /// files.
+    pub fn table_partitioning(
+        mut self,
+        table_partitioning: DuckLakeTablePartitioningConfig,
+    ) -> Self {
+        self.table_partitioning = table_partitioning;
+        self
+    }
+
     /// Sets the external-maintenance coordination policy.
     pub fn external_maintenance(
         mut self,
@@ -738,6 +756,7 @@ where
             self.expire_snapshots_older_than,
             self.copy_buffer_config,
             self.table_sorting,
+            self.table_partitioning,
             self.external_maintenance,
             self.store,
         )
@@ -1784,6 +1803,7 @@ where
             expire_snapshots_older_than,
             DuckLakeCopyBufferConfig::default(),
             DuckLakeTableSortingConfig::default(),
+            DuckLakeTablePartitioningConfig::default(),
             DuckLakeExternalMaintenanceConfig::default(),
             store,
         )
@@ -1852,6 +1872,7 @@ where
         expire_snapshots_older_than: Option<String>,
         copy_buffer_config: DuckLakeCopyBufferConfig,
         table_sorting: DuckLakeTableSortingConfig,
+        table_partitioning: DuckLakeTablePartitioningConfig,
         external_maintenance: DuckLakeExternalMaintenanceConfig,
         store: S,
     ) -> EtlResult<Self> {
@@ -1879,7 +1900,7 @@ where
                 error,
             )
         })?;
-        if !table_sorting.is_empty()
+        if table_sorting.tables.iter().any(|table| table.sort_by != DuckLakeSortBy::None)
             && external_maintenance.mode == DuckLakeMaintenanceMode::Disabled
         {
             return Err(etl_error!(
@@ -1888,7 +1909,26 @@ where
                 "Set DuckLake maintenance_mode to `kubernetes` or `postgres`"
             ));
         }
+        table_partitioning.validate().map_err(|source| {
+            classified_error(
+                ErrorKind::ConfigError,
+                "DuckLake partition configuration is invalid",
+                source,
+            )
+        })?;
         let table_sorting = Arc::new(index_table_sorting_config(table_sorting)?);
+        let table_partitioning = Arc::new(
+            table_partitioning
+                .tables()
+                .iter()
+                .map(|table| {
+                    (
+                        DuckLakeTableName::new(table.schema().to_owned(), table.table().to_owned()),
+                        table.partition_by().to_vec(),
+                    )
+                })
+                .collect(),
+        );
 
         let extension_strategy = current_duckdb_extension_strategy()?;
         let disable_extension_autoload = extension_strategy.disables_autoload();
@@ -2062,6 +2102,7 @@ where
             expire_snapshots_older_than: Arc::clone(&expire_snapshots_older_than),
             metadata_pg_pool: metadata_pg_pool.clone(),
             table_sorting,
+            table_partitioning,
             table_creation_slots,
             table_write_slots: Arc::default(),
             copy_buffer_config,
@@ -2836,6 +2877,7 @@ where
         }
         self.reconcile_missing_replicated_columns(&table_name, new_replicated_table_schema).await?;
         self.reconcile_table_sorting(&table_name, new_replicated_table_schema).await?;
+        self.reconcile_table_partitioning(&table_name, new_replicated_table_schema).await?;
 
         let applied_metadata = updated_metadata.to_applied();
         self.store.store_destination_table_metadata(table_id, applied_metadata).await?;
@@ -2940,6 +2982,9 @@ where
         table_name: &DuckLakeTableName,
         table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
+        if !self.table_sorting.contains_key(table_name) {
+            return Ok(());
+        }
         let desired =
             resolve_table_sort_columns(self.table_sorting.as_ref(), table_name, table_schema)?;
         let table_write_permit = self.acquire_table_write_slot(table_name).await?;
@@ -3010,6 +3055,96 @@ where
                 )
             })?;
             debug!(table = %table_name, "ducklake table sorting reconciled");
+            Ok(())
+        })
+        .await
+    }
+
+    /// Applies explicit partition specifications under the table mutation
+    /// guards. Historical files retain their original partition
+    /// specifications.
+    async fn reconcile_table_partitioning(
+        &self,
+        table_name: &DuckLakeTableName,
+        table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        let Some(keys) = self.table_partitioning.get(table_name) else {
+            // Older configurations must not clear externally configured
+            // partitions.
+            return Ok(());
+        };
+        let columns = table_schema
+            .column_schemas()
+            .map(|column| (column.name.as_str(), column))
+            .collect::<HashMap<_, _>>();
+        let mut desired = Vec::with_capacity(keys.len());
+        for key in keys {
+            let column = columns.get(key.column()).ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::ConfigError,
+                    "DuckLake partition column is not replicated",
+                    format!("Table `{table_name}` does not replicate column `{}`", key.column())
+                )
+            })?;
+            if !key.transform().supports_postgres_type(&column.typ) {
+                return Err(etl_error!(
+                    ErrorKind::ConfigError,
+                    "DuckLake partition transform does not support the column type",
+                    format!(
+                        "Table `{table_name}`, column `{}`, transform `{}`, type `{}`",
+                        key.column(),
+                        key.transform().catalog_name(),
+                        column.typ.name()
+                    )
+                ));
+            }
+            desired.push(DuckLakePartitionColumn::new(
+                DUCKLAKE_COLUMN_NAME_MAPPING.map_name(key.column()),
+                key.transform(),
+            ));
+        }
+        let table_write_permit = self.acquire_table_write_slot(table_name).await?;
+        let checkpoint_guard = self.acquire_mutation_guard().await;
+        let write_guard = DuckLakeWriteGuard::new(&table_write_permit, &checkpoint_guard);
+        let schema = quote_postgres_identifier(self.metadata_schema.as_ref());
+        let sql = format!(
+            "select c.column_name, p.transform from {schema}.ducklake_partition_column p join \
+             {schema}.ducklake_partition_info i using (partition_id, table_id) join \
+             {schema}.ducklake_table t on t.table_id = i.table_id join {schema}.ducklake_schema s \
+             on s.schema_id = t.schema_id join {schema}.ducklake_column c on c.table_id = \
+             p.table_id and c.column_id = p.column_id where s.schema_name = $1 and t.table_name = \
+             $2 and s.end_snapshot is null and t.end_snapshot is null and i.end_snapshot is null \
+             and c.end_snapshot is null order by p.partition_key_index"
+        );
+        let active: Vec<(String, String)> = sqlx::query_as(AssertSqlSafe(sql))
+            .bind(table_name.schema())
+            .bind(table_name.table())
+            .fetch_all(&self.metadata_pg_pool)
+            .await
+            .map_err(|source| {
+                classified_error(
+                    ErrorKind::DestinationQueryFailed,
+                    "DuckLake partition specification query failed",
+                    source,
+                )
+            })?;
+        if active.len() == desired.len()
+            && active.iter().zip(&desired).all(|((name, transform), key)| {
+                name == key.column() && transform == &key.transform().catalog_name()
+            })
+        {
+            return Ok(());
+        }
+        let ddl = build_partition_by_sql_ducklake(table_name, &desired);
+        run_duckdb_blocking(self.streaming_pool()?, Arc::clone(&self.blocking_slots), move |conn| {
+            let _write_guard = write_guard;
+            conn.execute_batch(&ddl).map_err(|source| {
+                classified_error(
+                    ErrorKind::DestinationQueryFailed,
+                    "DuckLake partition reconciliation failed",
+                    RedactedDuckDbError::from(source),
+                )
+            })?;
             Ok(())
         })
         .await
@@ -3179,6 +3314,17 @@ where
                 continue;
             }
 
+            // Layout reconciliation is independent of physical schema repair.
+            // Only explicitly managed tables need catalog reads after restart.
+            if self.table_sorting.contains_key(&table_name)
+                || self.table_partitioning.contains_key(&table_name)
+            {
+                let schema = self.target_schema_for_recovery(table_id, &metadata, None).await?;
+                if self.table_sorting.contains_key(&table_name) {
+                    self.reconcile_table_sorting(&table_name, &schema).await?;
+                }
+                self.reconcile_table_partitioning(&table_name, &schema).await?;
+            }
             self.applied_tables.lock().insert(table_name);
         }
 
@@ -3525,6 +3671,7 @@ where
         self.issue_create_table_stmt(table_name, replicated_table_schema).await?;
         self.reconcile_missing_replicated_columns(table_name, replicated_table_schema).await?;
         self.reconcile_table_sorting(table_name, replicated_table_schema).await?;
+        self.reconcile_table_partitioning(table_name, replicated_table_schema).await?;
 
         self.store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
         self.applied_tables.lock().insert(table_name.clone());
@@ -3693,6 +3840,7 @@ where
         }
         self.reconcile_missing_replicated_columns(table_name, &target_schema).await?;
         self.reconcile_table_sorting(table_name, &target_schema).await?;
+        self.reconcile_table_partitioning(table_name, &target_schema).await?;
 
         let metadata = metadata.to_applied();
         self.store.store_destination_table_metadata(table_id, metadata.clone()).await?;
