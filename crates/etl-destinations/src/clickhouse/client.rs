@@ -1450,20 +1450,9 @@ mod tests {
         use clickhouse::error::Error;
 
         /// Stand-in for a connector error that exposes its cause as `source()`.
-        #[derive(Debug)]
-        struct ConnectError(io::Error);
-
-        impl std::fmt::Display for ConnectError {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("dns error")
-            }
-        }
-
-        impl std::error::Error for ConnectError {
-            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-                Some(&self.0)
-            }
-        }
+        #[derive(Debug, thiserror::Error)]
+        #[error("dns error")]
+        struct ConnectError(#[source] io::Error);
 
         let denied = || io::Error::new(io::ErrorKind::PermissionDenied, "non-public IP address");
 

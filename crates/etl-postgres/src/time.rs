@@ -8,6 +8,7 @@ use std::{
 };
 
 use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use thiserror::Error;
 pub use tokio_postgres::types::{Date, Timestamp};
 
 /// Postgres date format string for parsing dates in YYYY-MM-DD format.
@@ -36,36 +37,14 @@ pub static POSTGRES_EPOCH: LazyLock<SystemTime> =
     LazyLock::new(|| UNIX_EPOCH + Duration::from_secs(POSTGRES_EPOCH_OFFSET_SECONDS));
 
 /// Error types that can occur when parsing Postgres temporal strings.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Error)]
 pub enum ParseTimeError {
     /// The underlying calendar or clock value failed chrono parsing.
-    Chrono(chrono::ParseError),
+    #[error("{0}")]
+    Chrono(#[from] chrono::ParseError),
     /// The input string has invalid temporal syntax.
+    #[error("Invalid syntax")]
     InvalidSyntax,
-}
-
-impl From<chrono::ParseError> for ParseTimeError {
-    fn from(error: chrono::ParseError) -> Self {
-        Self::Chrono(error)
-    }
-}
-
-impl fmt::Display for ParseTimeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ParseTimeError::Chrono(error) => write!(f, "{error}"),
-            ParseTimeError::InvalidSyntax => write!(f, "Invalid syntax"),
-        }
-    }
-}
-
-impl std::error::Error for ParseTimeError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            ParseTimeError::Chrono(error) => Some(error),
-            ParseTimeError::InvalidSyntax => None,
-        }
-    }
 }
 
 /// A Postgres time of day, including the distinct end-of-day value.
@@ -363,13 +342,32 @@ mod tests {
         assert!("12:30:00+aéa".parse::<PgTimeTz>().is_err());
     }
 
+    /// Chrono remains a distinct source layer, including after `From`
+    /// conversion.
+    #[test]
+    fn chrono_error_preserves_display_conversion_and_source() {
+        let chrono_error = NaiveTime::parse_from_str("24:00:01", TIME_FORMAT).unwrap_err();
+        let error = ParseTimeError::from(chrono_error);
+
+        assert_eq!(error, ParseTimeError::Chrono(chrono_error));
+        assert_eq!(error.to_string(), chrono_error.to_string());
+        assert_eq!(format!("{error:>#40.3}"), chrono_error.to_string());
+        let source = std::error::Error::source(&error).unwrap();
+        assert_eq!(source.downcast_ref::<chrono::ParseError>(), Some(&chrono_error));
+        assert!(source.source().is_none());
+    }
+
     #[test]
     fn timetz_distinguishes_chrono_and_offset_errors() {
         assert!(matches!(
             "24:00:01+00".parse::<PgTimeTz>().unwrap_err(),
             ParseTimeError::Chrono(_)
         ));
-        assert_eq!("12:30:00+16".parse::<PgTimeTz>().unwrap_err(), ParseTimeError::InvalidSyntax);
+        let error = "12:30:00+16".parse::<PgTimeTz>().unwrap_err();
+        assert_eq!(error, ParseTimeError::InvalidSyntax);
+        assert_eq!(error.to_string(), "Invalid syntax");
+        assert_eq!(format!("{error:>#40.3}"), "Invalid syntax");
+        assert!(std::error::Error::source(&error).is_none());
     }
 
     #[test]

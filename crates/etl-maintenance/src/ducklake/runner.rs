@@ -2,7 +2,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    env, error, fmt,
+    env, fmt,
     path::{Path, PathBuf},
     process,
     str::FromStr,
@@ -784,7 +784,8 @@ fn build_setup_plan_with_strategy(
     Ok(DuckLakeSetupPlan { steps })
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
 struct DuckLakeConnectionError {
     message: String,
 }
@@ -806,14 +807,6 @@ impl DuckLakeConnectionError {
         Self { message: format!("DuckLake DuckDB connection validation failed: {error}") }
     }
 }
-
-impl fmt::Display for DuckLakeConnectionError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        f.write_str(&self.message)
-    }
-}
-
-impl error::Error for DuckLakeConnectionError {}
 
 fn remaining_ms_until(deadline: Instant) -> u64 {
     deadline.checked_duration_since(Instant::now()).unwrap_or(Duration::ZERO).as_millis() as u64
@@ -3848,8 +3841,11 @@ mod tests {
             ),
         );
 
+        let error = DuckLakeConnectionError::setup_phase(&step, error);
+        assert!(std::error::Error::source(&error).is_none());
+        assert_eq!(format!("{error:>#200.3}"), error.to_string());
         assert_eq!(
-            DuckLakeConnectionError::setup_phase(&step, error).to_string(),
+            error.to_string(),
             "ducklake duckdb connection setup phase `configure_parquet` failed: IO Error: Unable \
              to connect to Postgres at \"host='localhost' password='[redacted]'\""
         );

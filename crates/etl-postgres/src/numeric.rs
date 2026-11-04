@@ -3,6 +3,7 @@
 use std::{io::Cursor, str::FromStr};
 
 use byteorder::{BigEndian, ReadBytesExt};
+use thiserror::Error;
 use tokio_postgres::types::{FromSql, IsNull, ToSql, Type};
 
 /// Postgres positive numeric sign marker.
@@ -217,24 +218,15 @@ impl ToSql for PgNumeric {
 ///
 /// [`ParseNumericError`] provides specific error categories for numeric parsing
 /// failures, enabling appropriate error handling and user feedback.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Error)]
 pub enum ParseNumericError {
     /// The input string has invalid numeric syntax.
+    #[error("Invalid syntax")]
     InvalidSyntax,
     /// The numeric value is outside the representable range.
+    #[error("Value out of range")]
     ValueOutOfRange,
 }
-
-impl std::fmt::Display for ParseNumericError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ParseNumericError::InvalidSyntax => write!(f, "Invalid syntax"),
-            ParseNumericError::ValueOutOfRange => write!(f, "Value out of range"),
-        }
-    }
-}
-
-impl std::error::Error for ParseNumericError {}
 
 /// Parses special numeric values like NaN, Infinity, and -Infinity.
 ///
@@ -568,6 +560,20 @@ mod tests {
     use bytes::BytesMut;
 
     use super::*;
+
+    /// Numeric errors retain their exact messages and have no underlying
+    /// source.
+    #[test]
+    fn parse_errors_preserve_display_and_source() {
+        for (error, message) in [
+            (ParseNumericError::InvalidSyntax, "Invalid syntax"),
+            (ParseNumericError::ValueOutOfRange, "Value out of range"),
+        ] {
+            assert_eq!(error.to_string(), message);
+            assert_eq!(format!("{error:>#40.3}"), message);
+            assert!(std::error::Error::source(&error).is_none());
+        }
+    }
 
     #[test]
     fn parses_finite_values_into_base_10000_digits() {

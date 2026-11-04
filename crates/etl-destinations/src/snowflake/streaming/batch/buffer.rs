@@ -1,6 +1,6 @@
 //! Byte sink with a hard cap.
 
-use std::{fmt, io};
+use std::io;
 
 /// Initial allocation for a bounded buffer.
 ///
@@ -9,16 +9,9 @@ use std::{fmt, io};
 const INITIAL_CAPACITY: usize = 4096;
 
 /// Error returned by [`BoundedBuffer`] when a write would exceed its limit.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("bounded buffer limit exceeded")]
 pub(super) struct LimitExceeded;
-
-impl fmt::Display for LimitExceeded {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("bounded buffer limit exceeded")
-    }
-}
-
-impl std::error::Error for LimitExceeded {}
 
 /// Growable byte sink that refuses to exceed a fixed limit.
 ///
@@ -138,7 +131,10 @@ mod tests {
         buffer.write_all(&[1; 7]).unwrap();
         let capacity = buffer.capacity();
 
-        assert!(buffer.write_all(&[2; 2]).is_err());
+        let error = buffer.write_all(&[2; 2]).unwrap_err();
+        assert_eq!(error.to_string(), "bounded buffer limit exceeded");
+        let source = error.get_ref().unwrap().downcast_ref::<LimitExceeded>().unwrap();
+        assert!(std::error::Error::source(source).is_none());
 
         assert_eq!(buffer.len(), 7);
         assert_eq!(buffer.capacity(), capacity);

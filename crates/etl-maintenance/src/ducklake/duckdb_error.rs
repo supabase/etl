@@ -7,7 +7,7 @@
 //! [`duckdb::Error`] into a [`RedactedDuckDbError`] before it logs the error or
 //! attaches it to an [`etl::error::EtlError`].
 
-use std::{borrow::Cow, error, fmt, sync::LazyLock};
+use std::{borrow::Cow, sync::LazyLock};
 
 use regex::Regex;
 
@@ -82,7 +82,8 @@ pub fn redact_credentials(message: &str) -> Cow<'_, str> {
 ///
 /// Keeps no source: the wrapped [`duckdb::Error`] would expose the original
 /// message to anything that walks the error chain.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
 pub struct RedactedDuckDbError {
     message: String,
 }
@@ -102,14 +103,6 @@ impl From<duckdb::Error> for RedactedDuckDbError {
         Self { message: redact_credentials(&error.to_string()).into_owned() }
     }
 }
-
-impl fmt::Display for RedactedDuckDbError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
-impl error::Error for RedactedDuckDbError {}
 
 #[cfg(test)]
 mod tests {
@@ -218,6 +211,8 @@ mod tests {
             ),
         ));
 
+        assert!(std::error::Error::source(&error).is_none());
+        assert_eq!(format!("{error:>#200.3}"), error.to_string());
         assert_eq!(
             error.to_string(),
             "IO Error: Unable to connect to Postgres at \"password='[redacted]'\""
