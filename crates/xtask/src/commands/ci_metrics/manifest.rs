@@ -21,6 +21,22 @@ use crate::{
 /// baselines, but they are benchmark history; the manifest `trigger` tells
 /// them apart.
 const BENCHMARK_ARTIFACT_PREFIXES: &[&str] = &["benchmark-results-", "benchmark-backfill-"];
+/// Artifact name prefix of dependency audit uploads. The suffix is the
+/// producing job's id.
+const AUDIT_ARTIFACT_PREFIX: &str = "audit-results-";
+/// Kind of the audit manifest that `.github/ci-metrics/audit-manifest.jq`
+/// writes.
+pub(super) const AUDIT_KIND: &str = "audit";
+/// Supported audit manifest schema version.
+pub(super) const AUDIT_SCHEMA_VERSION: i32 = 1;
+/// Tool whose findings an audit manifest carries.
+const AUDIT_TOOL: &str = "cargo-deny";
+/// Most findings accepted in one audit manifest.
+const MAX_FINDINGS: usize = 1_000;
+/// Longest advisory id, crate name or crate version accepted.
+const MAX_AUDIT_FIELD_LEN: usize = 64;
+/// Diagnostic severities `cargo deny` reports.
+const AUDIT_SEVERITIES: &[&str] = &["error", "warning", "note", "help"];
 /// Largest artifact archive downloaded.
 pub(super) const MAX_ARCHIVE_BYTES: u64 = 4 * 1024 * 1024;
 /// Largest single file read from an archive. A test manifest of about 1,900
@@ -77,6 +93,8 @@ pub(super) enum ArtifactKind {
     Benchmark,
     /// Per-test results of the job with this id.
     Test { job_id: i64 },
+    /// Dependency audit findings of the job with this id.
+    Audit { job_id: i64 },
 }
 
 /// Returns the kind of manifest an artifact carries, or `None` for other
@@ -85,11 +103,20 @@ pub(super) fn artifact_kind(name: &str) -> Option<ArtifactKind> {
     if BENCHMARK_ARTIFACT_PREFIXES.iter().any(|prefix| name.starts_with(prefix)) {
         return Some(ArtifactKind::Benchmark);
     }
-    let job_id = name.strip_prefix(test_manifest::ARTIFACT_PREFIX)?;
-    if !job_id.bytes().all(|byte| byte.is_ascii_digit()) {
+    if let Some(job_id) = name.strip_prefix(test_manifest::ARTIFACT_PREFIX) {
+        return parse_job_id(job_id).map(|job_id| ArtifactKind::Test { job_id });
+    }
+    let job_id = name.strip_prefix(AUDIT_ARTIFACT_PREFIX)?;
+    parse_job_id(job_id).map(|job_id| ArtifactKind::Audit { job_id })
+}
+
+/// Parses the job id suffix of an artifact name: plain decimal digits of a
+/// positive id.
+fn parse_job_id(suffix: &str) -> Option<i64> {
+    if !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
-    job_id.parse().ok().filter(|id| *id > 0).map(|job_id| ArtifactKind::Test { job_id })
+    suffix.parse().ok().filter(|id| *id > 0)
 }
 
 /// One file named in an archive listing.
@@ -353,6 +380,138 @@ pub(super) fn parse_test_manifest(
     Ok(manifest)
 }
 
+/// Dependency audit manifest, schema version 1.
+#[derive(Debug, Deserialize)]
+pub(super) struct AuditManifest {
+    schema_version: i32,
+    kind: String,
+    github: AuditJob,
+    tool: AuditTool,
+    summary: AuditSummary,
+    findings: Vec<AuditFinding>,
+}
+
+/// GitHub identity of the job that ran the audit.
+#[derive(Debug, Deserialize)]
+struct AuditJob {
+    repository: String,
+    run_id: i64,
+    run_attempt: i32,
+    job_id: i64,
+}
+
+/// Audit tool and version.
+#[derive(Debug, Deserialize)]
+struct AuditTool {
+    name: String,
+    version: String,
+}
+
+/// Diagnostic counts of the audit, including advisories that `deny.toml`
+/// ignores, which `cargo deny` reports as notes.
+#[derive(Debug, Deserialize)]
+struct AuditSummary {
+    errors: u32,
+    warnings: u32,
+    notes: u32,
+    helps: u32,
+}
+
+/// One advisory affecting one crate version.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub(super) struct AuditFinding {
+    /// Advisory id, such as `RUSTSEC-2026-0435`.
+    pub(super) advisory_id: String,
+    /// `cargo deny` diagnostic code, such as `vulnerability` or
+    /// `unmaintained`.
+    pub(super) kind: String,
+    /// Diagnostic severity: `error`, `warning`, `note` or `help`.
+    pub(super) severity: String,
+    /// Affected crate.
+    pub(super) package: String,
+    /// Affected crate version.
+    pub(super) version: String,
+    /// Advisory title, at most [`MAX_STRING_LEN`] characters.
+    pub(super) title: String,
+}
+
+impl AuditManifest {
+    /// Returns the run attempt that ran the audit.
+    pub(super) fn run_attempt(&self) -> i32 {
+        self.github.run_attempt
+    }
+
+    /// Returns the stored payload: the tool and the diagnostic counts.
+    pub(super) fn payload(&self) -> Value {
+        json!({
+            "tool": self.tool.name,
+            "tool_version": self.tool.version,
+            "errors": self.summary.errors,
+            "warnings": self.summary.warnings,
+            "notes": self.summary.notes,
+            "helps": self.summary.helps,
+            "findings": self.findings.len(),
+        })
+    }
+
+    /// Returns the findings, consuming the manifest.
+    pub(super) fn into_findings(self) -> Vec<AuditFinding> {
+        self.findings
+    }
+}
+
+/// Parses and validates an audit manifest from `repo` run `run_id`, uploaded
+/// as the artifact of job `job_id`.
+pub(super) fn parse_audit_manifest(
+    bytes: &[u8],
+    repo: &str,
+    run_id: i64,
+    job_id: i64,
+) -> Result<AuditManifest, Rejection> {
+    let manifest: AuditManifest = serde_json::from_slice(bytes).map_err(|_| Rejection::Invalid)?;
+    if manifest.kind != AUDIT_KIND || manifest.schema_version != AUDIT_SCHEMA_VERSION {
+        return Err(Rejection::Unsupported);
+    }
+    let github = &manifest.github;
+    if github.repository != repo || github.run_id != run_id || github.job_id != job_id {
+        return Err(Rejection::WrongRun);
+    }
+    let mut seen = HashSet::new();
+    let valid = github.run_attempt >= 1
+        && manifest.tool.name == AUDIT_TOOL
+        && is_audit_token(&manifest.tool.version, b"._-+")
+        && manifest.findings.len() <= MAX_FINDINGS
+        && manifest.findings.iter().all(|finding| {
+            is_audit_token(&finding.advisory_id, b"-")
+                && is_identifier(&finding.kind)
+                && AUDIT_SEVERITIES.contains(&finding.severity.as_str())
+                && is_audit_token(&finding.package, b"_-")
+                && is_audit_token(&finding.version, b"._-+")
+                && is_title(&finding.title)
+                && seen.insert((&finding.advisory_id, &finding.package, &finding.version))
+        });
+    if !valid {
+        return Err(Rejection::Invalid);
+    }
+    Ok(manifest)
+}
+
+/// Returns whether `value` is a short token of ASCII letters, digits and the
+/// given punctuation, such as an advisory id, crate name or version.
+fn is_audit_token(value: &str, punctuation: &[u8]) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_AUDIT_FIELD_LEN
+        && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || punctuation.contains(&byte))
+}
+
+/// Returns whether `value` is a non-empty single-line title of at most
+/// [`MAX_STRING_LEN`] characters.
+fn is_title(value: &str) -> bool {
+    !value.is_empty()
+        && value.chars().count() <= MAX_STRING_LEN
+        && !value.chars().any(char::is_control)
+}
+
 /// Returns whether `value` is a plausible nextest binary id or Rust test name.
 fn is_test_name(value: &str) -> bool {
     !value.is_empty()
@@ -473,6 +632,10 @@ mod tests {
             artifact_kind("test-results-56250883441"),
             Some(ArtifactKind::Test { job_id: 56_250_883_441 })
         );
+        assert_eq!(
+            artifact_kind("audit-results-56250883441"),
+            Some(ArtifactKind::Audit { job_id: 56_250_883_441 })
+        );
         for name in [
             "benchmark-failed-snowflake",
             "fuzz-artifacts-parse_text_cell",
@@ -481,6 +644,9 @@ mod tests {
             "test-results-+5",
             "test-results-12x",
             "test-results-99999999999999999999",
+            "audit-results-",
+            "audit-results-0",
+            "audit-results-7a",
             "coverage",
         ] {
             assert_eq!(artifact_kind(name), None, "{name}");
@@ -567,6 +733,146 @@ mod tests {
             parse_test_manifest(b"{\"kind\": \"te", REPO, RUN_ID, JOB_ID).unwrap_err(),
             Rejection::Invalid
         );
+    }
+
+    /// An audit manifest as `.github/ci-metrics/audit-manifest.jq` writes it.
+    fn audit_manifest_json() -> Value {
+        json!({
+            "schema_version": 1,
+            "kind": "audit",
+            "github": { "repository": REPO, "run_id": RUN_ID, "run_attempt": 1, "job_id": JOB_ID },
+            "tool": { "name": "cargo-deny", "version": "0.19.0" },
+            "summary": { "errors": 2, "warnings": 0, "notes": 3, "helps": 0 },
+            "findings": [
+                {
+                    "advisory_id": "RUSTSEC-2026-0435",
+                    "kind": "vulnerability",
+                    "severity": "error",
+                    "package": "thrift",
+                    "version": "0.17.0",
+                    "title": "Unbounded memory allocation in `thrift` binary protocol `read_bytes`",
+                },
+                {
+                    "advisory_id": "RUSTSEC-2026-0403",
+                    "kind": "vulnerability",
+                    "severity": "error",
+                    "package": "zstd-safe",
+                    "version": "7.2.4+zstd.1.5.7",
+                    "title": "Uninitialized memory exposed when streaming decompression",
+                },
+            ],
+        })
+    }
+
+    fn parse_audit(value: &Value) -> Result<AuditManifest, Rejection> {
+        parse_audit_manifest(&serde_json::to_vec(value).unwrap(), REPO, RUN_ID, JOB_ID)
+    }
+
+    #[test]
+    fn parses_producer_audit_manifest() {
+        let manifest = parse_audit(&audit_manifest_json()).unwrap();
+        assert_eq!(manifest.run_attempt(), 1);
+        assert_eq!(
+            manifest.payload(),
+            json!({
+                "tool": "cargo-deny",
+                "tool_version": "0.19.0",
+                "errors": 2,
+                "warnings": 0,
+                "notes": 3,
+                "helps": 0,
+                "findings": 2,
+            })
+        );
+        let findings: Vec<_> = manifest
+            .into_findings()
+            .into_iter()
+            .map(|finding| (finding.advisory_id, finding.package, finding.version))
+            .collect();
+        assert_eq!(
+            findings,
+            [
+                ("RUSTSEC-2026-0435".to_owned(), "thrift".to_owned(), "0.17.0".to_owned()),
+                (
+                    "RUSTSEC-2026-0403".to_owned(),
+                    "zstd-safe".to_owned(),
+                    "7.2.4+zstd.1.5.7".to_owned()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn audit_manifest_without_findings_is_valid() {
+        let mut manifest = audit_manifest_json();
+        manifest["findings"] = json!([]);
+        assert_eq!(parse_audit(&manifest).unwrap().into_findings(), []);
+    }
+
+    #[test]
+    fn rejects_audit_manifest_from_other_job_or_version() {
+        for (pointer, value) in [
+            ("/github/job_id", json!(1)),
+            ("/github/run_id", json!(1)),
+            ("/github/repository", json!("someone/fork")),
+        ] {
+            let mut manifest = audit_manifest_json();
+            *manifest.pointer_mut(pointer).unwrap() = value;
+            assert_eq!(parse_audit(&manifest).unwrap_err(), Rejection::WrongRun, "{pointer}");
+        }
+        for (pointer, value) in [("/schema_version", json!(2)), ("/kind", json!("test"))] {
+            let mut manifest = audit_manifest_json();
+            *manifest.pointer_mut(pointer).unwrap() = value;
+            assert_eq!(parse_audit(&manifest).unwrap_err(), Rejection::Unsupported, "{pointer}");
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_audit_manifest() {
+        let long_title = "x".repeat(MAX_STRING_LEN + 1);
+        for (pointer, value) in [
+            ("/github/run_attempt", json!(0)),
+            ("/tool/name", json!("cargo-audit")),
+            ("/tool/version", json!("")),
+            ("/summary/errors", json!(-1)),
+            ("/findings/0/advisory_id", json!("RUSTSEC 2026")),
+            ("/findings/0/advisory_id", json!("")),
+            ("/findings/0/kind", json!("Vulnerability")),
+            ("/findings/0/severity", json!("critical")),
+            ("/findings/0/package", json!("../thrift")),
+            ("/findings/0/version", json!("0.17.0; drop")),
+            ("/findings/0/title", json!("")),
+            ("/findings/0/title", json!(long_title)),
+            ("/findings/0/title", json!("first line\nsecond line")),
+            ("/findings/1/advisory_id", json!("RUSTSEC-2026-0435")),
+        ] {
+            let mut manifest = audit_manifest_json();
+            *manifest.pointer_mut(pointer).unwrap() = value.clone();
+            // A duplicate needs the same crate as well as the same advisory.
+            if pointer == "/findings/1/advisory_id" {
+                manifest["findings"][1]["package"] = json!("thrift");
+                manifest["findings"][1]["version"] = json!("0.17.0");
+            }
+            assert_eq!(
+                parse_audit(&manifest).unwrap_err(),
+                Rejection::Invalid,
+                "{pointer} {value}"
+            );
+        }
+        for bytes in [&b""[..], b"[]", b"{\"kind\":\"audit\"}"] {
+            assert_eq!(
+                parse_audit_manifest(bytes, REPO, RUN_ID, JOB_ID).unwrap_err(),
+                Rejection::Invalid
+            );
+        }
+    }
+
+    /// Titles count characters, not bytes, matching the producer's cut.
+    #[test]
+    fn audit_title_limit_counts_characters() {
+        let mut manifest = audit_manifest_json();
+        manifest["findings"][0]["title"] = json!("é".repeat(MAX_STRING_LEN));
+        assert!(parse_audit(&manifest).is_ok());
     }
 
     #[test]

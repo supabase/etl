@@ -12,7 +12,7 @@ use sqlx::{PgConnection, Row, migrate::Migrator, types::Json};
 
 use crate::{
     commands::ci_metrics::{
-        manifest::Rejection,
+        manifest::{AuditFinding, Rejection},
         model::{CodeScanningAlert, CodeScanningAnalysis, DependabotAlert, Job, Run, Workflow},
         plan::{DayState, StoredRun},
     },
@@ -378,14 +378,89 @@ pub(super) struct ManifestRow {
     pub(super) payload: Value,
     /// Per-test results to store with a test manifest.
     pub(super) tests: Vec<TestCase>,
+    /// Findings to store with an audit manifest.
+    pub(super) findings: Vec<AuditFinding>,
 }
 
-/// Inserts a manifest and its test results, returning how many test results
-/// were stored. Artifacts are immutable, so an existing row is kept.
+/// Rows stored with a newly inserted manifest.
+#[derive(Default)]
+pub(super) struct StoredManifest {
+    pub(super) test_results: u64,
+    pub(super) audit_findings: u64,
+}
+
+/// Inserts the results of the tests job `job_id` ran.
+async fn insert_test_results(
+    conn: &mut PgConnection,
+    job_id: i64,
+    tests: &[TestCase],
+) -> Result<u64> {
+    let binaries: Vec<&str> = tests.iter().map(TestCase::binary).collect();
+    let names: Vec<&str> = tests.iter().map(TestCase::name).collect();
+    sqlx::query(
+        "insert into ci.test (binary_id, name)
+         select * from unnest($1::text[], $2::text[])
+         on conflict (binary_id, name) do nothing",
+    )
+    .bind(&binaries)
+    .bind(&names)
+    .execute(&mut *conn)
+    .await?;
+    let statuses: Vec<&str> = tests.iter().map(|test| test.status().as_str()).collect();
+    let durations: Vec<i64> = tests.iter().map(|test| i64::from(test.duration_ms())).collect();
+    let stored = sqlx::query(
+        "insert into ci.test_result (job_id, test_id, status, duration_ms)
+         select $1, t.test_id, input.status, input.duration_ms
+         from unnest($2::text[], $3::text[], $4::text[], $5::bigint[])
+             as input(binary_id, name, status, duration_ms)
+         join ci.test t using (binary_id, name)",
+    )
+    .bind(job_id)
+    .bind(&binaries)
+    .bind(&names)
+    .bind(&statuses)
+    .bind(&durations)
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    Ok(stored)
+}
+
+/// Inserts the findings of the dependency audit job `job_id` ran.
+async fn insert_audit_findings(
+    conn: &mut PgConnection,
+    job_id: i64,
+    findings: &[AuditFinding],
+) -> Result<u64> {
+    let column = |field: fn(&AuditFinding) -> &String| -> Vec<&str> {
+        findings.iter().map(|finding| field(finding).as_str()).collect()
+    };
+    let stored = sqlx::query(
+        "insert into ci.audit_finding (job_id, advisory_id, package, version, kind, severity, \
+         title)
+         select $1, * from unnest($2::text[], $3::text[], $4::text[], $5::text[], $6::text[],
+             $7::text[])",
+    )
+    .bind(job_id)
+    .bind(column(|finding| &finding.advisory_id))
+    .bind(column(|finding| &finding.package))
+    .bind(column(|finding| &finding.version))
+    .bind(column(|finding| &finding.kind))
+    .bind(column(|finding| &finding.severity))
+    .bind(column(|finding| &finding.title))
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    Ok(stored)
+}
+
+/// Inserts a manifest with its test results or audit findings, returning the
+/// rows stored with it. Artifacts are immutable, so an existing row is kept
+/// and nothing is stored again.
 pub(super) async fn insert_manifest(
     conn: &mut PgConnection,
     manifest: &ManifestRow,
-) -> Result<u64> {
+) -> Result<StoredManifest> {
     let inserted = sqlx::query(
         "insert into ci.manifest (
              artifact_id, run_id, run_attempt, job_id, kind, schema_version, commit_sha, payload
@@ -409,39 +484,17 @@ pub(super) async fn insert_manifest(
         .bind(manifest.artifact_id)
         .execute(&mut *conn)
         .await?;
-    if !inserted || manifest.tests.is_empty() {
-        return Ok(0);
+    let mut stored = StoredManifest::default();
+    if !inserted {
+        return Ok(stored);
     }
-
-    let binaries: Vec<&str> = manifest.tests.iter().map(TestCase::binary).collect();
-    let names: Vec<&str> = manifest.tests.iter().map(TestCase::name).collect();
-    sqlx::query(
-        "insert into ci.test (binary_id, name)
-         select * from unnest($1::text[], $2::text[])
-         on conflict (binary_id, name) do nothing",
-    )
-    .bind(&binaries)
-    .bind(&names)
-    .execute(&mut *conn)
-    .await?;
-    let statuses: Vec<&str> = manifest.tests.iter().map(|test| test.status().as_str()).collect();
-    let durations: Vec<i64> =
-        manifest.tests.iter().map(|test| i64::from(test.duration_ms())).collect();
-    let stored = sqlx::query(
-        "insert into ci.test_result (job_id, test_id, status, duration_ms)
-         select $1, t.test_id, input.status, input.duration_ms
-         from unnest($2::text[], $3::text[], $4::text[], $5::bigint[])
-             as input(binary_id, name, status, duration_ms)
-         join ci.test t using (binary_id, name)",
-    )
-    .bind(manifest.job_id)
-    .bind(&binaries)
-    .bind(&names)
-    .bind(&statuses)
-    .bind(&durations)
-    .execute(&mut *conn)
-    .await?
-    .rows_affected();
+    if !manifest.tests.is_empty() {
+        stored.test_results = insert_test_results(conn, manifest.job_id, &manifest.tests).await?;
+    }
+    if !manifest.findings.is_empty() {
+        stored.audit_findings =
+            insert_audit_findings(conn, manifest.job_id, &manifest.findings).await?;
+    }
     Ok(stored)
 }
 
