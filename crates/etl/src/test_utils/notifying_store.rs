@@ -456,18 +456,9 @@ impl TableStateLifecycleStore for NotifyingStore {
                 let inner = &mut *guard;
 
                 let states = Arc::make_mut(&mut inner.table_states);
-                let table_ids = states.keys().copied().collect::<Vec<_>>();
-
-                for table_id in table_ids {
-                    if let Some(current_state) = states.get(&table_id).cloned() {
-                        inner
-                            .table_state_history
-                            .entry(table_id)
-                            .or_insert_with(Vec::new)
-                            .push(current_state);
-                    }
-
-                    states.insert(table_id, TableState::Init);
+                for (&table_id, state) in states.iter_mut() {
+                    let previous = std::mem::replace(state, TableState::Init);
+                    inner.table_state_history.entry(table_id).or_default().push(previous);
                 }
 
                 inner.replication_checkpoints.remove(&WorkerType::Apply);
