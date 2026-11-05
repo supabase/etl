@@ -362,7 +362,11 @@ pub(super) fn build_drop_not_null_sql_ducklake(
 
 #[cfg(test)]
 mod tests {
+    use etl::test_utils::property::run_property;
+    use proptest::prop_assert_eq;
+
     use super::*;
+    use crate::default_literals::{default_string_value, postgres_text_default};
 
     fn table_name(table: &str) -> DuckLakeTableName {
         DuckLakeTableName::new("public", table)
@@ -623,5 +627,35 @@ mod tests {
             build_drop_default_sql_ducklake(&table_name("table\"name"), "status\"value"),
             r#"alter table "lake"."public"."table""name" alter column "status""value" drop default"#
         );
+    }
+
+    /// Decodes a DuckDB single-quoted string literal, or returns `None` when
+    /// DuckDB would reject it. Quotes are doubled; a backslash is an ordinary
+    /// character.
+    fn decode_duckdb_string(literal: &str) -> Option<String> {
+        let mut chars = literal.strip_prefix('\'')?.strip_suffix('\'')?.chars().peekable();
+        let mut value = String::new();
+        while let Some(ch) = chars.next() {
+            if ch == '\'' {
+                chars.next_if_eq(&'\'')?;
+            }
+            value.push(ch);
+        }
+        Some(value)
+    }
+
+    /// Any text default, as Postgres stores it, renders as a DuckDB literal
+    /// that decodes back to the same text.
+    #[test]
+    fn string_defaults_roundtrip_through_duckdb_sql() {
+        run_property("ducklake string defaults roundtrip", &default_string_value(), |value| {
+            let rendered =
+                ducklake_default_expression(&postgres_text_default(value), &Type::TEXT, -1);
+            prop_assert_eq!(
+                rendered.as_deref().and_then(decode_duckdb_string),
+                Some(value.clone())
+            );
+            Ok(())
+        });
     }
 }
