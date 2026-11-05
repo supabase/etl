@@ -13,7 +13,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Days, NaiveDate, TimeDelta, Utc};
-use reqwest::StatusCode;
+use reqwest::{StatusCode, Url};
 use serde_json::json;
 use sqlx::{Connection, PgConnection};
 use tokio::{io::AsyncReadExt, process::Command};
@@ -25,8 +25,8 @@ use crate::{
             MAX_ENTRY_BYTES, Rejection,
         },
         model::{
-            ArtifactPage, CodeScanningAlert, CodeScanningAnalysis, Job, JobPage, Run, RunPage,
-            WorkflowPage,
+            ArtifactPage, CodeScanningAlert, CodeScanningAnalysis, DependabotAlert, Job, JobPage,
+            Run, RunPage, WorkflowPage,
         },
         plan::{self, DayTask},
         store::{self, ManifestRow, RejectionRow},
@@ -43,8 +43,8 @@ const LISTING_CAP: u64 = 1000;
 /// other workflows on the same `GITHUB_TOKEN` (1,000 per hour per repository).
 const RATE_LIMIT_RESERVE: u64 = 300;
 /// Requests held back from day syncing so a long backfill never starves the
-/// code-scanning refresh.
-const CODE_SCANNING_RESERVE: u64 = 20;
+/// code-scanning and Dependabot refresh.
+const SECURITY_RESERVE: u64 = 20;
 /// Attempts per request for transient failures.
 const MAX_TRIES: u32 = 3;
 /// Longest `retry-after` the sync waits for instead of stopping.
@@ -102,7 +102,8 @@ struct Totals {
     rejections: u64,
     deleted_runs: u64,
     stale_runs: u64,
-    alerts: u64,
+    code_scanning_alerts: u64,
+    dependabot_alerts: u64,
     new_analyses: u64,
 }
 
@@ -161,8 +162,8 @@ pub(super) async fn run(
     result
 }
 
-/// Runs the sync phases while holding the lock: workflows, planned days, then
-/// code scanning.
+/// Runs the sync phases while holding the lock: workflows, planned days, code
+/// scanning, then Dependabot.
 async fn run_locked(
     conn: &mut PgConnection,
     client: &GitHubClient,
@@ -173,7 +174,7 @@ async fn run_locked(
         store::load_settings(conn, config.history_since, config.default_history_since).await?;
     let mut syncer = Syncer {
         client,
-        request_limit: config.max_requests.saturating_sub(CODE_SCANNING_RESERVE),
+        request_limit: config.max_requests.saturating_sub(SECURITY_RESERVE),
         low_rate_limit: false,
         now: Utc::now(),
         totals: Totals::default(),
@@ -213,7 +214,7 @@ async fn run_locked(
         }
     }
 
-    // Code scanning runs even when days spent their budget: it gets the
+    // Security alerts run even when days spent their budget: they get the
     // reserve, unless GitHub's own rate limit is low.
     syncer.request_limit = config.max_requests;
     if !syncer.low_rate_limit {
@@ -233,13 +234,29 @@ async fn run_locked(
             }
         }
     }
+    if !syncer.low_rate_limit {
+        match syncer.sync_dependabot(conn).await {
+            Ok(()) | Err(SyncError::Exhausted) => {}
+            Err(SyncError::Fatal(error)) => return Err(error),
+            // A token without the `vulnerability-alerts` permission, or a
+            // repository with Dependabot alerts disabled, should not stop the
+            // sync.
+            Err(SyncError::Denied { status: StatusCode::FORBIDDEN }) => {
+                eprintln!("ci-metrics: Dependabot alerts unavailable (HTTP 403); skipped");
+            }
+            Err(SyncError::Denied { status }) => return Err(denied_error(status)),
+            Err(SyncError::Day { source, .. }) => {
+                eprintln!("ci-metrics: Dependabot sync failed: {source:#}");
+            }
+        }
+    }
 
     store::record_success(conn, Utc::now()).await?;
     let totals = &syncer.totals;
     eprintln!(
         "ci-metrics: synced {} days ({} failed), {} runs ({} detailed), {} jobs, {} manifests ({} \
-         skipped, {} test results), {} rejections, {} deleted, {} stale, {} alerts, {} new \
-         analyses using {} requests{}",
+         skipped, {} test results), {} rejections, {} deleted, {} stale, {} code-scanning alerts, \
+         {} Dependabot alerts, {} new analyses using {} requests{}",
         totals.days,
         totals.failed_days,
         totals.runs,
@@ -251,7 +268,8 @@ async fn run_locked(
         totals.rejections,
         totals.deleted_runs,
         totals.stale_runs,
-        totals.alerts,
+        totals.code_scanning_alerts,
+        totals.dependabot_alerts,
         totals.new_analyses,
         client.requests_sent(),
         if exhausted { "; budget spent, resuming next sync" } else { "" },
@@ -725,7 +743,7 @@ impl Syncer<'_> {
                 page += 1;
             }
         }
-        self.totals.alerts = alert_numbers.len() as u64;
+        self.totals.code_scanning_alerts = alert_numbers.len() as u64;
 
         let history_start = history_since.and_hms_opt(0, 0, 0).map(|start| start.and_utc());
         // Whether stored analyses had no gaps before this pass. Only then does
@@ -778,6 +796,49 @@ impl Syncer<'_> {
                 return Ok(());
             }
             page += 1;
+        }
+    }
+
+    /// Refreshes every Dependabot alert. The endpoint pages by cursor and
+    /// rejects `page`, so each request carries the `after` cursor from the
+    /// previous response's `link` header.
+    async fn sync_dependabot(&mut self, conn: &mut PgConnection) -> Result<(), SyncError> {
+        let mut after: Option<String> = None;
+        loop {
+            let mut query = vec![("per_page", PER_PAGE.to_string())];
+            if let Some(cursor) = &after {
+                query.push(("after", cursor.clone()));
+            }
+            let response = self.request("dependabot/alerts", &query).await?;
+            if !response.status().is_success() {
+                return Err(SyncError::Day {
+                    kind: "github_status",
+                    source: anyhow!("GitHub returned HTTP status {}", response.status()),
+                });
+            }
+            let alerts: Vec<DependabotAlert> = response
+                .json()
+                .map_err(|source| SyncError::Day { kind: "github_payload", source })?;
+            for alert in &alerts {
+                store::upsert_dependabot_alert(conn, alert).await?;
+            }
+            self.totals.dependabot_alerts += alerts.len() as u64;
+
+            let Some(next) = response.next_link() else {
+                return Ok(());
+            };
+            let cursor = next_cursor(next).ok_or_else(|| SyncError::Day {
+                kind: "github_payload",
+                source: anyhow!("GitHub's next Dependabot alert page has no cursor"),
+            })?;
+            // A repeated cursor would page forever within the budget.
+            if alerts.is_empty() || after.as_ref() == Some(&cursor) {
+                return Err(SyncError::Day {
+                    kind: "github_payload",
+                    source: anyhow!("GitHub's Dependabot alert pages made no progress"),
+                });
+            }
+            after = Some(cursor);
         }
     }
 }
@@ -1079,6 +1140,16 @@ fn page_query(page: usize) -> Vec<(&'static str, String)> {
     vec![("per_page", PER_PAGE.to_string()), ("page", page.to_string())]
 }
 
+/// Returns the `after` cursor of a cursor-paged listing's next-page URL.
+fn next_cursor(url: &str) -> Option<String> {
+    Url::parse(url)
+        .ok()?
+        .query_pairs()
+        .find(|(name, _)| name == "after")
+        .map(|(_, value)| value.into_owned())
+        .filter(|cursor| !cursor.is_empty())
+}
+
 /// Returns the UTC bounds `[start, end)` of `day`.
 fn day_bounds(day: NaiveDate) -> Result<(DateTime<Utc>, DateTime<Utc>), SyncError> {
     let start = day.and_hms_opt(0, 0, 0).map(|start| start.and_utc());
@@ -1224,5 +1295,22 @@ mod tests {
         );
         assert_eq!(main.ingest(Some(ArtifactKind::Benchmark), &jobs), None);
         assert_eq!(main.ingest(None, &jobs), None);
+    }
+
+    #[test]
+    fn next_cursor_reads_the_after_parameter() {
+        assert_eq!(
+            next_cursor(
+                "https://api.github.com/repositories/1/dependabot/alerts?per_page=100&after=Y3Vy%3D"
+            ),
+            Some("Y3Vy=".to_owned())
+        );
+        for url in [
+            "https://api.github.com/repositories/1/dependabot/alerts?per_page=100",
+            "https://api.github.com/repositories/1/dependabot/alerts?after=",
+            "not a url",
+        ] {
+            assert_eq!(next_cursor(url), None, "{url}");
+        }
     }
 }

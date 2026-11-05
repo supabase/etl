@@ -13,7 +13,7 @@ use sqlx::{PgConnection, Row, migrate::Migrator, types::Json};
 use crate::{
     commands::ci_metrics::{
         manifest::Rejection,
-        model::{CodeScanningAlert, CodeScanningAnalysis, Job, Run, Workflow},
+        model::{CodeScanningAlert, CodeScanningAnalysis, DependabotAlert, Job, Run, Workflow},
         plan::{DayState, StoredRun},
     },
     test_manifest::TestCase,
@@ -614,6 +614,46 @@ pub(super) async fn upsert_alert(conn: &mut PgConnection, alert: &CodeScanningAl
     .bind(alert.created_at)
     .bind(alert.fixed_at)
     .bind(alert.dismissed_at)
+    .bind(alert.updated_at)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// Upserts a Dependabot alert unless a newer snapshot is stored.
+pub(super) async fn upsert_dependabot_alert(
+    conn: &mut PgConnection,
+    alert: &DependabotAlert,
+) -> Result<()> {
+    sqlx::query(
+        "insert into ci.dependabot_alert (
+             number, ecosystem, package, manifest_path, advisory_id, severity, state, created_at,
+             fixed_at, dismissed_at, auto_dismissed_at, updated_at
+         ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         on conflict (number) do update set
+             ecosystem = excluded.ecosystem,
+             package = excluded.package,
+             manifest_path = excluded.manifest_path,
+             advisory_id = excluded.advisory_id,
+             severity = excluded.severity,
+             state = excluded.state,
+             fixed_at = excluded.fixed_at,
+             dismissed_at = excluded.dismissed_at,
+             auto_dismissed_at = excluded.auto_dismissed_at,
+             updated_at = excluded.updated_at
+         where excluded.updated_at >= ci.dependabot_alert.updated_at",
+    )
+    .bind(alert.number)
+    .bind(&alert.dependency.package.ecosystem)
+    .bind(&alert.dependency.package.name)
+    .bind(&alert.dependency.manifest_path)
+    .bind(&alert.security_advisory.ghsa_id)
+    .bind(&alert.security_advisory.severity)
+    .bind(&alert.state)
+    .bind(alert.created_at)
+    .bind(alert.fixed_at)
+    .bind(alert.dismissed_at)
+    .bind(alert.auto_dismissed_at)
     .bind(alert.updated_at)
     .execute(&mut *conn)
     .await?;
