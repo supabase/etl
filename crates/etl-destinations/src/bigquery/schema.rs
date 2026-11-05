@@ -856,9 +856,8 @@ mod tests {
         );
     }
 
-    /// Decodes a GoogleSQL single-quoted string literal, or returns `None` when
-    /// GoogleSQL would reject it: an unescaped quote, a raw newline or carriage
-    /// return, or an unknown escape.
+    /// Decodes the GoogleSQL single-quoted literals emitted by the default renderer,
+    /// rejecting malformed quoting, unknown escapes, and invalid Unicode scalars.
     fn decode_googlesql_string(literal: &str) -> Option<String> {
         let mut chars = literal.strip_prefix('\'')?.strip_suffix('\'')?.chars();
         let mut value = String::new();
@@ -874,9 +873,10 @@ mod tests {
                     't' => '\t',
                     'v' => '\u{b}',
                     escaped @ ('\\' | '?' | '"' | '\'' | '`') => escaped,
-                    'u' => {
-                        let hex: String = chars.by_ref().take(4).collect();
-                        if hex.len() != 4 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    escaped @ ('u' | 'U') => {
+                        let digits = if escaped == 'u' { 4 } else { 8 };
+                        let hex: String = chars.by_ref().take(digits).collect();
+                        if hex.len() != digits || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
                             return None;
                         }
                         char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?
@@ -887,6 +887,28 @@ mod tests {
             }
         }
         Some(value)
+    }
+
+    /// Unicode escapes preserve scalar values and reject malformed sequences.
+    #[test]
+    fn googlesql_string_decoder_validates_unicode_escapes() {
+        for (literal, expected) in [
+            (r"'\u0041'", Some("A")),
+            (r"'\U00010000'", Some("\u{10000}")),
+            (r"'\U0001f600'", Some("😀")),
+            (r"'\U0010FFFF'", Some("\u{10ffff}")),
+            (r"'\\U0001f600'", Some(r"\U0001f600")),
+            (r"'\uD800'", None),
+            (r"'\U0000dfff'", None),
+            (r"'\U00110000'", None),
+            (r"'\u041'", None),
+            (r"'\U0001000'", None),
+            (r"'\u004g'", None),
+            (r"'\U0001000g'", None),
+            (r"'\U0001000é'", None),
+        ] {
+            assert_eq!(decode_googlesql_string(literal).as_deref(), expected);
+        }
     }
 
     /// Any text default, as Postgres stores it, renders as a GoogleSQL literal
