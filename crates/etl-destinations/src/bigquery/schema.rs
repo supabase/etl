@@ -874,9 +874,13 @@ mod tests {
                     't' => '\t',
                     'v' => '\u{b}',
                     escaped @ ('\\' | '?' | '"' | '\'' | '`') => escaped,
-                    'u' => {
-                        let hex: String = chars.by_ref().take(4).collect();
-                        if hex.len() != 4 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    // GoogleSQL writes code points as `\uXXXX` or, outside
+                    // the Basic Multilingual Plane, `\UXXXXXXXX`.
+                    marker @ ('u' | 'U') => {
+                        let digits = if marker == 'u' { 4 } else { 8 };
+                        let hex: String = chars.by_ref().take(digits).collect();
+                        if hex.len() != digits || !hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+                        {
                             return None;
                         }
                         char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?
