@@ -379,7 +379,7 @@ pub(super) fn table_row_to_sql_literal_ref(row: &TableRow) -> String {
 
 /// Serializes a borrowed cell into a DuckDB SQL literal expression.
 pub(super) fn cell_to_sql_literal_ref(cell: &Cell) -> String {
-    cell_to_sql_literal(cell_to_owned(cell))
+    cell_to_sql_literal(cell.clone())
 }
 
 /// Returns whether a cell must bypass the DuckDB appender path.
@@ -431,54 +431,6 @@ fn cell_to_sql_literal(cell: Cell) -> String {
         Cell::Json(j) => format!("CAST({} AS JSON)", quote_literal(&j.to_string())),
         Cell::Bytes(b) => format!("from_hex('{}')", encode_hex(&b)),
         Cell::Array(arr) => array_cell_to_sql_literal(arr),
-    }
-}
-
-/// Clones a [`Cell`] from a borrowed row reference.
-fn cell_to_owned(cell: &Cell) -> Cell {
-    match cell {
-        Cell::Null => Cell::Null,
-        Cell::Bool(value) => Cell::Bool(*value),
-        Cell::String(value) => Cell::String(value.clone()),
-        Cell::I16(value) => Cell::I16(*value),
-        Cell::I32(value) => Cell::I32(*value),
-        Cell::U32(value) => Cell::U32(*value),
-        Cell::I64(value) => Cell::I64(*value),
-        Cell::F32(value) => Cell::F32(*value),
-        Cell::F64(value) => Cell::F64(*value),
-        Cell::Numeric(value) => Cell::Numeric(value.clone()),
-        Cell::Date(value) => Cell::Date(*value),
-        Cell::Time(value) => Cell::Time(*value),
-        Cell::TimeTz(value) => Cell::TimeTz(*value),
-        Cell::Timestamp(value) => Cell::Timestamp(*value),
-        Cell::TimestampTz(value) => Cell::TimestampTz(*value),
-        Cell::Uuid(value) => Cell::Uuid(*value),
-        Cell::Json(value) => Cell::Json(value.clone()),
-        Cell::Bytes(value) => Cell::Bytes(value.clone()),
-        Cell::Array(value) => Cell::Array(array_cell_to_owned(value)),
-    }
-}
-
-/// Clones an [`ArrayCell`] from a borrowed row reference.
-fn array_cell_to_owned(cell: &ArrayCell) -> ArrayCell {
-    match cell {
-        ArrayCell::Bool(values) => ArrayCell::Bool(values.clone()),
-        ArrayCell::String(values) => ArrayCell::String(values.clone()),
-        ArrayCell::I16(values) => ArrayCell::I16(values.clone()),
-        ArrayCell::I32(values) => ArrayCell::I32(values.clone()),
-        ArrayCell::U32(values) => ArrayCell::U32(values.clone()),
-        ArrayCell::I64(values) => ArrayCell::I64(values.clone()),
-        ArrayCell::F32(values) => ArrayCell::F32(values.clone()),
-        ArrayCell::F64(values) => ArrayCell::F64(values.clone()),
-        ArrayCell::Numeric(values) => ArrayCell::Numeric(values.clone()),
-        ArrayCell::Date(values) => ArrayCell::Date(values.clone()),
-        ArrayCell::Time(values) => ArrayCell::Time(values.clone()),
-        ArrayCell::TimeTz(values) => ArrayCell::TimeTz(values.clone()),
-        ArrayCell::Timestamp(values) => ArrayCell::Timestamp(values.clone()),
-        ArrayCell::TimestampTz(values) => ArrayCell::TimestampTz(values.clone()),
-        ArrayCell::Uuid(values) => ArrayCell::Uuid(values.clone()),
-        ArrayCell::Json(values) => ArrayCell::Json(values.clone()),
-        ArrayCell::Bytes(values) => ArrayCell::Bytes(values.clone()),
     }
 }
 
@@ -1569,7 +1521,7 @@ pub(super) mod tests {
                     .collect::<Vec<_>>();
                 let table_rows = path_rows
                     .iter()
-                    .map(|(id, cell)| TableRow::new(vec![Cell::I32(*id), cell_to_owned(cell)]))
+                    .map(|(id, cell)| TableRow::new(vec![Cell::I32(*id), (*cell).clone()]))
                     .collect();
                 let stored = write_and_read(&conn, case, &schema, path, table_rows)?;
 
