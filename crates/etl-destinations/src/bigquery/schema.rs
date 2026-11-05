@@ -874,8 +874,9 @@ mod tests {
                     't' => '\t',
                     'v' => '\u{b}',
                     escaped @ ('\\' | '?' | '"' | '\'' | '`') => escaped,
-                    // GoogleSQL writes code points as `\uXXXX` or, outside
-                    // the Basic Multilingual Plane, `\UXXXXXXXX`.
+                    // GoogleSQL accepts `\uXXXX` and `\UXXXXXXXX`; production
+                    // writes the 8-digit form outside the Basic Multilingual
+                    // Plane.
                     marker @ ('u' | 'U') => {
                         let digits = if marker == 'u' { 4 } else { 8 };
                         let hex: String = chars.by_ref().take(digits).collect();
