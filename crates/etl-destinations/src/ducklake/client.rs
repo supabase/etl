@@ -1,7 +1,7 @@
 #[cfg(feature = "test-utils")]
 use std::sync::atomic::AtomicUsize;
 use std::{
-    error, fmt, process,
+    error, process,
     sync::{
         Arc, Mutex, Weak,
         atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
@@ -535,7 +535,8 @@ struct OpenDuckLakeConnection {
 }
 
 /// Error returned while opening or validating one DuckLake pooled connection.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
 pub(super) struct DuckLakeConnectionError {
     message: String,
 }
@@ -563,14 +564,6 @@ impl DuckLakeConnectionError {
         Self { message: message.to_owned() }
     }
 }
-
-impl fmt::Display for DuckLakeConnectionError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        f.write_str(&self.message)
-    }
-}
-
-impl error::Error for DuckLakeConnectionError {}
 
 /// Opening a connection reaches the lake's catalog and data storage, which may
 /// be temporarily unreachable. DuckLake cannot yet tell those failures from
