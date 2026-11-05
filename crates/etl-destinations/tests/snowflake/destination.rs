@@ -1,4 +1,10 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use etl::{
     data::{ArrayCell, Cell, OldTableRow, TableRow, UpdatedTableRow},
@@ -22,8 +28,9 @@ use etl::{
     },
 };
 use etl_destinations::snowflake::{
-    AuthManager, Client, Config, Destination, HttpExchanger, OffsetToken, RestStreamClient,
-    SqlClient,
+    AuthManager, ChannelStatusResponse, Client, Config, Destination, Error, HttpExchanger,
+    InsertRowsResponse, OffsetToken, OpenChannelResponse, RestStreamClient, Result, RowBatch,
+    SqlClient, StreamClient,
     test_utils::{load_test_config, query_rows},
 };
 use futures::FutureExt;
@@ -48,6 +55,94 @@ type SnowflakeTestDestination = Destination<
     RestStreamClient<AuthManager<HttpExchanger>>,
 >;
 
+/// Real Snowflake transport that loses one successful append response.
+struct LostAppendResponse {
+    /// Credentialed production HTTP client.
+    inner: RestStreamClient<AuthManager<HttpExchanger>>,
+    /// Injects an exhausted transport error after the next successful append.
+    lose_next_response: AtomicBool,
+    /// Injects exhausted status retry bursts during replay recovery.
+    status_failures_remaining: AtomicUsize,
+    /// Injects exhausted Open retry bursts during replay recovery.
+    open_failures_remaining: AtomicUsize,
+}
+
+impl LostAppendResponse {
+    /// Returns an exhausted transient failure without changing remote state.
+    fn fail_request(failures: &AtomicUsize) -> Result<()> {
+        if failures
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| remaining.checked_sub(1))
+            .is_ok()
+        {
+            Err(Error::HttpStatus {
+                status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                body: String::new(),
+            })
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl StreamClient for LostAppendResponse {
+    async fn discover_ingest_host(&self) -> Result<String> {
+        self.inner.discover_ingest_host().await
+    }
+
+    async fn open_channel(
+        &self,
+        database: &str,
+        schema: &str,
+        table: &str,
+        channel: &str,
+        offset: Option<&OffsetToken>,
+    ) -> Result<OpenChannelResponse> {
+        Self::fail_request(&self.open_failures_remaining)?;
+        self.inner.open_channel(database, schema, table, channel, offset).await
+    }
+
+    async fn drop_channel(
+        &self,
+        database: &str,
+        schema: &str,
+        table: &str,
+        channel: &str,
+    ) -> Result<()> {
+        self.inner.drop_channel(database, schema, table, channel).await
+    }
+
+    async fn insert_rows(
+        &self,
+        database: &str,
+        schema: &str,
+        table: &str,
+        channel: &str,
+        batch: &RowBatch,
+        continuation: &str,
+    ) -> Result<InsertRowsResponse> {
+        let response =
+            self.inner.insert_rows(database, schema, table, channel, batch, continuation).await?;
+        if self.lose_next_response.swap(false, Ordering::SeqCst) {
+            return Err(Error::HttpStatus {
+                status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                body: String::new(),
+            });
+        }
+        Ok(response)
+    }
+
+    async fn channel_status(
+        &self,
+        database: &str,
+        schema: &str,
+        table: &str,
+        channel: &str,
+    ) -> Result<ChannelStatusResponse> {
+        Self::fail_request(&self.status_failures_remaining)?;
+        self.inner.channel_status(database, schema, table, channel).await
+    }
+}
+
 struct TestHarness {
     destination: SnowflakeTestDestination,
     sql: SqlClient<AuthManager<HttpExchanger>>,
@@ -57,7 +152,7 @@ struct TestHarness {
 
 impl TestHarness {
     fn new() -> Self {
-        Self::with_pipeline_id(1)
+        Self::with_pipeline_id("1".into())
     }
 
     fn with_pipeline_id(pipeline_id: PipelineId) -> Self {
@@ -254,7 +349,7 @@ async fn assert_status_default_absent(
 #[tokio::test]
 #[ignore = "requires Snowflake credentials"]
 async fn boundary_underscore_names_survive_destination_lifecycle() {
-    let harness = TestHarness::with_pipeline_id(u64::MAX);
+    let harness = TestHarness::with_pipeline_id(u64::MAX.to_string().into());
     let cases = table_name_schemas();
     let names: Vec<_> = cases.iter().map(|(_, name)| name.to_uppercase()).collect();
     let cleanup_names: Vec<_> = names.iter().map(String::as_str).collect();
@@ -309,8 +404,10 @@ async fn boundary_underscore_names_survive_destination_lifecycle() {
         }
         harness.destination.shutdown().await.unwrap();
 
-        let restarted =
-            Destination::new(Client::new(build_auth(), u64::MAX), harness.store.clone());
+        let restarted = Destination::new(
+            Client::new(build_auth(), u64::MAX.to_string().into()),
+            harness.store.clone(),
+        );
         // One batch submits every table before waiting for CDC durability.
         let events = cases
             .iter()
@@ -457,6 +554,210 @@ async fn create_table_with_default_expressions() {
     .await;
 }
 
+/// Accepted CDC rows must be reconciled before replay changes batch boundaries.
+/// This uses real Snowflake Open, append, commit proof, and raw-table contents.
+#[tokio::test]
+#[ignore = "requires Snowflake credentials"]
+async fn replay_of_accepted_rows_uses_remote_committed_offset() {
+    let harness = TestHarness::new();
+    let src_table = format!("ETL_TEST_{}", uuid::Uuid::new_v4().simple()).to_uppercase();
+    let sf_table = snowflake_table_name("public", &src_table);
+    let table_schema = make_table_schema(1020, "public", &src_table);
+    let schema = ReplicatedTableSchema::all(Arc::new(table_schema.clone()));
+    harness.store.store_table_schema(table_schema).await.unwrap();
+
+    with_table_cleanup(&harness.sql, &[&sf_table], || async {
+        initialize_empty_table(&harness.destination, &schema).await;
+        let events: Vec<_> = (1..=3_i32)
+            .map(|id| {
+                Event::Insert(InsertEvent {
+                    commit_lsn: 10.into(),
+                    tx_ordinal: u64::try_from(id).unwrap(),
+                    replicated_table_schema: schema.clone(),
+                    table_row: TableRow::new(vec![
+                        Cell::I32(id),
+                        Cell::String("replay".to_owned()),
+                    ]),
+                })
+            })
+            .collect();
+        for event in &events[..2] {
+            assert_eq!(
+                invoke_write_events(
+                    &harness.destination,
+                    WriteEventsDurability::MayDefer,
+                    vec![event.clone()]
+                )
+                .await
+                .unwrap(),
+                DestinationWriteStatus::Accepted
+            );
+        }
+
+        // Preserve the live destination's cached progress exactly as an apply
+        // retry does. A status refresh here would conceal the original defect.
+        assert_eq!(
+            invoke_write_events(
+                &harness.destination,
+                WriteEventsDurability::RequireDurable,
+                events
+            )
+            .await
+            .unwrap(),
+            DestinationWriteStatus::Durable
+        );
+        harness.destination.shutdown().await.unwrap();
+
+        let rows = poll_and_query_rows(
+            &harness.destination,
+            &harness,
+            schema.id(),
+            &sf_table,
+            &OffsetToken::new(10.into(), 3),
+        )
+        .await;
+        assert_eq!(rows.len(), 3);
+        for (index, row) in rows.iter().enumerate() {
+            let ordinal = u64::try_from(index + 1).unwrap();
+            assert_eq!(row[0], json!(ordinal.to_string()));
+            assert_eq!(row[3], json!(OffsetToken::new(10.into(), ordinal).to_string()));
+        }
+    })
+    .await;
+    assert!(!harness.sql.table_exists(&sf_table).await.unwrap());
+}
+
+/// An unknown append outcome must recover with and without earlier known
+/// accepted work, using real Snowflake channel state and raw row counts.
+#[tokio::test]
+#[ignore = "requires Snowflake credentials"]
+async fn replay_after_lost_append_response_preserves_rows() {
+    assert_lost_append_response_recovery(false).await;
+}
+
+/// Transient status and Open outages must recover without duplicating real
+/// Snowflake rows, both with and without a known accepted prefix.
+#[tokio::test]
+#[ignore = "requires Snowflake credentials"]
+async fn replay_recovers_transient_status_and_open_outages() {
+    assert_lost_append_response_recovery(true).await;
+}
+
+/// Exercises lost responses against real channel state, with optional faults
+/// around the recovery endpoints and the same raw-row assertions.
+async fn assert_lost_append_response_recovery(recovery_outage: bool) {
+    for accepted_prefix in [false, true] {
+        let config = load_test_config().clone_without_credentials();
+        let auth = build_auth();
+        let http = reqwest::Client::new();
+        let sql =
+            SqlClient::new(config.clone_without_credentials(), Arc::clone(&auth), http.clone());
+        let stream = Arc::new(LostAppendResponse {
+            inner: RestStreamClient::new(
+                config.account_url().to_owned(),
+                Arc::clone(&auth),
+                http.clone(),
+            ),
+            lose_next_response: AtomicBool::new(false),
+            status_failures_remaining: AtomicUsize::new(0),
+            open_failures_remaining: AtomicUsize::new(0),
+        });
+        let client = Client::with_clients(
+            SqlClient::new(config.clone_without_credentials(), auth, http),
+            Arc::clone(&stream),
+            config.database().to_owned(),
+            config.schema().to_owned(),
+            "1".into(),
+        );
+        let store = NotifyingStore::new();
+        let destination = Destination::new(client, store.clone());
+        let src_table = format!("ETL_TEST_{}", uuid::Uuid::new_v4().simple()).to_uppercase();
+        let sf_table = snowflake_table_name("public", &src_table);
+        let table_schema = make_table_schema(1021, "public", &src_table);
+        let schema = ReplicatedTableSchema::all(Arc::new(table_schema.clone()));
+        store.store_table_schema(table_schema).await.unwrap();
+
+        with_table_cleanup(&sql, &[&sf_table], || async {
+            assert_eq!(
+                invoke_write_table_rows(&destination, &schema, vec![]).await.unwrap(),
+                DestinationWriteStatus::Durable
+            );
+            let count = if accepted_prefix { 3 } else { 2 };
+            let events: Vec<_> = (1..=count)
+                .map(|id| {
+                    Event::Insert(InsertEvent {
+                        commit_lsn: 10.into(),
+                        tx_ordinal: u64::try_from(id).unwrap(),
+                        replicated_table_schema: schema.clone(),
+                        table_row: TableRow::new(vec![
+                            Cell::I32(id),
+                            Cell::String("replay".to_owned()),
+                        ]),
+                    })
+                })
+                .collect();
+            if accepted_prefix {
+                assert_eq!(
+                    invoke_write_events(
+                        &destination,
+                        WriteEventsDurability::MayDefer,
+                        vec![events[0].clone()]
+                    )
+                    .await
+                    .unwrap(),
+                    DestinationWriteStatus::Accepted
+                );
+            }
+            stream.lose_next_response.store(true, Ordering::SeqCst);
+            invoke_write_events(
+                &destination,
+                WriteEventsDurability::MayDefer,
+                vec![events[usize::from(accepted_prefix)].clone()],
+            )
+            .await
+            .unwrap_err();
+
+            if recovery_outage {
+                stream
+                    .status_failures_remaining
+                    .store(if accepted_prefix { 2 } else { 0 }, Ordering::SeqCst);
+                stream.open_failures_remaining.store(2, Ordering::SeqCst);
+            }
+            assert_eq!(
+                invoke_write_events(&destination, WriteEventsDurability::RequireDurable, events)
+                    .await
+                    .unwrap(),
+                DestinationWriteStatus::Durable
+            );
+            assert_eq!(stream.status_failures_remaining.load(Ordering::SeqCst), 0);
+            assert_eq!(stream.open_failures_remaining.load(Ordering::SeqCst), 0);
+            destination.shutdown().await.unwrap();
+
+            let fqn = format!("\"{}\".\"{}\".\"{sf_table}\"", config.database(), config.schema());
+            let rows = query_rows(
+                &sql,
+                &format!(
+                    "select \"id\"::varchar, \"_cdc_sequence_number\" from {fqn} order by \
+                     \"id\"::integer"
+                ),
+            )
+            .await
+            .unwrap();
+            let expected: Vec<_> = (1..=count)
+                .map(|id| {
+                    vec![
+                        json!(id.to_string()),
+                        json!(OffsetToken::new(10.into(), u64::try_from(id).unwrap()).to_string()),
+                    ]
+                })
+                .collect();
+            assert_eq!(rows, expected);
+        })
+        .await;
+        assert!(!sql.table_exists(&sf_table).await.unwrap());
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires Snowflake credentials"]
 async fn write_table_rows_basic() {
@@ -541,8 +842,8 @@ async fn write_table_rows_empty() {
 #[tokio::test]
 #[ignore = "requires Snowflake credentials"]
 async fn fresh_generation_rejects_existing_table_without_destination_metadata() {
-    let first = TestHarness::with_pipeline_id(1);
-    let second = TestHarness::with_pipeline_id(2);
+    let first = TestHarness::with_pipeline_id("1".into());
+    let second = TestHarness::with_pipeline_id("2".into());
     let src_table = format!("ETL_TEST_{}", uuid::Uuid::new_v4().simple()).to_uppercase();
     let sf_table = snowflake_table_name("public", &src_table);
     let table_id = TableId::new(1013);
@@ -673,7 +974,7 @@ async fn resync_after_source_name_swap(cold_client: bool) {
 
             let restarted = if cold_client {
                 etl::destination::Destination::shutdown(&harness.destination).await.unwrap();
-                Some(Destination::new(Client::new(build_auth(), 1), harness.store.clone()))
+                Some(Destination::new(Client::new(build_auth(), "1".into()), harness.store.clone()))
             } else {
                 None
             };
@@ -889,9 +1190,9 @@ async fn whole_transaction_replay_restores_post_truncate_rows() {
         // Simulate a crash after Snowflake durably applied the transaction but
         // before its source checkpoint advanced. The fresh destination must
         // therefore replay the whole transaction, including the first insert.
-        let pipeline_id: PipelineId = 1;
+        let pipeline_id: PipelineId = "1".into();
         let first_restarted_destination =
-            Destination::new(Client::new(build_auth(), pipeline_id), harness.store.clone());
+            Destination::new(Client::new(build_auth(), pipeline_id.clone()), harness.store.clone());
         let replay_status = invoke_write_events(
             &first_restarted_destination,
             WriteEventsDurability::RequireDurable,
@@ -922,7 +1223,7 @@ async fn whole_transaction_replay_restores_post_truncate_rows() {
         // cycle must derive a new request ID and clear the previously restored
         // row before inserting it again.
         let second_restarted_destination =
-            Destination::new(Client::new(build_auth(), pipeline_id), harness.store.clone());
+            Destination::new(Client::new(build_auth(), pipeline_id.clone()), harness.store.clone());
         let second_replay_status = invoke_write_events(
             &second_restarted_destination,
             WriteEventsDurability::RequireDurable,
@@ -1043,7 +1344,7 @@ async fn cold_open_rejects_unexpected_column() {
             .expect("out-of-band alter table failed");
 
         let restarted_destination = Destination::new(
-            Client::new(build_auth(), PipelineId::from(1_u64)),
+            Client::new(build_auth(), 1_u64.to_string().into()),
             harness.store.clone(),
         );
         let error = invoke_write_events(
@@ -1194,7 +1495,7 @@ async fn schema_evolution_add_column_rejects_stale_replay() {
         // relation is a skipped replay marker, but its row must be rejected
         // before considering whether it was already committed.
         let restarted_destination = Destination::new(
-            Client::new(build_auth(), PipelineId::from(1_u64)),
+            Client::new(build_auth(), 1_u64.to_string().into()),
             harness.store.clone(),
         );
         let replay_error = invoke_write_events(
@@ -2153,7 +2454,7 @@ async fn json_null_preservation_and_legacy_defaults() {
     );
     let schema = ReplicatedTableSchema::all(Arc::new(table_schema.clone()));
     harness.store.store_table_schema(table_schema).await.unwrap();
-    let restarted = Destination::new(Client::new(build_auth(), 1), harness.store.clone());
+    let restarted = Destination::new(Client::new(build_auth(), "1".into()), harness.store.clone());
     let fqn = format!(
         "\"{}\".\"{}\".\"{sf_table}\"",
         harness.config.database().replace('"', "\"\""),

@@ -314,13 +314,13 @@ impl Serialize for ArrayCellSerializer<'_> {
     fn serialize<S: Serializer>(&self, ser: S) -> std::result::Result<S::Ok, S::Error> {
         match self.0 {
             // Primitives: Option<T> already implements Serialize correctly.
-            ArrayCell::Bool(v) => serialize_array(v, ser),
-            ArrayCell::String(v) => serialize_array(v, ser),
-            ArrayCell::I16(v) => serialize_array(v, ser),
-            ArrayCell::I32(v) => serialize_array(v, ser),
-            ArrayCell::U32(v) => serialize_array(v, ser),
-            ArrayCell::I64(v) => serialize_array(v, ser),
-            ArrayCell::Json(v) => serialize_array(v, ser),
+            ArrayCell::Bool(v) => v.serialize(ser),
+            ArrayCell::String(v) => v.serialize(ser),
+            ArrayCell::I16(v) => v.serialize(ser),
+            ArrayCell::I32(v) => v.serialize(ser),
+            ArrayCell::U32(v) => v.serialize(ser),
+            ArrayCell::I64(v) => v.serialize(ser),
+            ArrayCell::Json(v) => v.serialize(ser),
             // Validated floats: reject NaN/Infinity during serialization.
             ArrayCell::F32(v) => serialize_array_with(v, ser, |f| ValidatedF32(*f)),
             ArrayCell::F64(v) => serialize_array_with(v, ser, |f| ValidatedF64(*f)),
@@ -341,21 +341,7 @@ impl Serialize for ArrayCellSerializer<'_> {
     }
 }
 
-/// Serialize a slice of `Serialize` items as a JSON array.
-///
-/// Used for primitive array variants where `Option<T>: Serialize`.
-fn serialize_array<T: Serialize, S: Serializer>(
-    items: &[T],
-    ser: S,
-) -> std::result::Result<S::Ok, S::Error> {
-    let mut seq = ser.serialize_seq(Some(items.len()))?;
-    for item in items {
-        seq.serialize_element(item)?;
-    }
-    seq.end()
-}
-
-/// Like `serialize_array`, but wraps each `Some` element via `wrap`.
+/// Serialize a slice as a JSON array, wrapping each `Some` element via `wrap`.
 ///
 /// Used for array variants needing custom serialization (dates, validated
 /// floats, etc.).

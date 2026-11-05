@@ -309,9 +309,14 @@ fn quote_numeric_literal_as_string(expression: &str) -> String {
 mod tests {
     use std::sync::Arc;
 
-    use etl::schema::{IdentityMask, ReplicationMask, TableId, TableName, TableSchema};
+    use etl::{
+        schema::{IdentityMask, ReplicationMask, TableId, TableName, TableSchema},
+        test_utils::property::run_property,
+    };
+    use proptest::prop_assert_eq;
 
     use super::*;
+    use crate::default_literals::{default_string_value, postgres_text_default};
 
     fn col(name: &str) -> ColumnSchema {
         ColumnSchema::new(name.to_owned(), Type::INT4, -1, 1, true)
@@ -607,5 +612,51 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    /// Decodes a Snowflake single-quoted string constant, or returns `None`
+    /// when Snowflake would reject it: an unpaired quote or a trailing
+    /// backslash. A backslash before any other character yields that
+    /// character.
+    fn decode_snowflake_string(literal: &str) -> Option<String> {
+        let mut chars = literal.strip_prefix('\'')?.strip_suffix('\'')?.chars().peekable();
+        let mut value = String::new();
+        while let Some(ch) = chars.next() {
+            match ch {
+                '\'' if chars.next_if_eq(&'\'').is_some() => value.push('\''),
+                '\'' => return None,
+                '\\' => value.push(match chars.next()? {
+                    'b' => '\u{8}',
+                    'f' => '\u{c}',
+                    'n' => '\n',
+                    'r' => '\r',
+                    't' => '\t',
+                    '0' => '\0',
+                    escaped => escaped,
+                }),
+                ch => value.push(ch),
+            }
+        }
+        Some(value)
+    }
+
+    /// Any text default, as Postgres stores it, renders as a Snowflake literal
+    /// that decodes back to the same text, both in `CREATE TABLE` and in
+    /// `ADD COLUMN`.
+    #[test]
+    fn string_defaults_roundtrip_through_snowflake_sql() {
+        run_property("snowflake string defaults roundtrip", &default_string_value(), |value| {
+            let default = postgres_text_default(value);
+            for rendered in [
+                snowflake_default_expression(&default, &Type::TEXT, -1),
+                snowflake_add_column_default_expression(&default, &Type::TEXT, -1),
+            ] {
+                prop_assert_eq!(
+                    rendered.as_deref().and_then(decode_snowflake_string),
+                    Some(value.clone())
+                );
+            }
+            Ok(())
+        });
     }
 }

@@ -1,4 +1,8 @@
-use std::{collections::HashSet, error::Error, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    error::Error,
+    time::Duration,
+};
 
 use etl::{
     error::{ErrorKind, EtlError},
@@ -59,8 +63,7 @@ fn test_column(
 }
 
 fn column_schemas_from_ddl_message(message: &JsonValue) -> Vec<ColumnSchema> {
-    let primary_key_positions: std::collections::HashMap<i32, i32> = message["identity"]
-        ["primary_key_attnums"]
+    let primary_key_positions: HashMap<i32, i32> = message["identity"]["primary_key_attnums"]
         .as_array()
         .unwrap()
         .iter()
@@ -2150,7 +2153,7 @@ async fn schema_change_capture_ignores_unrelated_table_metadata() {
 }
 
 /// Default deparsing does not add locks on other published tables, including
-/// siblings refreshed by partition-tree capture.
+/// partition siblings described by publication DDL.
 #[tokio::test(flavor = "multi_thread")]
 async fn schema_change_capture_does_not_lock_other_published_tables() {
     for partitioned in [false, true] {
@@ -2192,8 +2195,9 @@ async fn schema_change_capture_does_not_lock_other_published_tables() {
             .start_logical_replication("lock_pub", &slot_name, slot.consistent_point, None)
             .await
             .unwrap();
-        let count = if partitioned { 4 } else { 3 };
-        let messages = collect_ddl_messages(stream, count).await;
+        // The table DDL describes its target; the publication DDL describes
+        // both.
+        let messages = collect_ddl_messages(stream, 3).await;
         for message in messages {
             let value = message["columns"]
                 .as_array()
@@ -2367,10 +2371,10 @@ async fn partition_primary_key_metadata_is_table_local() {
     }
 }
 
-/// DDL anywhere in a declarative partition tree refreshes every effective
-/// published identity, describing each table independently.
+/// Partition DDL refreshes the effective published identities in the altered
+/// subtree, describing each table independently.
 #[tokio::test(flavor = "multi_thread")]
-async fn schema_change_messages_refresh_whole_partition_tree() {
+async fn schema_change_messages_refresh_partition_subtree() {
     for mode in ["root", "leaves", "mixed"] {
         let database = spawn_source_database().await;
         let tree =
@@ -2421,14 +2425,21 @@ async fn schema_change_messages_refresh_whole_partition_tree() {
         let slot_name = test_slot_name("ddl_tree_refresh");
         let slot = client.create_slot(&slot_name, &Default::default()).await.unwrap();
 
+        let subtrees = [
+            targets.clone(),
+            vec![tree.p_2026_table_id, tree.p_2026_01_table_id, tree.p_2026_02_table_id],
+            vec![tree.p_2026_01_table_id],
+        ];
         let mut expected = Vec::new();
-        for (target, value) in [(&root, "root"), (&middle, "middle"), (&leaf, "leaf")] {
+        for ((target, value), subtree) in
+            [(&root, "root"), (&middle, "middle"), (&leaf, "leaf")].into_iter().zip(&subtrees)
+        {
             database
                 .run_sql(&format!("alter table {target} alter column data set default '{value}'"))
                 .await
                 .unwrap();
-            let mut phase = std::collections::HashMap::new();
-            for id in &targets {
+            let mut phase = HashMap::new();
+            for id in targets.iter().filter(|id| subtree.contains(id)) {
                 let row = database
                     .client
                     .as_ref()
@@ -2457,13 +2468,16 @@ async fn schema_change_messages_refresh_whole_partition_tree() {
             .start_logical_replication(publication, &slot_name, slot.consistent_point, None)
             .await
             .unwrap();
-        let messages = collect_ddl_messages(stream, targets.len() * expected.len()).await;
-        for (phase, batch) in expected.iter().zip(messages.chunks_exact(targets.len())) {
+        let messages = collect_ddl_messages(stream, expected.iter().map(HashMap::len).sum()).await;
+        let mut messages = messages.as_slice();
+        for phase in &expected {
+            let (batch, rest) = messages.split_at(phase.len());
+            messages = rest;
             let ids = batch
                 .iter()
                 .map(|m| TableId::new(u32::try_from(m["oid"].as_u64().unwrap()).unwrap()))
                 .collect::<HashSet<_>>();
-            assert_eq!(ids, targets.iter().copied().collect(), "{mode}");
+            assert_eq!(ids, phase.keys().copied().collect(), "{mode}");
             for message in batch {
                 let id = TableId::new(u32::try_from(message["oid"].as_u64().unwrap()).unwrap());
                 let (columns, identity) = &phase[&id];
@@ -2488,13 +2502,6 @@ async fn schema_change_messages_refresh_whole_partition_tree() {
                 };
                 assert_eq!(names.len(), 1);
                 assert_eq!(names[expected_publication], JsonValue::Null);
-            }
-        }
-        // Leaf-local DDL must not borrow the leaf's default for an ancestor or
-        // sibling.
-        for id in &targets {
-            if *id != tree.p_2026_01_table_id {
-                assert_eq!(expected[1][id], expected[2][id]);
             }
         }
     }

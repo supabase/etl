@@ -471,7 +471,7 @@ where
         let table_id = e.replicated_table_schema.id();
         let cols = self.prepare_columns(columns, &e.replicated_table_schema).await?;
         let offset = OffsetToken::new(e.commit_lsn, e.tx_ordinal);
-        if self.client.is_offset_committed(table_id, &offset).await.map_err(EtlError::from)? {
+        if self.client.reconcile_replay_offset(table_id, &offset).await? {
             return Ok(Completed::default());
         }
 
@@ -499,7 +499,7 @@ where
         let table_id = e.replicated_table_schema.id();
         let cols = self.prepare_columns(columns, &e.replicated_table_schema).await?;
         let offset = OffsetToken::new(e.commit_lsn, e.tx_ordinal);
-        if self.client.is_offset_committed(table_id, &offset).await.map_err(EtlError::from)? {
+        if self.client.reconcile_replay_offset(table_id, &offset).await? {
             return Ok(Completed::default());
         }
 
@@ -523,7 +523,7 @@ where
         let table_id = e.replicated_table_schema.id();
         let offset = OffsetToken::new(e.commit_lsn, e.tx_ordinal);
         let cols = self.prepare_columns(columns, &e.replicated_table_schema).await?;
-        if self.client.is_offset_committed(table_id, &offset).await.map_err(EtlError::from)? {
+        if self.client.reconcile_replay_offset(table_id, &offset).await? {
             return Ok(Completed::default());
         }
 
@@ -966,7 +966,6 @@ mod tests {
     use etl::{
         destination::Destination as _,
         event::{RelationEvent, TruncateEvent},
-        pipeline::PipelineId,
         schema::{IdentityMask, PgLsn, ReplicationMask, SnapshotId, TableName, TableSchema, Type},
         store::{SchemaStore, StateStore, TableRetryPolicy, TableState},
         test_utils::notifying_store::NotifyingStore,
@@ -1008,7 +1007,7 @@ mod tests {
             stream_client,
             config.database().to_owned(),
             config.schema().to_owned(),
-            PipelineId::from(1_u64),
+            "1".into(),
         );
         let store = NotifyingStore::new();
         let destination = Destination::new(client, store.clone());

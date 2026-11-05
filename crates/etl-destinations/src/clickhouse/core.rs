@@ -46,10 +46,25 @@ use crate::{
         ensure_destination_schema_matches_metadata, ensure_relation_schema_transition,
         is_stale_relation_replay,
     },
+    retry::{RetryPolicy, retry_with_backoff},
     table_name::try_stringify_table_name,
 };
 
 const MAX_ERROR_COLUMN_NAMES: usize = 12;
+
+/// Retry policy for the startup server version probe.
+///
+/// An idle or briefly unreachable destination can miss one probe budget at
+/// startup. Four retries with 2, 4, 8, and 16 second delays absorb that
+/// without hiding a destination that stays down: with each of the five
+/// attempts allowed the full connectivity check budget, a destination that
+/// never answers fails startup after up to about 90 seconds. Only retryable
+/// errors are retried.
+const SERVER_VERSION_PROBE_RETRY_POLICY: RetryPolicy = RetryPolicy {
+    max_retries: 4,
+    initial_delay: Duration::from_secs(2),
+    max_delay: Duration::from_secs(16),
+};
 
 /// Postgres CDC operation kind. Written to the `cdc_operation` column as the
 /// matching uppercase string (`"INSERT"`, `"UPDATE"`, `"DELETE"`) so downstream
@@ -766,10 +781,11 @@ impl std::fmt::Display for ClickHouseOperationKind {
 pub struct ClickHouseDestination<S> {
     /// Write-path state and operations shared by all destination entrypoints.
     writer: DestinationWriter<S>,
-    /// Lifecycle registry for background event-write tasks.
+    /// Lifecycle registry for background copy and event-write tasks.
     ///
-    /// [`Destination::write_events`] admits its work here and returns;
-    /// destructive table resets drain the registry to fence admitted work.
+    /// Writes admitted here outlive cancellation of their caller. Destructive
+    /// table resets drain the registry before dropping the table. This does
+    /// not fence remote requests that outlive an INSERT timeout or shutdown.
     tasks: TaskRegistry,
     /// Per-table ordering of event batches; see [`EventBatchFences`].
     fences: Arc<EventBatchFences>,
@@ -832,10 +848,10 @@ fn evict_layout_after_rejected_insert(
     EtlError::from(failure).with_retryability(Retryability::Retryable)
 }
 
-/// Execution context captured by ClickHouse background event tasks.
+/// Execution context captured by ClickHouse background write tasks.
 ///
 /// Before resetting a table, [`ClickHouseDestination`] retains exclusive
-/// access to its [`TaskRegistry`] while waiting for every admitted event task
+/// access to its [`TaskRegistry`] while waiting for every admitted write task
 /// to finish. A task that captured the complete destination could later access
 /// that same task registry, causing the reset to wait for the task while the
 /// task waits for the reset-held registry.
@@ -843,8 +859,8 @@ fn evict_layout_after_rejected_insert(
 /// This type contains the state needed to execute writes but deliberately
 /// omits [`TaskRegistry`], making that recursive registry access unavailable
 /// through the task's execution context. It omits [`EventBatchFences`] for the
-/// same reason. A task already holds the fences of every table it writes, so
-/// it must never wait on them again.
+/// same reason. An event task already holds the fences of every table it
+/// writes, so it must never wait on them again.
 struct DestinationWriter<S> {
     /// HTTP client used for all DDL and RowBinary INSERT traffic.
     client: ClickHouseClient,
@@ -1034,8 +1050,27 @@ where
 
     /// Probes the server version and rejects unsupported engine/version pairs.
     /// Currently the only gate: ReplacingMergeTree requires CH >= 23.5.
+    ///
+    /// Retryable probe failures, such as timeouts and proxy 5xx responses, are
+    /// retried with bounded exponential backoff before startup fails.
     pub async fn validate_engine_support(&self) -> EtlResult<()> {
-        let server_version = self.writer.client.server_version().await?;
+        let server_version = retry_with_backoff(
+            SERVER_VERSION_PROBE_RETRY_POLICY,
+            |_| false,
+            |delay| delay,
+            |attempt| {
+                warn!(
+                    error = %attempt.error,
+                    retry_index = attempt.retry_index,
+                    max_retries = attempt.max_retries,
+                    delay_ms = attempt.sleep_delay.as_millis(),
+                    "clickhouse server version probe failed, retrying"
+                );
+            },
+            || self.writer.client.server_version(),
+        )
+        .await
+        .map_err(|failure| failure.last_error)?;
         ensure_engine_supported(self.writer.inserter_config.engine, server_version)
     }
 
@@ -1052,7 +1087,10 @@ where
         schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
-        self.writer.write_table_rows_inner(schema, None, table_rows).await
+        let (table_name, layout) = self.writer.prepare_table_for_writes(schema).await?;
+        self.writer
+            .write_prepared_table_rows(schema.id(), &table_name, &layout, None, table_rows)
+            .await
     }
 
     /// Dispatches a streaming event batch through the [`Destination`] trait
@@ -1276,6 +1314,9 @@ where
 
         match metadata {
             None => {
+                #[cfg(feature = "test-utils")]
+                crate::clickhouse::test_utils::pause_before_table_creation().await;
+
                 validate_clickhouse_table_shape(schema, self.inserter_config.engine)?;
                 validate_clickhouse_table_name(
                     &clickhouse_table_name,
@@ -1507,14 +1548,15 @@ where
         Ok(())
     }
 
-    async fn write_table_rows_inner(
+    /// Writes a copy batch after table preparation has completed.
+    async fn write_prepared_table_rows(
         &self,
-        schema: &ReplicatedTableSchema,
+        table_id: TableId,
+        table_name: &str,
+        layout: &Arc<RowBinaryLayout>,
         batch_id: Option<TableCopyBatchId>,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
-        let (clickhouse_table_name, layout) = self.prepare_table_for_writes(schema).await?;
-
         let engine = self.inserter_config.engine;
         let rows: Vec<Vec<ClickHouseValue>> = table_rows
             .into_iter()
@@ -1541,16 +1583,16 @@ where
 
         self.client
             .insert_rows(
-                &clickhouse_table_name,
+                table_name,
                 rows,
-                &layout,
+                layout,
                 self.inserter_config.max_bytes_per_insert,
                 batch_id,
                 COPY_REPLICATION_PATH,
             )
             .await
             .map_err(|failure| {
-                evict_layout_after_rejected_insert(&self.table_cache, schema.id(), &layout, failure)
+                evict_layout_after_rejected_insert(&self.table_cache, table_id, layout, failure)
             })
     }
 
@@ -2748,15 +2790,14 @@ where
         replicated_table_schema: &ReplicatedTableSchema,
         async_result: DropTableForCopyResult<()>,
     ) -> EtlResult<()> {
-        // Acquire the task registry before any client work. Event tasks have
+        // Acquire the task registry before any client work. Write tasks have
         // no registry access, so they can finish while the reset waits for
-        // them; their inserts and DDL all carry client-side timeouts, so the
-        // drain cannot wait unboundedly.
+        // them. Their INSERT and DDL timeouts still apply while draining.
         let task_guard = self.tasks.drain().await?;
 
         let result = self.writer.drop_table_for_copy_inner(replicated_table_schema).await;
 
-        // Publish the remote result before allowing another event task to run.
+        // Publish the remote result before allowing another write task to run.
         async_result.send(result);
         drop(task_guard);
 
@@ -2770,9 +2811,35 @@ where
         table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
-        let result =
-            self.writer.write_table_rows_inner(replicated_table_schema, batch_id, table_rows).await;
-        async_result.send(result.map(|_| DestinationWriteStatus::Durable));
+        self.tasks.try_reap().await?;
+
+        // Retry skips reset when destination metadata is absent. Keep
+        // preparation under the caller so cancellation cannot leave an
+        // old copy creating a table and writing into the next snapshot
+        // without a reset to drain it.
+        let (table_name, layout) =
+            match self.writer.prepare_table_for_writes(replicated_table_schema).await {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    async_result.send(Err(error));
+                    return Ok(());
+                }
+            };
+
+        // A cancelled copy owner must not drop an in-flight INSERT before a
+        // later table reset drains it. Capture only the writer so the task
+        // neither retains nor accesses its own registry.
+        let writer = self.writer.clone();
+        let table_id = replicated_table_schema.id();
+        self.tasks
+            .spawn_with(move || async move {
+                let result = writer
+                    .write_prepared_table_rows(table_id, &table_name, &layout, batch_id, table_rows)
+                    .await;
+                async_result.send(result.map(|_| DestinationWriteStatus::Durable));
+            })
+            .await;
+
         Ok(())
     }
 

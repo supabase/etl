@@ -1,6 +1,5 @@
 use etl::{
     event::EventType,
-    pipeline::PipelineId,
     test_utils::{
         database::{
             local_pg_read_replica_connection_config, spawn_source_database, test_table_name,
@@ -9,7 +8,7 @@ use etl::{
         event::EventCondition,
         memory_destination::MemoryDestination,
         notifying_store::NotifyingStore,
-        pipeline::create_pipeline,
+        pipeline::{create_pipeline, random_pipeline_id},
         test_destination_wrapper::TestDestinationWrapper,
         test_schema::{TableSelection, insert_users_data, setup_test_database_schema},
     },
@@ -22,7 +21,6 @@ use etl_postgres::{
     version::POSTGRES_16,
 };
 use etl_telemetry::tracing::init_test_tracing;
-use rand::random;
 use tokio::{select, time::interval};
 use tokio_postgres::Client;
 
@@ -154,10 +152,10 @@ async fn pipeline_replicates_table_copy_and_cdc_from_read_replica() {
 
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &replica_config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -171,7 +169,7 @@ async fn pipeline_replicates_table_copy_and_cdc_from_read_replica() {
     wait_with_standby_snapshots(&primary, users_sync_complete_notify.notified()).await;
 
     let apply_slot_name: String =
-        EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
+        EtlReplicationSlot::for_apply_worker(&pipeline_id).try_into().unwrap();
     // In read-replica mode ETL logical slots must be created on the replica,
     // while the primary should only own the physical standby slot.
     assert_replication_slot_absent(&primary, &apply_slot_name).await;
@@ -220,10 +218,10 @@ async fn pipeline_advances_read_replica_slot_on_idle_keepalive() {
 
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &replica_config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -237,7 +235,7 @@ async fn pipeline_advances_read_replica_slot_on_idle_keepalive() {
     wait_with_standby_snapshots(&primary, users_sync_complete_notify.notified()).await;
 
     let apply_slot_name: String =
-        EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
+        EtlReplicationSlot::for_apply_worker(&pipeline_id).try_into().unwrap();
     // In read-replica mode ETL logical slots must be created on the replica,
     // while the primary should only own the physical standby slot.
     assert_replication_slot_absent(&primary, &apply_slot_name).await;

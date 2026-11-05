@@ -348,12 +348,7 @@ impl IntoConnectOptions<SqlxConnectOptions> for PgConnectionConfig {
 
         // Apply options if provided
         if let Some(opts) = options {
-            // SQLx's separate startup parameters override values in options.
-            // Use ETL's application name and shared float-precision setting.
-            connect_options = connect_options
-                .application_name(&opts.application_name)
-                .extra_float_digits(None)
-                .options(opts.to_key_value_pairs());
+            connect_options = connect_options.options(opts.to_key_value_pairs());
         }
 
         connect_options

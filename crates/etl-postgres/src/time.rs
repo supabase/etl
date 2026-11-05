@@ -8,6 +8,7 @@ use std::{
 };
 
 use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use thiserror::Error;
 pub use tokio_postgres::types::{Date, Timestamp};
 
 /// Postgres date format string for parsing dates in YYYY-MM-DD format.
@@ -36,36 +37,14 @@ pub static POSTGRES_EPOCH: LazyLock<SystemTime> =
     LazyLock::new(|| UNIX_EPOCH + Duration::from_secs(POSTGRES_EPOCH_OFFSET_SECONDS));
 
 /// Error types that can occur when parsing Postgres temporal strings.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Error)]
 pub enum ParseTimeError {
     /// The underlying calendar or clock value failed chrono parsing.
-    Chrono(chrono::ParseError),
+    #[error("{0}")]
+    Chrono(#[from] chrono::ParseError),
     /// The input string has invalid temporal syntax.
+    #[error("Invalid syntax")]
     InvalidSyntax,
-}
-
-impl From<chrono::ParseError> for ParseTimeError {
-    fn from(error: chrono::ParseError) -> Self {
-        Self::Chrono(error)
-    }
-}
-
-impl fmt::Display for ParseTimeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ParseTimeError::Chrono(error) => write!(f, "{error}"),
-            ParseTimeError::InvalidSyntax => write!(f, "Invalid syntax"),
-        }
-    }
-}
-
-impl std::error::Error for ParseTimeError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            ParseTimeError::Chrono(error) => Some(error),
-            ParseTimeError::InvalidSyntax => None,
-        }
-    }
 }
 
 /// A Postgres time of day, including the distinct end-of-day value.

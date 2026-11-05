@@ -66,7 +66,8 @@ async fn alternative_replica_identity_remains_raw_only_after_restart() {
         ReplicationMask::from_bytes(vec![1, 1]),
         IdentityMask::from_bytes(vec![0, 1]),
     );
-    let destination = Destination::new(Client::new(Arc::clone(&auth), 1181), store.clone());
+    let destination =
+        Destination::new(Client::new(Arc::clone(&auth), 1181.to_string().into()), store.clone());
     with_table_cleanup(&sql, &[&physical], || async {
         write_table_rows(
             &destination,
@@ -107,7 +108,10 @@ async fn alternative_replica_identity_remains_raw_only_after_restart() {
         let query = companion_query(&config, &physical);
         assert!(query_rows(&sql, &query).await.is_err());
 
-        let restarted = Destination::new(Client::new(Arc::clone(&auth), 1181), store.clone());
+        let restarted = Destination::new(
+            Client::new(Arc::clone(&auth), 1181.to_string().into()),
+            store.clone(),
+        );
         restarted.startup().await.unwrap();
 
         assert!(query_rows(&sql, &query).await.is_err());
@@ -158,7 +162,8 @@ async fn companion_view_lifecycle_and_ownership() {
     let schema = ReplicatedTableSchema::all(Arc::new(original.clone()));
     let store = NotifyingStore::new();
     store.store_table_schema(original).await.unwrap();
-    let fresh = || Destination::new(Client::new(Arc::clone(&auth), 1178), store.clone());
+    let fresh =
+        || Destination::new(Client::new(Arc::clone(&auth), 1178.to_string().into()), store.clone());
     let destination = fresh();
     let cleanup_tables: [&str; 4] = [&physical, &keyless_physical, &long_physical, &public_name];
     with_table_cleanup(&sql, &cleanup_tables, || async {

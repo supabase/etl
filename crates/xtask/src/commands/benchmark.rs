@@ -490,7 +490,7 @@ impl BenchmarkArgs {
                 &publication_name,
                 table_ids,
                 expected_row_count,
-                pipeline_id,
+                &pipeline_id,
                 sample_report_path.clone(),
             )?;
             self.drop_publication(&publication_name)?;
@@ -521,18 +521,18 @@ impl BenchmarkArgs {
         publication_name: &str,
         table_ids: &str,
         expected_row_count: u64,
-        pipeline_id: u64,
+        pipeline_id: &str,
         report_path: PathBuf,
     ) -> Result<Value> {
         let mut args = vec!["--log-target".to_owned(), "terminal".to_owned(), "run".to_owned()];
         self.push_common_benchmark_args(&mut args);
         self.push_tuning_args(&mut args);
-        self.push_destination_args(&mut args)?;
+        self.push_destination_args(&mut args);
         args.extend([
             "--report-path".to_owned(),
             report_path.display().to_string(),
             "--pipeline-id".to_owned(),
-            pipeline_id.to_string(),
+            pipeline_id.to_owned(),
             "--publication-name".to_owned(),
             publication_name.to_owned(),
             "--table-ids".to_owned(),
@@ -564,7 +564,7 @@ impl BenchmarkArgs {
             let report = self.run_table_streaming(
                 &publication_name,
                 tpcc_threads,
-                pipeline_id,
+                &pipeline_id,
                 &selected_tables,
                 sample_report_path.clone(),
             )?;
@@ -595,19 +595,19 @@ impl BenchmarkArgs {
         &self,
         publication_name: &str,
         tpcc_threads: u16,
-        pipeline_id: u64,
+        pipeline_id: &str,
         selected_tables: &[String],
         report_path: PathBuf,
     ) -> Result<Value> {
         let mut args = vec!["--log-target".to_owned(), "terminal".to_owned(), "run".to_owned()];
         self.push_common_benchmark_args(&mut args);
         self.push_tuning_args(&mut args);
-        self.push_destination_args(&mut args)?;
+        self.push_destination_args(&mut args);
         args.extend([
             "--report-path".to_owned(),
             report_path.display().to_string(),
             "--pipeline-id".to_owned(),
-            pipeline_id.to_string(),
+            pipeline_id.to_owned(),
             "--publication-name".to_owned(),
             publication_name.to_owned(),
             "--tpcc-warehouses".to_owned(),
@@ -692,7 +692,8 @@ impl BenchmarkArgs {
         }
     }
 
-    fn push_destination_args(&self, args: &mut Vec<String>) -> Result<()> {
+    /// Appends command-line arguments for the selected benchmark destination.
+    fn push_destination_args(&self, args: &mut Vec<String>) {
         args.extend(["--destination".to_owned(), self.destination.as_arg().to_owned()]);
 
         match self.destination {
@@ -729,8 +730,6 @@ impl BenchmarkArgs {
             Destination::Snowflake => {}
             Destination::Null => {}
         }
-
-        Ok(())
     }
 
     fn psql_query(&self, database: &str, sql: &str) -> Result<String> {
@@ -834,13 +833,14 @@ fn check_command(command: &str) -> Result<()> {
     bail!("required command '{command}' was not found")
 }
 
-fn sample_pipeline_id(base: u64, benchmark_offset: u64, sample_idx: usize) -> Result<u64> {
+fn sample_pipeline_id(base: u64, benchmark_offset: u64, sample_idx: usize) -> Result<String> {
     let sample_offset = u64::try_from(sample_idx)
         .context("benchmark sample index does not fit in pipeline id")?
         .checked_mul(2)
         .context("benchmark sample pipeline id overflow")?;
     base.checked_add(sample_offset)
         .and_then(|id| id.checked_add(benchmark_offset))
+        .map(|id| id.to_string())
         .context("benchmark pipeline id overflow")
 }
 

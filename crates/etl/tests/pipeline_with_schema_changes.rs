@@ -4,7 +4,6 @@ use etl::{
     config::IntoConnectOptions,
     data::{ArrayCell, Cell, Date},
     event::{Event, EventType},
-    pipeline::PipelineId,
     postgres::migrations::run_source_migrations,
     schema::{ColumnSchema, SnapshotId, TableId, TableName, TableSchema},
     store::{SchemaStore, StateStore, TableState, TableStateType},
@@ -13,7 +12,9 @@ use etl::{
         event::{EventCondition, group_events_by_type_and_table_id},
         memory_destination::MemoryDestination,
         notifying_store::NotifyingStore,
-        pipeline::{create_database_and_sync_done_pipeline_with_table, create_pipeline},
+        pipeline::{
+            create_database_and_sync_done_pipeline_with_table, create_pipeline, random_pipeline_id,
+        },
         schema::{
             assert_replicated_schema_column_names_types, assert_schema_snapshots_ordering,
             assert_table_schema_column_names_types,
@@ -29,7 +30,6 @@ use etl_postgres::{
 };
 use etl_telemetry::{metrics::init_metrics_handle, tracing::init_test_tracing};
 use pg_escape::quote_identifier;
-use rand::random;
 use sqlx::Connection;
 use tokio_postgres::types::Type;
 
@@ -548,10 +548,10 @@ async fn run_add_column_with_equal_initial_masks(restart: bool) {
             .unwrap();
         let store = NotifyingStore::new();
         let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
-        let pipeline_id = random();
+        let pipeline_id = random_pipeline_id();
         let mut pipeline = create_pipeline(
             &database.config,
-            pipeline_id,
+            pipeline_id.as_str(),
             "equal_masks_pub".to_owned(),
             store.clone(),
             destination.clone(),
@@ -766,7 +766,7 @@ async fn publication_attnums_preserve_dropped_column_gaps_and_renames() {
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
     let mut pipeline = create_pipeline(
         &database.config,
-        random(),
+        random_pipeline_id().as_str(),
         "attnum_gaps_pub".to_owned(),
         store.clone(),
         destination.clone(),
@@ -1005,7 +1005,7 @@ async fn copy_synthetic_and_real_relations_share_decoding_masks() {
         let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
         let mut pipeline = create_pipeline(
             &database.config,
-            random(),
+            random_pipeline_id().as_str(),
             publication.to_owned(),
             store.clone(),
             destination.clone(),
@@ -1200,7 +1200,7 @@ async fn partition_filters_match_copy_synthetic_and_real_relations() {
         let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
         let mut pipeline = create_pipeline(
             &database.config,
-            random(),
+            random_pipeline_id().as_str(),
             "partition_filter_pub".to_owned(),
             store.clone(),
             destination.clone(),
@@ -1340,7 +1340,7 @@ async fn invalid_partitioned_primary_index_matches_real_identity() {
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
     let mut pipeline = create_pipeline(
         &database.config,
-        random(),
+        random_pipeline_id().as_str(),
         "invalid_partition_pub".into(),
         store.clone(),
         destination.clone(),
@@ -1398,7 +1398,8 @@ async fn invalid_partitioned_primary_index_matches_real_identity() {
     );
 }
 
-/// Root and leaf DDL refresh complete decoders for every published identity.
+/// Root DDL refreshes complete decoders for every published identity in the
+/// tree, while leaf DDL refreshes only that leaf.
 #[tokio::test(flavor = "multi_thread")]
 async fn tree_ddl_emits_synthetic_relations_for_effective_partition_targets() {
     for via_root in [false, true] {
@@ -1423,11 +1424,15 @@ async fn tree_ddl_emits_synthetic_relations_for_effective_partition_targets() {
         let leaf =
             etl::schema::TableName::new(name.schema.clone(), leaf_name).as_quoted_identifier();
         let targets = if via_root { vec![root] } else { leaves };
+        // The leaf DDL adds a second synthetic relation only for a published
+        // leaf.
+        let synthetic_count =
+            |target: &TableId| if !via_root && *target == targets[0] { 2_usize } else { 1 };
         let store = NotifyingStore::new();
         let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
         let mut pipeline = create_pipeline(
             &database.config,
-            random(),
+            random_pipeline_id().as_str(),
             "partition_ddl_pub".to_owned(),
             store.clone(),
             destination.clone(),
@@ -1446,7 +1451,13 @@ async fn tree_ddl_emits_synthetic_relations_for_effective_partition_targets() {
             .wait_for_events(
                 targets
                     .iter()
-                    .map(|target| EventCondition::TableCount(EventType::Relation, *target, 2))
+                    .map(|target| {
+                        EventCondition::TableCount(
+                            EventType::Relation,
+                            *target,
+                            u64::try_from(synthetic_count(target)).unwrap(),
+                        )
+                    })
                     .collect(),
             )
             .await;
@@ -1490,8 +1501,9 @@ async fn tree_ddl_emits_synthetic_relations_for_effective_partition_targets() {
                     _ => None,
                 })
                 .collect::<Vec<_>>();
-            let count = if *target == targets[0] { 3 } else { 2 };
-            assert_eq!(relations.len(), count);
+            let synthetic = synthetic_count(target);
+            let real = usize::from(*target == targets[0]);
+            assert_eq!(relations.len(), synthetic + real);
             for relation in &relations {
                 assert_eq!(relation.replication_mask().as_slice(), &[1, 1, 1, 1]);
                 assert_eq!(relation.identity_mask().as_slice(), &[1, 0, 1, 0]);
@@ -1500,11 +1512,12 @@ async fn tree_ddl_emits_synthetic_relations_for_effective_partition_targets() {
             // backfills the value its partitions read.
             let added = relations[0].inner().column_schemas.last().unwrap();
             assert_eq!(added.initial_default_expression(), Some("1"));
-            let score = relations[1].inner().column_schemas.last().unwrap();
-            let expected_default = if !via_root && *target == targets[0] { "2" } else { "1" };
+            let score = relations[synthetic - 1].inner().column_schemas.last().unwrap();
+            let expected_default = if synthetic == 2 { "2" } else { "1" };
             assert_eq!(score.default_expression.as_deref(), Some(expected_default));
-            if relations.len() == 3 {
-                assert_eq!(relations[1].inner(), relations[2].inner());
+            // The real relation before the insert reuses the latest snapshot.
+            if real == 1 {
+                assert_eq!(relations[synthetic - 1].inner(), relations[synthetic].inner());
             }
         }
     }
@@ -2262,7 +2275,7 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
     // Rename column + change type + insert, then restart.
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        &pipeline_id,
         publication.clone(),
         store.clone(),
         destination.clone(),
@@ -2304,7 +2317,7 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
     // Drop column + insert, then restart.
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        &pipeline_id,
         publication.clone(),
         store.clone(),
         destination.clone(),
@@ -2446,10 +2459,10 @@ async fn partitioned_table_schema_change_updates_relation_message() {
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name,
         state_store.clone(),
         destination.clone(),

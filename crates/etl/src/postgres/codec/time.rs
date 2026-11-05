@@ -222,6 +222,41 @@ fn split_timestamp_offset(value: &str) -> Option<(&str, &str)> {
     })
 }
 
+/// Checks that each fast path accepts only inputs chrono accepts, with the same
+/// value.
+///
+/// Inputs the fast paths decline already go to chrono, so this covers every
+/// way the fast paths can change a parse result.
+///
+/// # Panics
+///
+/// Panics when a fast path accepts an input that chrono rejects or decodes
+/// differently; that panic is the fuzz target's finding signal.
+#[cfg(any(test, feature = "fuzzing"))]
+pub(crate) fn check_fast_paths_match_chrono(value: &str) {
+    if let Some(date) = parse_iso_date_fast(value.as_bytes()) {
+        assert_eq!(
+            NaiveDate::parse_from_str(value, DATE_FORMAT).ok(),
+            Some(date),
+            "date fast path disagrees with chrono for {value:?}"
+        );
+    }
+    if let Some(time) = parse_iso_time_fast(value.as_bytes()) {
+        assert_eq!(
+            NaiveTime::parse_from_str(value, TIME_FORMAT).ok(),
+            Some(time),
+            "time fast path disagrees with chrono for {value:?}"
+        );
+    }
+    if let Some(timestamp) = parse_iso_timestamp_fast(value.as_bytes()) {
+        assert_eq!(
+            NaiveDateTime::parse_from_str(value, TIMESTAMP_FORMAT).ok(),
+            Some(timestamp),
+            "timestamp fast path disagrees with chrono for {value:?}"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::{NaiveTime, Timelike};
@@ -472,5 +507,124 @@ mod tests {
         assert!(parse_postgres_timestamp("270000-01-01 00:00:00").is_err());
         assert!(parse_postgres_timestamptz("270000-01-01 00:00:00+00").is_err());
         assert!(parse_postgres_timestamptz("0001-01-01 00:00:00+16 BC").is_err());
+    }
+
+    /// Generated checks of the fast paths and of Postgres text rendering.
+    #[cfg(feature = "test-utils")]
+    mod properties {
+        use chrono::{Datelike, NaiveDate, NaiveDateTime, Timelike};
+        use proptest::{prelude::*, prop_assert_eq};
+
+        use crate::{
+            postgres::codec::time::{
+                Date, Timestamp, check_fast_paths_match_chrono, parse_postgres_date,
+                parse_postgres_timestamp, parse_postgres_timestamptz,
+            },
+            test_utils::property::run_property,
+        };
+
+        /// Two digits covering valid, boundary and out-of-range components.
+        fn two_digits() -> impl Strategy<Value = String> {
+            prop_oneof![0u32..=31, 32u32..=99].prop_map(|value| format!("{value:02}"))
+        }
+
+        /// An optional fraction of 1 to 12 digits, around chrono's 9-digit
+        /// nanosecond precision.
+        fn fraction() -> impl Strategy<Value = String> {
+            prop_oneof![Just(String::new()), "\\.[0-9]{0,12}"]
+        }
+
+        /// Strings shaped like Postgres ISO output, with every component
+        /// varied, then optionally one byte replaced so near-miss layouts
+        /// reach the fast paths too.
+        fn iso_shaped() -> impl Strategy<Value = String> {
+            let date = (0u32..=9999, two_digits(), two_digits())
+                .prop_map(|(year, month, day)| format!("{year:04}-{month}-{day}"))
+                .boxed();
+            let time = (
+                two_digits(),
+                two_digits(),
+                prop_oneof![two_digits(), Just("60".into())],
+                fraction(),
+            )
+                .prop_map(|(hour, minute, second, fraction)| {
+                    format!("{hour}:{minute}:{second}{fraction}")
+                })
+                .boxed();
+            let shaped = prop_oneof![
+                date.clone(),
+                time.clone(),
+                (date, time).prop_map(|(date, time)| format!("{date} {time}")),
+            ];
+            (shaped, any::<prop::sample::Index>(), proptest::option::of(any::<char>())).prop_map(
+                |(value, index, replacement)| {
+                    let Some(replacement) = replacement else { return value };
+                    let mut chars: Vec<char> = value.chars().collect();
+                    let position = index.index(chars.len());
+                    chars[position] = replacement;
+                    chars.into_iter().collect()
+                },
+            )
+        }
+
+        /// Every fast path agrees with chrono on near-ISO and arbitrary input.
+        #[test]
+        fn fast_paths_match_chrono() {
+            let strategy = prop_oneof![9 => iso_shaped(), 1 => any::<String>()];
+            run_property("time fast paths match chrono", &strategy, |value| {
+                check_fast_paths_match_chrono(value);
+                Ok(())
+            });
+        }
+
+        /// Renders a value the way Postgres does with `DateStyle = ISO`:
+        /// years before 1 as `BC` with no year 0, trailing fraction zeros
+        /// trimmed.
+        fn postgres_text(value: NaiveDateTime) -> (String, String) {
+            let (year, era) =
+                if value.year() <= 0 { (1 - value.year(), " BC") } else { (value.year(), "") };
+            let date = format!("{year:04}-{:02}-{:02}", value.month(), value.day());
+            let mut time =
+                format!("{:02}:{:02}:{:02}", value.hour(), value.minute(), value.second());
+            let micros = value.nanosecond() / 1_000;
+            if micros > 0 {
+                time.push_str(format!(".{micros:06}").trim_end_matches('0'));
+            }
+            (format!("{date}{era}"), format!("{date} {time}"))
+        }
+
+        /// Microsecond timestamps across chrono's whole calendar range.
+        fn postgres_timestamp() -> impl Strategy<Value = NaiveDateTime> {
+            let min = NaiveDate::MIN.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_micros();
+            let max = NaiveDate::MAX.and_hms_opt(23, 59, 59).unwrap().and_utc().timestamp_micros();
+            let near_epoch = -1_000_000_000_000_000i64..=1_000_000_000_000_000;
+            prop_oneof![near_epoch, min..=max].prop_map(|micros| {
+                chrono::DateTime::from_timestamp_micros(micros).unwrap().naive_utc()
+            })
+        }
+
+        /// Dates and timestamps rendered as Postgres text parse back to the
+        /// same value, including BC years and years above 9999.
+        #[test]
+        fn postgres_text_roundtrips() {
+            run_property(
+                "postgres date and timestamp text roundtrip",
+                &postgres_timestamp(),
+                |value| {
+                    let (date, timestamp) = postgres_text(*value);
+                    let era = if value.year() <= 0 { " BC" } else { "" };
+                    prop_assert_eq!(parse_postgres_date(&date).unwrap(), Date::Value(value.date()));
+                    prop_assert_eq!(
+                        parse_postgres_timestamp(&format!("{timestamp}{era}")).unwrap(),
+                        Timestamp::Value(*value)
+                    );
+                    prop_assert_eq!(
+                        parse_postgres_timestamptz(&format!("{timestamp}+00{era}")).unwrap(),
+                        Timestamp::Value(value.and_utc())
+                    );
+                    Ok(())
+                },
+            );
+        }
     }
 }

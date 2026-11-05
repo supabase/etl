@@ -20,6 +20,11 @@ pub const SEND_STATUS_UPDATE_FP: &str = "send_status_update_fp";
 pub const STORE_REPLICATION_CHECKPOINT_FP: &str = "store_replication_checkpoint_fp";
 pub const APPLY_LOOP_AFTER_EVENT_BATCH_DISPATCH_FP: &str =
     "apply_loop.after_event_batch_dispatch_fp";
+/// Ages accepted debt to exercise durability expiry without sleeping.
+pub const APPLY_LOOP_EXPIRE_DURABILITY_FP: &str = "apply_loop.expire_durability_fp";
+/// Suspends source intake while leaving timers and destination results
+/// pollable.
+pub const APPLY_LOOP_PAUSE_INTAKE_FP: &str = "apply_loop.pause_intake_fp";
 
 /// Executes a configurable failpoint for testing error scenarios.
 ///

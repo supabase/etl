@@ -38,7 +38,11 @@ pub enum DestinationWriteStatus {
     /// [`WriteEventsDurability::RequireDurable`] write to settle this debt.
     /// `None` for `settle_durable_interval_ms` allows forced durability at any
     /// keepalive. `Some` guarantees at least that window before a later
-    /// keepalive can force durability. A terminal table-sync catchup may issue
+    /// keepalive can force durability. Independently, active apply loops
+    /// request cumulative durability after 60 seconds of deferral, using a
+    /// buffered batch or an empty barrier. An in-flight write must complete
+    /// first; this deadline does not bound destination completion time.
+    /// A terminal table-sync catchup may issue
     /// the same empty write without waiting.
     ///
     /// For table-copy writes through

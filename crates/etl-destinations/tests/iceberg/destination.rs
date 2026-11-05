@@ -4,7 +4,6 @@ use etl::{
     data::{Cell, TableRow},
     destination::{Destination, DestinationTableMetadata, WriteEventsDurability},
     event::{Event, EventType, InsertEvent, RelationEvent, TruncateEvent},
-    pipeline::PipelineId,
     schema::{
         ColumnSchema, PgLsn, ReplicatedTableSchema, SnapshotId, TableId, TableName, TableSchema,
         Type,
@@ -18,7 +17,7 @@ use etl::{
         },
         event::EventCondition,
         notifying_store::NotifyingStore,
-        pipeline::create_pipeline,
+        pipeline::{create_pipeline, random_pipeline_id},
         test_destination_wrapper::TestDestinationWrapper,
         test_schema::{
             TableSelection, TestDatabaseSchema, assert_table_rows_equal_ignoring_size,
@@ -32,7 +31,6 @@ use etl_destinations::iceberg::{
     test_utils::{LAKEKEEPER_URL, LakekeeperClient, create_minio_props, get_catalog_url},
 };
 use etl_telemetry::tracing::init_test_tracing;
-use rand::random;
 
 use crate::support::iceberg::read_all_rows;
 
@@ -467,7 +465,7 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
     .await;
 
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
 
     let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
     let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();
@@ -497,7 +495,7 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
     // Start pipeline from scratch.
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -617,7 +615,7 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
         .unwrap();
 
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
 
     let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
     let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();
@@ -646,7 +644,7 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
     // only.
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -904,7 +902,7 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
         .unwrap();
 
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
 
     let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
     let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();
@@ -933,7 +931,7 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
     // only.
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),

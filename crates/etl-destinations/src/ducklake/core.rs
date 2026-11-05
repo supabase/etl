@@ -17,6 +17,7 @@ use etl::{
     error::{ErrorKind, EtlResult, Retryability},
     etl_error,
     event::{Event, EventPosition},
+    pipeline::PipelineId,
     schema::{
         ColumnAlterationKind, ColumnPresenceChangeReason, ColumnSchema, ReplicatedTableSchema,
         SchemaDiff, SchemaOperation, SchemaPlan, SnapshotId, TableId, TableName, TableSchema,
@@ -805,23 +806,23 @@ pub enum DuckLakeMaintenanceMode {
 }
 
 /// Runtime configuration for DuckLake external maintenance coordination.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DuckLakeExternalMaintenanceConfig {
     pub mode: DuckLakeMaintenanceMode,
-    pub pipeline_id: u64,
+    pub pipeline_id: PipelineId,
 }
 
 impl DuckLakeExternalMaintenanceConfig {
-    pub const fn disabled() -> Self {
-        Self { mode: DuckLakeMaintenanceMode::Disabled, pipeline_id: 0 }
+    pub fn disabled() -> Self {
+        Self { mode: DuckLakeMaintenanceMode::Disabled, pipeline_id: "0".into() }
     }
 
-    pub const fn kubernetes(pipeline_id: u64) -> Self {
-        Self { mode: DuckLakeMaintenanceMode::Kubernetes, pipeline_id }
+    pub fn kubernetes(pipeline_id: impl Into<PipelineId>) -> Self {
+        Self { mode: DuckLakeMaintenanceMode::Kubernetes, pipeline_id: pipeline_id.into() }
     }
 
-    pub const fn postgres(pipeline_id: u64) -> Self {
-        Self { mode: DuckLakeMaintenanceMode::Postgres, pipeline_id }
+    pub fn postgres(pipeline_id: impl Into<PipelineId>) -> Self {
+        Self { mode: DuckLakeMaintenanceMode::Postgres, pipeline_id: pipeline_id.into() }
     }
 }
 
@@ -2101,7 +2102,7 @@ where
                 metadata_schema.to_string(),
                 metadata_pg_pool.clone(),
                 Arc::clone(&applied_tables),
-            )?
+            )
             .into(),
         );
         match external_maintenance.mode {
@@ -2131,7 +2132,7 @@ where
 
                 let watcher_destination = destination.clone();
                 let maintenance_pool = metadata_pg_pool.clone();
-                let pipeline_id = external_maintenance.pipeline_id as i64;
+                let pipeline_id = external_maintenance.pipeline_id;
                 destination
                     .tasks
                     .spawn_with(move || async move {

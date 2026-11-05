@@ -17,12 +17,13 @@ language sql
 stable
 strict
 set search_path = pg_catalog, pg_temp
--- Capture the configured migration connection's formats, matching copy.
-set datestyle from current
-set intervalstyle from current
-set extra_float_digits from current
-set timezone from current
-set bytea_output from current
+-- Render defaults and missing values identically in every caller's session,
+-- using the formats of ETL's own connections.
+set datestyle = 'ISO, MDY'
+set intervalstyle = 'postgres'
+set extra_float_digits = 3
+set timezone = 'UTC'
+set bytea_output = 'hex'
 as
 $fnc$
 with column_values as (
@@ -441,22 +442,14 @@ begin
                     cross join lateral etl.publication_table_candidates(p.oid) candidate
                     join pg_catalog.pg_class c on c.oid = candidate.table_oid
                 ),
-                -- A table DDL refreshes the whole containing declarative partition
-                -- tree. Ancestors can be published identities even for leaf-local DDL.
-                -- Ordinary inheritance retains its existing downward-only behavior.
-                partition_ancestors as (
-                    select b.* from base b
-                    union
-                    select i.inhparent, a.publication_name
-                    from partition_ancestors a
-                    join pg_catalog.pg_class c on c.oid = a.table_oid and c.relispartition
-                    join pg_catalog.pg_inherits i on i.inhrelid = a.table_oid
-                    where a.publication_name is null and not i.inhdetachpending
-                ),
+                -- Table DDL also refreshes descendants, which recursive commands
+                -- change without separate pg_event_trigger_ddl_commands() rows.
+                -- Ancestors and siblings keep their descriptions: PostgreSQL rejects
+                -- adding, dropping, renaming, or retyping a partition's columns.
                 -- UNION emits each identity once, including across inheritance diamonds.
                 -- Publication DDL already supplies its scoped effective identities.
                 affected as (
-                    select a.* from partition_ancestors a
+                    select b.* from base b
                     union
                     select
                         i.inhrelid,
@@ -524,8 +517,8 @@ revoke all on function etl.emit_schema_change_messages() from public;
 
 comment on function etl.emit_schema_change_messages() is
 $$Emits transactional schema snapshots for effective published permanent tables.
-Table DDL refreshes each identity in the containing declarative partition tree
-using that table's own schema; ordinary inheritance expands downward only.
+Table DDL refreshes the altered table and its inheritance descendants, each
+using its own schema.
 Publication DDL describes surviving targets scoped to the changed publication.
 Removed membership rows and other catalog object types emit no snapshots.
 

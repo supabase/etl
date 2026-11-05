@@ -32,7 +32,8 @@ use tracing::{debug, error, info, warn};
 
 #[cfg(feature = "failpoints")]
 use crate::failpoints::{
-    APPLY_LOOP_AFTER_EVENT_BATCH_DISPATCH_FP, STORE_REPLICATION_CHECKPOINT_FP,
+    APPLY_LOOP_AFTER_EVENT_BATCH_DISPATCH_FP, APPLY_LOOP_EXPIRE_DURABILITY_FP,
+    APPLY_LOOP_PAUSE_INTAKE_FP, STORE_REPLICATION_CHECKPOINT_FP, etl_fail_point_active,
     etl_fail_point_active_for_parameter,
 };
 use crate::{
@@ -59,7 +60,7 @@ use crate::{
     pipeline::PipelineId,
     postgres::{
         ReplicationMessageStream,
-        client::{PgReplicationClient, PostgresConnectionUpdate},
+        client::{PgReplicationClient, PostgresConnectionUpdate, SlotCreationMonitor},
         codec::{
             DDL_MESSAGE_PREFIX, SchemaChangeMessage, delete_message_payload_bytes,
             insert_message_payload_bytes, parse_event_from_begin_message,
@@ -119,6 +120,13 @@ const MIN_KEEP_ALIVE_DEADLINE_DURATION: Duration = Duration::from_millis(100);
 /// accumulates the next batch. Register both positions so each receives a share
 /// of the configured decoded-batch capacity.
 const APPLY_LOOP_BATCH_SLOTS: usize = 2;
+/// Longest the apply loop may defer requesting cumulative durability.
+///
+/// One minute amortizes confirmation across normal batches while bounding
+/// deferral under sustained traffic. This bounds scheduling, not destination
+/// completion time: an in-flight write must finish before another is sent.
+/// It is independent of the minimum idle-keepalive settlement interval.
+const MAX_DURABILITY_DEFERRAL: Duration = Duration::from_secs(60);
 
 /// Result type for the apply loop execution.
 ///
@@ -179,6 +187,8 @@ pub(crate) struct ApplyWorkerContext<S, D> {
     pub(crate) replication_lag_monitor: ReplicationLagMonitor,
     /// Pipeline-owned durability age, retained through worker retries.
     pub(crate) durability_monitor: DurabilityMonitor,
+    /// Pipeline-owned slot creation observations for child table-sync workers.
+    pub(crate) slot_creation_monitor: SlotCreationMonitor,
     /// Cancellation token for graceful termination.
     pub(crate) shutdown_token: CancellationToken,
     /// Semaphore controlling maximum concurrent table sync workers.
@@ -670,6 +680,38 @@ impl ApplyLoopState {
             && self.last_commit_end_lsn.is_some()
     }
 
+    /// Returns the fixed deadline of the earliest unconfirmed accepted write.
+    fn durability_deadline(&self) -> Option<Instant> {
+        self.pending_durability_interval
+            .map(|interval| interval.accepted_at + MAX_DURABILITY_DEFERRAL)
+    }
+
+    /// Returns whether the next dispatch must confirm outstanding durability.
+    fn durability_overdue(&self) -> bool {
+        self.durability_deadline().is_some_and(|deadline| Instant::now() >= deadline)
+    }
+
+    /// Carries an accepted write's commit boundary and earliest timing anchors.
+    ///
+    /// Later accepted writes cannot extend the original deadline. A later
+    /// cumulative durable result closes the entire interval.
+    fn record_accepted_write(
+        &mut self,
+        metadata: &ApplyLoopAsyncResultMetadata,
+        completed_at: Instant,
+    ) {
+        if metadata.event_count > 0 {
+            self.pending_durability_interval.get_or_insert(PendingDurabilityInterval {
+                dispatched_at: metadata.dispatched_at,
+                accepted_at: completed_at,
+            });
+        }
+        // Accepted work is not checkpointable yet. Carry its commit boundary
+        // into a later write so a cumulative Durable result can confirm it,
+        // preserving any newer commit boundary already buffered.
+        self.update_last_commit_end_lsn(metadata.commit_end_lsn);
+    }
+
     /// Returns the checkpoint LSN to report to PostgreSQL.
     ///
     /// When the loop is quiescent, every emitted message has been fully
@@ -756,6 +798,11 @@ impl ApplyLoopState {
     /// Returns `true` when the apply loop may still accept new replication
     /// messages.
     fn can_process_messages(&self) -> bool {
+        #[cfg(feature = "failpoints")]
+        if etl_fail_point_active(APPLY_LOOP_PAUSE_INTAKE_FP) {
+            return false;
+        }
+
         self.exit_intent.is_none() && !self.processing_paused
     }
 
@@ -891,7 +938,7 @@ where
         );
 
         let worker_type = worker_context.worker_type();
-        let slot_name: String = worker_type.build_etl_replication_slot(pipeline_id).try_into()?;
+        let slot_name: String = worker_type.build_etl_replication_slot(&pipeline_id).try_into()?;
 
         // No events or background tasks exist until the replication handshake
         // completes, so stalled protocol setup can be cancelled as one unit.
@@ -1120,15 +1167,16 @@ where
     /// 1. Shutdown requests.
     /// 2. PostgreSQL connection or feedback-sender failure.
     /// 3. Pending destination flush results.
-    /// 4. Memory-pressure batch flushing.
-    /// 5. Batch flush deadline expiry.
-    /// 6. Incoming replication messages.
+    /// 4. Maximum durability deferral expiry.
+    /// 5. Memory-pressure batch flushing.
+    /// 6. Batch flush deadline expiry.
+    /// 7. Incoming replication messages.
     ///
     /// The feedback sender task owns the only heartbeat timer and continues
     /// sending while any handler below is awaiting work. Incoming PostgreSQL
-    /// keepalives drive idle durability settlement; while intake is
-    /// backpressured, both settlement and publication of fresh progress wait
-    /// for intake to resume. Feedback channel closure wakes the iteration
+    /// keepalives drive early idle durability settlement. The maximum deferral
+    /// timer and destination completion remain effective while intake is
+    /// backpressured. Feedback channel closure wakes the iteration
     /// even when intake is paused; it does not interrupt an in-flight handler.
     ///
     /// Each branch performs its work and then relies on
@@ -1155,6 +1203,7 @@ where
             return Ok(Some(result));
         }
 
+        let durability_deadline = self.state.durability_deadline();
         tokio::select! {
             biased;
 
@@ -1183,7 +1232,14 @@ where
                     .await?;
             }
 
-            // PRIORITY 4: Flush ETL-owned decoded memory as soon as emergency
+            // PRIORITY 4: Bound deferral independently of source traffic and
+            // backpressure. Disable the timer during a write to avoid both
+            // competing dispatches and a ready-timer spin while it completes.
+            _ = Self::wait_for_deadline(durability_deadline), if !self.state.has_pending_flush_result() => {
+                self.settle_overdue_durability().await?;
+            }
+
+            // PRIORITY 5: Flush ETL-owned decoded memory as soon as emergency
             // backpressure activates. Destination-result polling remains
             // independent, so pausing source intake cannot prevent retained
             // batches from draining.
@@ -1195,13 +1251,13 @@ where
                 }
             }
 
-            // PRIORITY 5: Handle batch flush timer expiry. This prevents
+            // PRIORITY 6: Handle batch flush timer expiry. This prevents
             // buffered work from waiting forever when traffic is low.
-            _ = Self::wait_for_batch_deadline(self.state.flush_deadline), if self.state.can_wait_for_deadline() => {
+            _ = Self::wait_for_deadline(self.state.flush_deadline), if self.state.can_wait_for_deadline() => {
                 self.flush_batch("flush deadline reached").await?;
             }
 
-            // PRIORITY 6: Process incoming replication messages from
+            // PRIORITY 7: Process incoming replication messages from
             // PostgreSQL. New WAL messages are only accepted while the loop is
             // still actively ingesting.
             maybe_message = replication_message_stream.next(), if self.state.can_process_messages() => {
@@ -1279,7 +1335,7 @@ where
             }
 
             // PRIORITY 4: Handle batch flush timer expiry.
-            _ = Self::wait_for_batch_deadline(self.state.flush_deadline), if self.state.can_wait_for_deadline() => {
+            _ = Self::wait_for_deadline(self.state.flush_deadline), if self.state.can_wait_for_deadline() => {
                 self.flush_batch("flush deadline reached during shutdown drain").await?;
             }
         }
@@ -1345,8 +1401,8 @@ where
         }
     }
 
-    /// Waits for the batch flush deadline if one is set.
-    async fn wait_for_batch_deadline(deadline: Option<Instant>) {
+    /// Waits for a monotonic deadline if one is set.
+    async fn wait_for_deadline(deadline: Option<Instant>) {
         match deadline {
             Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
             None => std::future::pending().await,
@@ -1664,25 +1720,22 @@ where
 
             match status {
                 DestinationWriteStatus::Accepted => {
-                    // The first accepted write opens a durability interval.
-                    // Later accepted writes remain covered by that same
-                    // interval, so retain the earliest timing anchors until a
-                    // durable result closes it.
-                    if metadata.event_count > 0 {
-                        self.state.pending_durability_interval.get_or_insert(
-                            PendingDurabilityInterval {
-                                dispatched_at: metadata.dispatched_at,
-                                accepted_at: completed_at,
-                            },
-                        );
+                    self.state.record_accepted_write(metadata, completed_at);
+                    #[cfg(feature = "failpoints")]
+                    if let Some(interval) = self.state.pending_durability_interval.as_mut()
+                        && etl_fail_point_active_for_parameter(
+                            APPLY_LOOP_EXPIRE_DURABILITY_FP,
+                            self.worker_context.worker_type().as_str(),
+                        )
+                    {
+                        interval.accepted_at -= MAX_DURABILITY_DEFERRAL;
                     }
-
-                    self.state.update_last_commit_end_lsn(metadata.commit_end_lsn);
                 }
                 DestinationWriteStatus::Durable => {
                     // A durable result also confirms every earlier accepted
                     // write in the same ordered apply-loop stream.
-                    if let Some(interval) = self.state.pending_durability_interval.take() {
+                    let deferred_interval = self.state.pending_durability_interval.take();
+                    if let Some(interval) = deferred_interval {
                         histogram!(
                             ETL_DESTINATION_DURABILITY_DURATION_SECONDS,
                             WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
@@ -1766,17 +1819,9 @@ where
         // needs to be flushed now that the previous in-flight result has
         // resolved.
         if processing_paused {
-            if let Some(metadata) = metadata.as_ref() {
-                // A nonempty required-durability write is terminal and stops
-                // intake. An empty idle barrier may have a successor buffered
-                // while it confirms only its captured commit end LSN.
-                debug_assert!(
-                    metadata.durability != WriteEventsDurability::RequireDurable
-                        || metadata.event_count == 0,
-                    "terminal event write must not have a queued successor batch"
-                );
-            }
-
+            // Required-durability writes may be nonterminal. A queued
+            // successor has its own captured commit boundary and is dispatched
+            // only after the predecessor's result has been processed.
             self.flush_batch("pending flush result received").await?;
         }
 
@@ -1903,12 +1948,38 @@ where
 
         let event_batch = self.state.event_batch.take();
 
-        // A terminal batch must settle all accepted writes before completion.
-        let durability = match self.state.exit_intent {
-            Some(ExitIntent::Complete) => WriteEventsDurability::RequireDurable,
-            Some(ExitIntent::Pause) | None => WriteEventsDurability::MayDefer,
+        // Check on every dispatch, including a queued batch resumed by a
+        // result. A ready result must not bypass the deferral timer's policy.
+        let durability = if matches!(self.state.exit_intent, Some(ExitIntent::Complete))
+            || (!self.state.is_draining_for_shutdown() && self.state.durability_overdue())
+        {
+            WriteEventsDurability::RequireDurable
+        } else {
+            WriteEventsDurability::MayDefer
         };
         self.dispatch_write_events(event_batch, durability, reason).await
+    }
+
+    /// Requests cumulative confirmation once the earliest deferral expires.
+    ///
+    /// Buffered events must travel with the captured commit boundary. An empty
+    /// barrier is safe only when all decoded events have already been sent.
+    /// An open transaction may be partly sent, but its commit cannot be
+    /// captured until it has been decoded; only earlier completed commits can
+    /// advance. The pending-result path serializes this write with successors.
+    async fn settle_overdue_durability(&mut self) -> EtlResult<()> {
+        debug_assert!(!self.state.has_pending_flush_result());
+
+        if self.state.has_pending_batch() {
+            self.flush_batch("maximum durability deferral reached").await
+        } else {
+            self.dispatch_write_events(
+                EventBatch::empty(),
+                WriteEventsDurability::RequireDurable,
+                "maximum durability deferral reached",
+            )
+            .await
+        }
     }
 
     /// Settles an idle accepted commit while leaving normal intake enabled.
@@ -1921,13 +1992,10 @@ where
     /// [`PipelineConfig::settle_durable_interval_ms`] of `None` allows forced
     /// durability at any keepalive. `Some` guarantees at least that window,
     /// measured from when the apply loop observed `Accepted`, before a later
-    /// keepalive can force durability. While intake is backpressured, those
-    /// messages wait, so no new idle barrier is started and fresh feedback
-    /// positions are not
-    /// published through this path. Existing destination results can still
-    /// complete. The independent feedback sender task keeps the connection
-    /// alive by repeating the last supplied safe positions until intake
-    /// resumes.
+    /// keepalive can force durability. The independent maximum deferral timer
+    /// can force confirmation sooner than a longer idle minimum. During intake
+    /// backpressure, that timer still runs and completed deferred writes can
+    /// publish their captured durable commit boundaries to the feedback sender.
     async fn maybe_settle_idle_durability(&mut self) -> EtlResult<()> {
         if !self.state.can_settle_idle_durability() {
             return Ok(());
@@ -2137,7 +2205,9 @@ where
         self.record_cdc_event_received();
 
         match &message {
-            LogicalReplicationMessage::Begin(begin_body) => self.handle_begin_message(begin_body),
+            LogicalReplicationMessage::Begin(begin_body) => {
+                Ok(self.handle_begin_message(begin_body))
+            }
             LogicalReplicationMessage::Commit(commit_body) => {
                 self.handle_commit_message(commit_body).await
             }
@@ -2374,10 +2444,7 @@ where
     }
 
     /// Handles Postgres BEGIN messages.
-    fn handle_begin_message(
-        &mut self,
-        message: &protocol::BeginBody,
-    ) -> EtlResult<HandleMessageResult> {
+    fn handle_begin_message(&mut self, message: &protocol::BeginBody) -> HandleMessageResult {
         let final_lsn = PgLsn::from(message.final_lsn());
         self.state.remote_final_lsn = Some(final_lsn);
 
@@ -2389,7 +2456,7 @@ where
         let tx_ordinal = self.state.next_tx_ordinal();
         let event = parse_event_from_begin_message(final_lsn, tx_ordinal, message);
 
-        Ok(HandleMessageResult::return_event(Event::Begin(event)))
+        HandleMessageResult::return_event(Event::Begin(event))
     }
 
     /// Handles Postgres COMMIT messages.
@@ -3154,7 +3221,7 @@ where
                 .await
             }
             WorkerContext::TableSync(ctx) => {
-                table_sync_worker::process_syncing_tables_after_commit_event(ctx, lsn).await
+                Ok(table_sync_worker::process_syncing_tables_after_commit_event(ctx, lsn).await)
             }
         }?;
 
@@ -3167,7 +3234,8 @@ where
     /// Processes syncing tables after a batch has been flushed.
     ///
     /// Dispatches to worker-specific implementation based on the worker
-    /// context.
+    /// context. Publishes the persisted commit boundary to the feedback task
+    /// unless draining for shutdown.
     async fn process_syncing_tables_after_flush(&mut self, current_lsn: PgLsn) -> EtlResult<()> {
         debug!(
             worker_type = %self.worker_context.worker_type(),
@@ -3227,6 +3295,16 @@ where
         // actually persisted, never on a deferred in-memory candidate.
         let persisted_checkpoint_lsn = self.persist_replication_checkpoint(current_lsn).await?;
         debug_assert!(persisted_checkpoint_lsn >= current_lsn);
+
+        // Update the feedback task without waiting for source keepalives;
+        // intake may still be paused by backpressure. Publish only this
+        // flush's captured commit, never a received or buffered successor.
+        // Shutdown retains its existing no-final-feedback rule.
+        if !self.state.is_draining_for_shutdown() {
+            self.tasks
+                .enqueue_status_update(self.state.last_received_lsn(), current_lsn, false)
+                .await?;
+        }
 
         Ok(())
     }
@@ -3526,7 +3604,7 @@ mod apply_worker {
         worker_state: &TableSyncWorkerState,
         catchup_lsn: PgLsn,
         wait_reason: CatchupWaitReason,
-    ) -> EtlResult<Option<ExitIntent>>
+    ) -> Option<ExitIntent>
     where
         S: SchemaStore,
     {
@@ -3568,7 +3646,7 @@ mod apply_worker {
                         "apply worker unblocked: table sync worker errored, skipping table",
                     );
 
-                    return Ok(None);
+                    return None;
                 }
 
                 info!(
@@ -3578,7 +3656,7 @@ mod apply_worker {
                     "apply worker unblocked: table sync worker reached sync_done",
                 );
 
-                Ok(None)
+                None
             }
             ShutdownResult::Shutdown(_) => {
                 info!(
@@ -3587,7 +3665,7 @@ mod apply_worker {
                     "apply worker unblocked: shutdown signal received while waiting for table sync worker",
                 );
 
-                Ok(Some(ExitIntent::Pause))
+                Some(ExitIntent::Pause)
             }
         }
     }
@@ -3655,7 +3733,7 @@ mod apply_worker {
                         catchup_lsn,
                         CatchupWaitReason::EnteredCatchup,
                     )
-                    .await?
+                    .await
                     {
                         return Ok(Some(exit_intent));
                     }
@@ -3679,7 +3757,7 @@ mod apply_worker {
                         catchup_lsn,
                         CatchupWaitReason::AlreadyInCatchup,
                     )
-                    .await?
+                    .await
                     {
                         return Ok(Some(exit_intent));
                     }
@@ -4045,7 +4123,7 @@ mod apply_worker {
                         catchup_lsn,
                         CatchupWaitReason::EnteredCatchup,
                     )
-                    .await?
+                    .await
                     {
                         return Ok(Some(exit_intent));
                     }
@@ -4092,7 +4170,7 @@ mod apply_worker {
                         catchup_lsn,
                         CatchupWaitReason::AlreadyInCatchup,
                     )
-                    .await?
+                    .await
                     {
                         return Ok(Some(exit_intent));
                     }
@@ -4242,12 +4320,13 @@ mod apply_worker {
         info!(table_id = table_id.0, "creating table sync worker");
 
         TableSyncWorker::new(
-            ctx.pipeline_id,
+            ctx.pipeline_id.clone(),
             Arc::clone(&ctx.config),
             table_id,
             ctx.store.clone(),
             ctx.destination.clone(),
             ctx.replication_lag_monitor.clone(),
+            ctx.slot_creation_monitor.clone(),
             ctx.shutdown_token.clone(),
             Arc::clone(&ctx.table_sync_worker_permits),
             ctx.memory_monitor.clone(),
@@ -4328,7 +4407,7 @@ mod table_sync_worker {
     pub(super) async fn process_syncing_tables_after_commit_event<S>(
         ctx: &TableSyncWorkerContext<S>,
         current_lsn: PgLsn,
-    ) -> EtlResult<Option<ExitIntent>> {
+    ) -> Option<ExitIntent> {
         let worker_type = WorkerType::TableSync { table_id: ctx.table_id };
 
         // Check if catchup position reached, if so, signal end batch but don't
@@ -4343,7 +4422,7 @@ mod table_sync_worker {
                     "catchup target lsn reached after commit, requesting early batch flush before transitioning to sync_done",
                 );
 
-                return Ok(Some(ExitIntent::Complete));
+                return Some(ExitIntent::Complete);
             }
 
             debug!(
@@ -4355,7 +4434,7 @@ mod table_sync_worker {
             );
         }
 
-        Ok(None)
+        None
     }
 
     /// Processes syncing tables after batch flush.
@@ -4468,7 +4547,11 @@ mod table_sync_worker {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, sync::Arc, time::Instant};
+    use std::{
+        collections::HashSet,
+        sync::Arc,
+        time::{Duration, Instant},
+    };
 
     use futures::FutureExt;
     use tokio_postgres::types::{PgLsn, Type};
@@ -4770,6 +4853,33 @@ mod tests {
             streaming_payload_metadata: StreamingPayloadMetadata::default(),
             dispatched_at: Instant::now(),
         })
+    }
+
+    /// Repeated accepted results retain the earliest deadline, even when a
+    /// newer completed commit is already buffered for the next dispatch.
+    #[test]
+    fn durability_deadline_does_not_slide_on_accepted_results() {
+        let mut state = state_with_progress_at(100);
+        assert!(state.durability_deadline().is_none());
+        assert!(!state.durability_overdue());
+        let first_accepted_at = Instant::now() - Duration::from_secs(61);
+        let mut metadata = flush_metadata(WriteEventsDurability::MayDefer);
+        metadata.dispatched_at = first_accepted_at - Duration::from_secs(1);
+        metadata.commit_end_lsn = Some(200.into());
+        state.record_accepted_write(&metadata, first_accepted_at);
+        let deadline = state.durability_deadline();
+        assert_eq!(deadline, Some(first_accepted_at + Duration::from_secs(60)));
+
+        state.update_last_commit_end_lsn(Some(400.into()));
+        metadata.dispatched_at = Instant::now();
+        for commit in [None, Some(300.into())] {
+            metadata.commit_end_lsn = commit;
+            state.record_accepted_write(&metadata, Instant::now());
+            assert_eq!(state.durability_deadline(), deadline);
+            assert!(state.durability_overdue());
+            assert_eq!(state.last_commit_end_lsn, Some(400.into()));
+            assert_eq!(state.checkpoint_lsn(), PgLsn::from(100));
+        }
     }
 
     #[test]

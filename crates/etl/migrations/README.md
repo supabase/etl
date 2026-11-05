@@ -39,10 +39,11 @@ filter needed for replay; current catalogs or a previous all-one mask cannot
 recover that policy. Table DDL captures relevant publications together;
 publication DDL is scoped to the changed publication.
 
-Table DDL conservatively refreshes effective identities throughout its
-containing declarative partition tree. Each table uses its own schema and
-filters, including unchanged siblings and ancestors. Ordinary inheritance
-expands downward only. `publication_table_candidates` bounds publication-wide
+Table DDL refreshes effective identities in the altered table's subtree, since
+recursive commands change partitions and inheritance children without reporting
+them. Each table uses its own schema and filters. Ancestors and siblings are
+skipped because PostgreSQL rejects column additions, drops, renames, and type
+changes on partitions. `publication_table_candidates` bounds publication-wide
 capture to members and declarative descendants; unpublished tables do not need
 full metadata descriptions. Work still grows with tree size and publication
 filters.
@@ -54,11 +55,9 @@ Generated expressions are excluded. The legacy `describe_table_schema` helper
 remains available for older binaries.
 
 The trigger runs in the customer's DDL session. `SECURITY DEFINER` supplies
-privileges, not connection settings, so the column helper captures ETL's shared
-date, interval, float, timezone, and bytea settings with `SET ... FROM CURRENT`
-at installation. Manual installers must use the same settings. Changing those
-shared defaults later requires a migration to refresh the helper. SQLx's separate
-float-precision option is disabled so it cannot override the shared setting.
+privileges, not connection settings, so the column helper pins the date,
+interval, float, timezone, and bytea settings of ETL's own connections. Defaults
+and missing values therefore render identically in customer and ETL sessions.
 
 Helpers use qualified catalog references and `search_path = pg_catalog, pg_temp`.
 
@@ -203,3 +202,34 @@ upgrades, and shared history. With the local Postgres services running:
 ```bash
 cargo nextest run --locked -p etl --all-features --test main -E 'test(migrations::)'
 ```
+
+## Pipeline identity backfill
+
+Deploy the dual-writing release to all writers sharing a source database
+before deploying the backfill migration. Store initialization applies it to all
+four state tables, including historical rows and other pipelines in that database.
+It fills only missing string IDs and requires them to match the existing numeric
+IDs. Negative stored IDs or conflicting string IDs abort the entire transaction;
+existing identities are not replaced.
+
+The migration adds non-null checks and matching string-key indexes while retaining
+numeric-key reads and indexes. The transaction locks metadata tables before
+updating rows; active pipelines wait for commit before their metadata operations
+continue. If that wait exceeds a writer's query timeout, the writer may need to
+restart after the migration commits.
+Rollback removes the new constraints and indexes but preserves populated strings.
+
+## String-key cutover
+
+After backfill, deploy API readers using `pipeline_id_v2` first. Its reset operation
+must still populate the legacy integer for older replicators. Updating the API's
+ETL dependency does not run state-store migrations. Keep creating numeric string
+IDs until the string-key ETL image is the default for new pipelines.
+
+Then deploy the string-key ETL release across the fleet. It makes the old column
+nullable and reads and writes only V2. Once every replicator is upgraded, remove
+the API's temporary legacy reset write. Drop the old column in a later release,
+after all writers have stopped referencing it.
+
+After V2-only writes begin, an older ETL image needs its legacy keys restored
+before it can resume that pipeline. Use the new image for rollout retries.

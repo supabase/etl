@@ -675,8 +675,8 @@ impl ReplicatedTableSchema {
     /// the same decoder lineage. Queued legacy messages lack publication
     /// metadata and retain the lazy relation-driven fallback, so several
     /// old DDL statements can still appear as one endpoint diff, including
-    /// rename chains or cycles. A conservative partition-tree refresh can
-    /// also produce a new snapshot with no schema differences.
+    /// rename chains or cycles. A conservative refresh of a table's
+    /// descendants can also produce a new snapshot with no schema differences.
     ///
     /// Diffing catalog snapshots is intentional. Row decoding still requires
     /// immutable schemas at their WAL positions, so capturing operations would
@@ -1269,9 +1269,13 @@ impl fmt::Display for SchemaEndpoint {
 }
 
 /// Errors produced while validating or ordering a destination schema plan.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SchemaPlanError {
     /// Two exact source names occupy the same destination namespace entry.
+    #[error(
+        "Destination column names '{first_column_name}' and '{second_column_name}' collide in the \
+         {endpoint} schema under {column_name_mapping} mapping"
+    )]
     DestinationColumnNameCollision {
         /// The endpoint containing the collision.
         endpoint: SchemaEndpoint,
@@ -1283,6 +1287,10 @@ pub enum SchemaPlanError {
         second_column_name: String,
     },
     /// A blocked rename after-name is not owned by another pending rename.
+    #[error(
+        "Rename from '{before_column_name}' to '{after_column_name}' is blocked by a column \
+         outside the pending rename set"
+    )]
     BlockedRenameAfterName {
         /// The exact name immediately before the rename.
         before_column_name: String,
@@ -1290,39 +1298,12 @@ pub enum SchemaPlanError {
         after_column_name: String,
     },
     /// A ready rename no longer exists in the pending rename set.
+    #[error("Ready rename at ordinal {ordinal_position} is absent from the pending rename set")]
     ReadyRenameNotPending {
         /// PostgreSQL ordinal position identifying the logical column.
         ordinal_position: i32,
     },
 }
-
-impl fmt::Display for SchemaPlanError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::DestinationColumnNameCollision {
-                endpoint,
-                column_name_mapping,
-                first_column_name,
-                second_column_name,
-            } => write!(
-                f,
-                "Destination column names '{first_column_name}' and '{second_column_name}' \
-                 collide in the {endpoint} schema under {column_name_mapping} mapping"
-            ),
-            Self::BlockedRenameAfterName { before_column_name, after_column_name } => write!(
-                f,
-                "Rename from '{before_column_name}' to '{after_column_name}' is blocked by a \
-                 column outside the pending rename set"
-            ),
-            Self::ReadyRenameNotPending { ordinal_position } => write!(
-                f,
-                "Ready rename at ordinal {ordinal_position} is absent from the pending rename set"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for SchemaPlanError {}
 
 /// A destination-validated schema transition with physical operations in safe
 /// order.

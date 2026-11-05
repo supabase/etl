@@ -1044,4 +1044,126 @@ mod tests {
         let cell = parse_cell_from_postgres_text(&custom_type, "test").unwrap();
         assert_eq!(cell, Cell::String("test".to_owned()));
     }
+
+    /// Builds numerics directly from their base-10000 parts, across the full
+    /// range Postgres accepts. Random text rarely reaches these shapes: the
+    /// largest weight needs a 131072-digit integer part.
+    #[cfg(feature = "test-utils")]
+    mod numeric_parts {
+        use bytes::BytesMut;
+        use etl_postgres::numeric::{PgNumeric, Sign};
+        use proptest::{
+            collection::vec,
+            prelude::{Just, Strategy, any, prop_oneof},
+            prop_assert_eq,
+        };
+        use tokio_postgres::types::{FromSql, ToSql, Type};
+
+        use crate::{
+            data::Cell, postgres::codec::text::parse_cell_from_postgres_text,
+            test_utils::property::run_property,
+        };
+
+        /// Largest display scale Postgres accepts for a numeric.
+        const MAX_SCALE: u32 = 16_383;
+
+        /// Number of decimal digits `digits` occupies after the decimal point
+        /// at `weight`, without trailing zeros.
+        fn fractional_digits(weight: i16, digits: &[i16]) -> u32 {
+            let groups = i32::try_from(digits.len()).unwrap() - i32::from(weight) - 1;
+            if groups <= 0 {
+                return 0;
+            }
+            let last = digits.last().copied().unwrap_or(0);
+            let trailing_zeros =
+                (0..4).take_while(|power| last % 10i16.pow(power + 1) == 0).count();
+
+            u32::try_from(groups).unwrap() * 4 - u32::try_from(trailing_zeros).unwrap()
+        }
+
+        /// Weights biased toward the extremes and the decimal point.
+        fn weights() -> impl Strategy<Value = i16> {
+            prop_oneof![
+                2 => -8i16..=8,
+                1 => any::<i16>(),
+                1 => prop_oneof![Just(i16::MAX), Just(i16::MAX - 1), -4100i16..=-4090],
+            ]
+        }
+
+        /// Canonical non-zero Postgres numerics: no leading or trailing zero
+        /// groups, a scale that shows every digit, and both within limits.
+        fn canonical_values() -> impl Strategy<Value = PgNumeric> {
+            let digits = (1i16..=9999, vec(0i16..=9999, 0..=6), 1i16..=9999).prop_map(
+                |(first, middle, last)| {
+                    let mut digits = vec![first];
+                    if !middle.is_empty() {
+                        digits.extend(middle);
+                        digits.push(last);
+                    }
+                    digits
+                },
+            );
+            let sign = prop_oneof![Just(Sign::Positive), Just(Sign::Negative)];
+
+            (sign, weights(), digits)
+                .prop_filter_map("scale exceeds the Postgres limit", |(sign, weight, digits)| {
+                    let required = fractional_digits(weight, &digits);
+                    (required <= MAX_SCALE).then_some((sign, weight, digits, required))
+                })
+                .prop_flat_map(|(sign, weight, digits, required)| {
+                    let extra = prop_oneof![4 => 0u32..=8, 1 => Just(MAX_SCALE - required)];
+                    (Just(sign), Just(weight), Just(digits), Just(required), extra)
+                })
+                .prop_map(|(sign, weight, digits, required, extra)| {
+                    let scale = u16::try_from(required + extra.min(MAX_SCALE - required)).unwrap();
+                    PgNumeric::Value { sign, weight, scale, digits }
+                })
+        }
+
+        /// Values at the largest weights whose digits reach past the decimal
+        /// point. Each needs over 32000 digit groups.
+        fn max_weight_values() -> impl Strategy<Value = PgNumeric> {
+            (i16::MAX - 2..=i16::MAX, 1usize..=3, 1i16..=9999, 0i16..=9999, 1i16..=9999).prop_map(
+                |(weight, fraction_groups, first, filler, last)| {
+                    let integer_groups = usize::try_from(weight).unwrap() + 1;
+                    let mut digits = vec![filler; integer_groups + fraction_groups];
+                    digits[0] = first;
+                    *digits.last_mut().unwrap() = last;
+                    let scale = u16::try_from(fractional_digits(weight, &digits)).unwrap();
+                    PgNumeric::Value { sign: Sign::Positive, weight, scale, digits }
+                },
+            )
+        }
+
+        /// Zero with any display scale.
+        fn zeros() -> impl Strategy<Value = PgNumeric> {
+            prop_oneof![0u16..=8, Just(u16::try_from(MAX_SCALE).unwrap())].prop_map(|scale| {
+                PgNumeric::Value { sign: Sign::Positive, weight: 0, scale, digits: vec![] }
+            })
+        }
+
+        /// Printing a numeric and decoding that text as a `numeric` cell gives
+        /// back the same value and text, and the binary form round-trips.
+        #[test]
+        fn numeric_parts_roundtrip_through_text_and_binary() {
+            let strategy = prop_oneof![
+                18 => canonical_values(),
+                2 => zeros(),
+                1 => max_weight_values(),
+            ];
+            run_property("numeric parts roundtrip", &strategy, |numeric| {
+                let text = numeric.to_string();
+                let cell = parse_cell_from_postgres_text(&Type::NUMERIC, &text).unwrap();
+                prop_assert_eq!(&cell, &Cell::Numeric(numeric.clone()));
+                let Cell::Numeric(decoded) = cell else { unreachable!() };
+                prop_assert_eq!(decoded.to_string(), text);
+
+                let mut buf = BytesMut::new();
+                ToSql::to_sql(numeric, &Type::NUMERIC, &mut buf).unwrap();
+                prop_assert_eq!(&PgNumeric::from_sql(&Type::NUMERIC, &buf).unwrap(), numeric);
+
+                Ok(())
+            });
+        }
+    }
 }

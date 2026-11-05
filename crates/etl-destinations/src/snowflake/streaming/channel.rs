@@ -1,19 +1,27 @@
 use std::{sync::Arc, time::Duration};
 
-use etl::{pipeline::PipelineId, schema::PgLsn};
+use etl::{
+    error::{ErrorKind, EtlResult, Retryability},
+    pipeline::PipelineId,
+    schema::PgLsn,
+};
 use metrics::{counter, histogram};
 use tokio::time::{Instant, sleep};
 use tracing::warn;
 
-use crate::snowflake::{
-    Error, OffsetToken, Result, RowBatch, SnowpipeError, StreamClient,
-    metrics::{
-        ETL_SNOWFLAKE_ACCEPTED_BATCHES_TOTAL, ETL_SNOWFLAKE_ACCEPTED_ROWS_TOTAL,
-        ETL_SNOWFLAKE_APPEND_DURATION_SECONDS, ETL_SNOWFLAKE_BATCH_BYTES, ETL_SNOWFLAKE_BATCH_SIZE,
-        ETL_SNOWFLAKE_CHANNEL_RECOVERIES_TOTAL, ETL_SNOWFLAKE_INSERT_ERRORS_TOTAL,
-        ETL_SNOWFLAKE_REJECTED_ROWS_TOTAL, FAILURE_TYPE_LABEL,
+use crate::{
+    retry::{ClassifiedError, classified_error},
+    snowflake::{
+        Error, OffsetToken, Result, RowBatch, SnowpipeError, StreamClient,
+        metrics::{
+            ETL_SNOWFLAKE_ACCEPTED_BATCHES_TOTAL, ETL_SNOWFLAKE_ACCEPTED_ROWS_TOTAL,
+            ETL_SNOWFLAKE_APPEND_DURATION_SECONDS, ETL_SNOWFLAKE_BATCH_BYTES,
+            ETL_SNOWFLAKE_BATCH_SIZE, ETL_SNOWFLAKE_CHANNEL_RECOVERIES_TOTAL,
+            ETL_SNOWFLAKE_INSERT_ERRORS_TOTAL, ETL_SNOWFLAKE_REJECTED_ROWS_TOTAL,
+            FAILURE_TYPE_LABEL,
+        },
+        streaming::{ChannelStatusResponse, SNOWPIPE_RETRY_POLICY},
     },
-    streaming::ChannelStatusResponse,
 };
 
 /// Interval between Snowflake channel commit-status checks.
@@ -48,6 +56,35 @@ const COPY_PENDING_MAX_BYTES: usize = 256 * 1024 * 1024;
 /// writer can invalidate every retry. Bound recovery so a persistent ownership
 /// conflict fails closed instead of stalling replication indefinitely.
 const MAX_CHANNEL_RECOVERY_ATTEMPTS: usize = 3;
+
+/// Distinguishes elapsed waits from channel failures without changing the
+/// public Snowflake error or ordinary callers' timeout policy.
+#[derive(Debug, thiserror::Error)]
+enum ChannelWaitError {
+    /// The wait expired without proving that the channel state is invalid.
+    #[error(transparent)]
+    Timeout(Error),
+    /// The operation or its progress validation failed.
+    #[error(transparent)]
+    Failed(#[from] Error),
+}
+
+impl From<ChannelWaitError> for Error {
+    fn from(error: ChannelWaitError) -> Self {
+        match error {
+            ChannelWaitError::Timeout(error) | ChannelWaitError::Failed(error) => error,
+        }
+    }
+}
+
+impl ClassifiedError for ChannelWaitError {
+    fn retryability(&self) -> Retryability {
+        match self {
+            Self::Timeout(_) => Retryability::Retryable,
+            Self::Failed(error) => error.retryability(),
+        }
+    }
+}
 
 /// Row batch accepted by a Snowpipe channel.
 #[derive(Debug, Clone)]
@@ -352,6 +389,11 @@ pub(crate) struct ChannelHandle<C> {
     /// Latest validated progress observed for this channel.
     progress: ChannelProgress,
 
+    /// Highest CDC offset submitted since the last reconciliation, including
+    /// appends whose responses were lost. This detects replay, never commit
+    /// proof.
+    max_submitted_cdc_offset: Option<OffsetToken>,
+
     /// Whether this handle has entered copy writes without completing the
     /// terminal copy durability barrier.
     ///
@@ -386,12 +428,12 @@ impl<C: StreamClient> ChannelHandle<C> {
     /// New handle with no offset or continuation tokens.
     pub fn new(
         client: Arc<C>,
-        pipeline: PipelineId,
+        pipeline_id: PipelineId,
         database: String,
         schema: String,
         table: String,
     ) -> Self {
-        let channel = format!("supabase_etl_{pipeline}_{schema}_{table}_ch0");
+        let channel = format!("supabase_etl_{pipeline_id}_{schema}_{table}_ch0");
         Self {
             client,
             database,
@@ -399,6 +441,7 @@ impl<C: StreamClient> ChannelHandle<C> {
             table,
             channel,
             progress: ChannelProgress::default(),
+            max_submitted_cdc_offset: None,
             copy_offset_ordinal: None,
             copy_barrier_pending: false,
             copy_durability_target: None,
@@ -418,7 +461,7 @@ impl<C: StreamClient> ChannelHandle<C> {
     /// Opening fences older continuation tokens. If rows are still in flight,
     /// the request is retried rather than allowing Snowflake to discard them.
     pub async fn open(&mut self) -> Result<ChannelStatusResponse> {
-        self.open_with_deadline(None, Instant::now() + self.wait_timeout).await
+        self.open_with_deadline(None, Instant::now() + self.wait_timeout).await.map_err(Error::from)
     }
 
     /// Opens or reopens the channel at an explicit caller-owned offset.
@@ -432,7 +475,10 @@ impl<C: StreamClient> ChannelHandle<C> {
     /// Opening fences older continuation tokens. If rows are still in flight,
     /// the request is retried rather than allowing Snowflake to discard them.
     pub async fn open_at(&mut self, offset: &OffsetToken) -> Result<ChannelStatusResponse> {
-        self.open_with_deadline(Some(offset), Instant::now() + self.wait_timeout).await
+        let status =
+            self.open_with_deadline(Some(offset), Instant::now() + self.wait_timeout).await?;
+        self.max_submitted_cdc_offset = status.offset_token.clone();
+        Ok(status)
     }
 
     /// Opens the channel within an existing operation deadline.
@@ -440,7 +486,7 @@ impl<C: StreamClient> ChannelHandle<C> {
         &mut self,
         offset: Option<&OffsetToken>,
         deadline: Instant,
-    ) -> Result<ChannelStatusResponse> {
+    ) -> std::result::Result<ChannelStatusResponse, ChannelWaitError> {
         let observation = match offset {
             Some(expected) => ProgressObservation::ExplicitOffset(expected),
             None => ProgressObservation::Monotonic,
@@ -448,10 +494,10 @@ impl<C: StreamClient> ChannelHandle<C> {
 
         loop {
             if Instant::now() >= deadline {
-                return Err(Error::Channel(format!(
+                return Err(ChannelWaitError::Timeout(Error::Channel(format!(
                     "Timed out waiting to open Snowflake channel {}.",
                     self.channel
-                )));
+                ))));
             }
 
             match self
@@ -465,7 +511,8 @@ impl<C: StreamClient> ChannelHandle<C> {
                             "Snowflake open response for channel {} omitted its creation \
                              timestamp.",
                             self.channel
-                        )));
+                        ))
+                        .into());
                     }
                     if response.status.rows_error_count == 0
                         && response.status.rows_parsed != response.status.rows_inserted
@@ -474,7 +521,8 @@ impl<C: StreamClient> ChannelHandle<C> {
                             "Snowflake channel {} returned inconsistent row counters after \
                              opening.",
                             self.channel
-                        )));
+                        ))
+                        .into());
                     }
                     self.progress.observe(&response.status, observation)?;
                     self.continuation_token = Some(response.continuation_token);
@@ -482,7 +530,7 @@ impl<C: StreamClient> ChannelHandle<C> {
                 }
                 Err(error @ Error::Snowpipe(SnowpipeError::ChannelHasUncommittedRows)) => {
                     if Instant::now() >= deadline {
-                        return Err(error);
+                        return Err(ChannelWaitError::Timeout(error));
                     }
 
                     warn!(
@@ -492,7 +540,7 @@ impl<C: StreamClient> ChannelHandle<C> {
                     );
                     sleep(self.poll_interval).await;
                 }
-                Err(error) => return Err(error),
+                Err(error) => return Err(error.into()),
             }
         }
     }
@@ -509,6 +557,7 @@ impl<C: StreamClient> ChannelHandle<C> {
             {
                 Ok(()) => {
                     self.progress = ChannelProgress::default();
+                    self.max_submitted_cdc_offset = None;
                     self.copy_offset_ordinal = None;
                     self.copy_barrier_pending = false;
                     self.copy_durability_target = None;
@@ -537,13 +586,115 @@ impl<C: StreamClient> ChannelHandle<C> {
         self.progress.is_committed(offset)
     }
 
+    /// Returns whether an uncommitted CDC offset overlaps a previous append.
+    pub(in crate::snowflake) fn needs_replay_recovery(&self, offset: &OffsetToken) -> bool {
+        !self.progress.is_committed(offset)
+            && self.max_submitted_cdc_offset.as_ref().is_some_and(|submitted| offset <= submitted)
+    }
+
+    /// Reconciles replay with the remote channel before any rows are encoded.
+    ///
+    /// Known accepted rows retain their current channel instance until the
+    /// existing offset and row-count proof succeeds. Only outcome-unknown
+    /// append attempts require safe Open to refresh the continuation token and
+    /// discover which remaining rows must be replayed. Transient errors retry
+    /// in place with capped backoff under one deadline across both phases.
+    /// Exhaustion leaves accepted work pending and permits upstream retry;
+    /// validation and permanent provider failures still propagate immediately.
+    pub(in crate::snowflake) async fn recover_streaming_replay(
+        &mut self,
+        target: Option<&PendingDurabilityTarget>,
+    ) -> EtlResult<()> {
+        let deadline = Instant::now() + self.wait_timeout;
+        let mut needs_open = target.is_none_or(|target| {
+            self.max_submitted_cdc_offset
+                .as_ref()
+                .is_some_and(|submitted| submitted > &target.target_offset)
+        });
+        let mut pending_target = target;
+        let mut retry_delay = SNOWPIPE_RETRY_POLICY.initial_delay;
+        let mut last_error = None;
+
+        while pending_target.is_some() || needs_open {
+            if Instant::now() >= deadline {
+                let error = last_error.unwrap_or_else(|| {
+                    Error::Channel(format!(
+                        "Timed out waiting for Snowflake channel {} replay recovery.",
+                        self.channel
+                    ))
+                });
+                return Err(classified_error(
+                    ErrorKind::DestinationError,
+                    "Snowflake replay recovery timed out",
+                    ChannelWaitError::Timeout(error),
+                ));
+            }
+
+            let result = if let Some(target) = pending_target {
+                self.check_durability_inner(target, deadline).await.inspect(|&durable| {
+                    if durable {
+                        pending_target = None;
+                    }
+                })
+            } else {
+                counter!(ETL_SNOWFLAKE_CHANNEL_RECOVERIES_TOTAL).increment(1);
+                self.open_with_deadline(None, deadline).await.map(|_| {
+                    needs_open = false;
+                    true
+                })
+            };
+
+            let delay = match result {
+                Ok(ready) => {
+                    last_error = None;
+                    retry_delay = SNOWPIPE_RETRY_POLICY.initial_delay;
+                    if ready {
+                        continue;
+                    }
+                    self.poll_interval
+                }
+                Err(error @ ChannelWaitError::Timeout(_)) => {
+                    return Err(classified_error(
+                        ErrorKind::DestinationError,
+                        "Snowflake replay recovery timed out",
+                        error,
+                    ));
+                }
+                Err(ChannelWaitError::Failed(error))
+                    if error.retryability() == Retryability::Retryable =>
+                {
+                    let delay = retry_delay;
+                    retry_delay = (retry_delay * 2).min(SNOWPIPE_RETRY_POLICY.max_delay);
+                    warn!(
+                        channel = %self.channel,
+                        delay_ms = delay.as_millis(),
+                        error = %error,
+                        "retrying snowflake replay recovery"
+                    );
+                    last_error = Some(error);
+                    delay
+                }
+                Err(ChannelWaitError::Failed(error)) => return Err(error.into()),
+            };
+            sleep(delay.min(deadline.saturating_duration_since(Instant::now()))).await;
+        }
+
+        // Attempts beyond the reconciled offset were not committed. Let
+        // replay submit those rows using the reconciled continuation token.
+        self.max_submitted_cdc_offset = self.progress.committed_offset.clone();
+        Ok(())
+    }
+
     /// Refreshes channel status within `deadline`.
-    async fn refresh_status(&mut self, deadline: Instant) -> Result<ChannelStatusResponse> {
+    async fn refresh_status(
+        &mut self,
+        deadline: Instant,
+    ) -> std::result::Result<ChannelStatusResponse, ChannelWaitError> {
         if Instant::now() >= deadline {
-            return Err(Error::Channel(format!(
+            return Err(ChannelWaitError::Timeout(Error::Channel(format!(
                 "Timed out waiting for Snowflake channel {} status.",
                 self.channel
-            )));
+            ))));
         }
 
         let status = match self
@@ -562,7 +713,7 @@ impl<C: StreamClient> ChannelHandle<C> {
                 );
                 return self.open_with_deadline(None, deadline).await;
             }
-            Err(error) => return Err(error),
+            Err(error) => return Err(error.into()),
         };
         self.progress.observe(&status, ProgressObservation::Monotonic)?;
         Ok(status)
@@ -578,6 +729,15 @@ impl<C: StreamClient> ChannelHandle<C> {
         target: &PendingDurabilityTarget,
         deadline: Instant,
     ) -> Result<bool> {
+        self.check_durability_inner(target, deadline).await.map_err(Error::from)
+    }
+
+    /// Preserves deadline exhaustion for replay recovery's local retry policy.
+    async fn check_durability_inner(
+        &mut self,
+        target: &PendingDurabilityTarget,
+        deadline: Instant,
+    ) -> std::result::Result<bool, ChannelWaitError> {
         let status = self.refresh_status(deadline).await?;
         if self.copy_barrier_pending
             && let Some(committed) = status.offset_token.as_ref()
@@ -585,13 +745,13 @@ impl<C: StreamClient> ChannelHandle<C> {
             self.validate_copy_committed_offset(committed)?;
         }
 
-        status_proves_durability(&status, target)
+        status_proves_durability(&status, target).map_err(ChannelWaitError::from)
     }
 
     /// Fetches the latest committed offset and updates cached channel progress.
     pub async fn fetch_committed_offset(&mut self) -> Result<Option<OffsetToken>> {
         let deadline = Instant::now() + self.wait_timeout;
-        self.refresh_status(deadline).await.map(|status| status.offset_token)
+        self.refresh_status(deadline).await.map(|status| status.offset_token).map_err(Error::from)
     }
 
     /// Accepts one table-copy batch into a bounded deferred-durability window.
@@ -869,6 +1029,17 @@ impl<C: StreamClient> ChannelHandle<C> {
             Error::Channel("append_batch called on channel without continuation token".into())
         })?;
 
+        // Record every wire attempt, including internal retries and failures
+        // with an unknown outcome. Copy uses a separate attempt-local cursor.
+        if !self.copy_barrier_pending
+            && self
+                .max_submitted_cdc_offset
+                .as_ref()
+                .is_none_or(|offset| offset < batch.end_offset())
+        {
+            self.max_submitted_cdc_offset = Some(batch.end_offset().clone());
+        }
+
         let response = self
             .client
             .insert_rows(&self.database, &self.schema, &self.table, &self.channel, batch, ct)
@@ -920,6 +1091,7 @@ mod tests {
 
     use std::{
         collections::VecDeque,
+        error::Error as _,
         sync::{Arc, Mutex},
     };
 
@@ -964,12 +1136,14 @@ mod tests {
     struct ScriptedStreamClient {
         /// Calls that have not yet been observed.
         calls: Mutex<VecDeque<ExpectedCall>>,
+        /// Delays one Open response to exercise an already-started request.
+        open_delay: Mutex<Option<Duration>>,
     }
 
     impl ScriptedStreamClient {
         /// Creates a client from calls in their required order.
         fn new(calls: impl IntoIterator<Item = ExpectedCall>) -> Self {
-            Self { calls: Mutex::new(calls.into_iter().collect()) }
+            Self { calls: Mutex::new(calls.into_iter().collect()), open_delay: Mutex::new(None) }
         }
 
         /// Asserts that every scripted call was observed.
@@ -1001,6 +1175,10 @@ mod tests {
             _channel: &str,
             offset_token: Option<&OffsetToken>,
         ) -> Result<OpenChannelResponse> {
+            let delay = self.open_delay.lock().unwrap().take();
+            if let Some(delay) = delay {
+                sleep(delay).await;
+            }
             let ExpectedCall::Open { offset, result } = self.take_call("Open") else {
                 panic!("expected a different Snowpipe Streaming call before Open")
             };
@@ -1068,7 +1246,7 @@ mod tests {
         ] {
             let handle = ChannelHandle::new(
                 Arc::clone(&client),
-                pipeline,
+                pipeline.to_string().into(),
                 "DB".to_owned(),
                 schema.to_owned(),
                 table.to_owned(),
@@ -1138,7 +1316,7 @@ mod tests {
     fn test_channel(client: Arc<ScriptedStreamClient>) -> ChannelHandle<ScriptedStreamClient> {
         ChannelHandle::new(
             client,
-            PipelineId::from(1_u64),
+            "1".into(),
             "db".to_owned(),
             "schema".to_owned(),
             "table".to_owned(),
@@ -1154,6 +1332,451 @@ mod tests {
             baseline_rows_inserted: 7,
             channel_created_on_ms: CHANNEL_CREATED_ON_MS,
         })
+    }
+
+    /// Creates a provider error without a response payload.
+    fn http_error(status: reqwest::StatusCode) -> Error {
+        Error::HttpStatus { status, body: String::new() }
+    }
+
+    /// Opens a channel with an optional accepted prefix and unknown append,
+    /// then leaves the supplied recovery interactions for the test to exercise.
+    async fn replay_channel(
+        accepted: Option<&OffsetToken>,
+        unknown: Option<&OffsetToken>,
+        recovery: impl IntoIterator<Item = ExpectedCall>,
+    ) -> (ChannelHandle<ScriptedStreamClient>, Option<PendingDurabilityTarget>) {
+        let mut calls = vec![normal_open_call("initial", None, 0)];
+        if let Some(offset) = accepted {
+            calls.push(insert_call(
+                "initial",
+                offset.clone(),
+                Ok(InsertRowsResponse { continuation_token: "accepted".to_owned() }),
+            ));
+        }
+        if let Some(offset) = unknown {
+            calls.push(insert_call(
+                if accepted.is_some() { "accepted" } else { "initial" },
+                offset.clone(),
+                Err(http_error(reqwest::StatusCode::INTERNAL_SERVER_ERROR)),
+            ));
+        }
+        calls.extend(recovery);
+        let mut channel = test_channel(Arc::new(ScriptedStreamClient::new(calls)));
+        channel.open().await.unwrap();
+        let target = if let Some(offset) = accepted {
+            Some(PendingDurabilityTarget::new(
+                channel.accept_streaming_batch(&one_row_batch(offset)).await.unwrap().unwrap(),
+            ))
+        } else {
+            None
+        };
+        if let Some(offset) = unknown {
+            channel.accept_streaming_batch(&one_row_batch(offset)).await.unwrap_err();
+        }
+        (channel, target)
+    }
+
+    /// Unknown append outcomes must trigger recovery even without a recorded
+    /// target. Only the safe Open result decides whether replay resends rows.
+    #[tokio::test(start_paused = true)]
+    async fn replay_recovers_unknown_append_outcomes() {
+        for prior_accepted in [false, true] {
+            for committed in [false, true] {
+                let first = OffsetToken::new(10.into(), 1);
+                let second = OffsetToken::new(10.into(), 2);
+                let mut calls = Vec::new();
+                let offset = if committed {
+                    Some(second.clone())
+                } else if prior_accepted {
+                    Some(first.clone())
+                } else {
+                    None
+                };
+                if prior_accepted {
+                    calls.push(ExpectedCall::Status {
+                        result: Ok(channel_status(Some(first.clone()), 1)),
+                    });
+                }
+                if committed {
+                    calls.push(ExpectedCall::Open {
+                        offset: None,
+                        result: Err(Error::Snowpipe(SnowpipeError::ChannelHasUncommittedRows)),
+                    });
+                }
+                calls.push(normal_open_call(
+                    "recovered",
+                    offset.clone(),
+                    u64::from(prior_accepted) + u64::from(committed),
+                ));
+                if !committed {
+                    calls.push(insert_call(
+                        "recovered",
+                        second.clone(),
+                        Ok(InsertRowsResponse { continuation_token: "resent".to_owned() }),
+                    ));
+                }
+                let (mut channel, target) =
+                    replay_channel(prior_accepted.then_some(&first), Some(&second), calls).await;
+                assert!(channel.needs_replay_recovery(&second));
+
+                channel.recover_streaming_replay(target.as_ref()).await.unwrap();
+
+                assert_eq!(channel.progress.committed_offset, offset);
+                assert!(!channel.needs_replay_recovery(&second));
+                assert_eq!(channel.is_offset_committed(&second), committed);
+                if !committed {
+                    assert!(
+                        channel
+                            .accept_streaming_batch(&one_row_batch(&second))
+                            .await
+                            .unwrap()
+                            .is_some()
+                    );
+                    assert!(channel.needs_replay_recovery(&second));
+                }
+                channel.client.assert_finished();
+            }
+        }
+    }
+
+    /// Exhausted HTTP retry bursts stay inside recovery, including after the
+    /// accepted prefix is proven and an unknown suffix needs safe Open.
+    #[tokio::test(start_paused = true)]
+    async fn replay_retries_transient_status_and_open_failures() {
+        let first = OffsetToken::new(10.into(), 1);
+        let second = OffsetToken::new(10.into(), 2);
+        let unavailable = || http_error(reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        let (mut channel, target) = replay_channel(
+            Some(&first),
+            Some(&second),
+            [
+                ExpectedCall::Status { result: Err(unavailable()) },
+                ExpectedCall::Status { result: Err(unavailable()) },
+                ExpectedCall::Status { result: Ok(channel_status(Some(first.clone()), 1)) },
+                ExpectedCall::Open { offset: None, result: Err(unavailable()) },
+                ExpectedCall::Open { offset: None, result: Err(unavailable()) },
+                normal_open_call("recovered", Some(second.clone()), 2),
+            ],
+        )
+        .await;
+        let started = Instant::now();
+
+        channel.recover_streaming_replay(target.as_ref()).await.unwrap();
+
+        assert!(started.elapsed() >= Duration::from_secs(3));
+        assert!(channel.is_offset_committed(&second));
+        assert_eq!(channel.continuation_token.as_deref(), Some("recovered"));
+        assert!(!channel.needs_replay_recovery(&second));
+        channel.client.assert_finished();
+    }
+
+    /// Both recovery phases share one deadline, including safe Open's wait
+    /// for uncommitted rows. A later attempt can resume with the same target.
+    #[tokio::test(start_paused = true)]
+    async fn replay_deadline_spans_status_and_open() {
+        let first = OffsetToken::new(10.into(), 1);
+        let second = OffsetToken::new(10.into(), 2);
+        let unavailable = || http_error(reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        let (mut channel, target) = replay_channel(
+            Some(&first),
+            Some(&second),
+            [
+                ExpectedCall::Status { result: Err(unavailable()) },
+                ExpectedCall::Status { result: Ok(channel_status(None, 0)) },
+                ExpectedCall::Status { result: Ok(channel_status(Some(first.clone()), 1)) },
+                ExpectedCall::Open { offset: None, result: Err(unavailable()) },
+                ExpectedCall::Open {
+                    offset: None,
+                    result: Err(Error::Snowpipe(SnowpipeError::ChannelHasUncommittedRows)),
+                },
+                ExpectedCall::Status { result: Ok(channel_status(Some(first.clone()), 1)) },
+                normal_open_call("recovered", Some(second.clone()), 2),
+            ],
+        )
+        .await;
+        channel.wait_timeout = Duration::from_secs(2);
+        let started = Instant::now();
+
+        let error = channel.recover_streaming_replay(target.as_ref()).await.unwrap_err();
+
+        assert_eq!(started.elapsed(), Duration::from_secs(2));
+        assert!(matches!(
+            error.source().unwrap().downcast_ref::<ChannelWaitError>(),
+            Some(ChannelWaitError::Timeout(_))
+        ));
+        assert_eq!(error.retryability(), Retryability::Retryable);
+        assert_eq!(channel.max_submitted_cdc_offset, Some(second.clone()));
+        assert!(channel.needs_replay_recovery(&second));
+
+        channel.recover_streaming_replay(target.as_ref()).await.unwrap();
+
+        assert!(channel.is_offset_committed(&second));
+        assert_eq!(channel.continuation_token.as_deref(), Some("recovered"));
+        channel.client.assert_finished();
+    }
+
+    /// An Open already in flight may finish past the deadline: retain its
+    /// continuation on success and never mask its permanent error as timeout.
+    #[tokio::test(start_paused = true)]
+    async fn replay_observes_open_response_after_deadline() {
+        for permanent_failure in [false, true] {
+            let offset = OffsetToken::new(10.into(), 1);
+            let (mut channel, _) = replay_channel(
+                None,
+                Some(&offset),
+                [if permanent_failure {
+                    ExpectedCall::Open {
+                        offset: None,
+                        result: Err(http_error(reqwest::StatusCode::FORBIDDEN)),
+                    }
+                } else {
+                    normal_open_call("recovered", Some(offset.clone()), 1)
+                }],
+            )
+            .await;
+            channel.wait_timeout = Duration::from_secs(1);
+            *channel.client.open_delay.lock().unwrap() = Some(Duration::from_secs(2));
+            let started = Instant::now();
+
+            let result = channel.recover_streaming_replay(None).await;
+
+            assert_eq!(started.elapsed(), Duration::from_secs(2));
+            if permanent_failure {
+                assert_eq!(result.unwrap_err().retryability(), Retryability::Permanent);
+                assert_eq!(channel.continuation_token.as_deref(), Some("initial"));
+            } else {
+                result.unwrap();
+                assert_eq!(channel.continuation_token.as_deref(), Some("recovered"));
+                assert!(channel.is_offset_committed(&offset));
+            }
+            channel.client.assert_finished();
+        }
+    }
+
+    /// Persistent service failures keep their source and become retryable
+    /// exhaustion, without starting an extra request after the deadline.
+    #[tokio::test(start_paused = true)]
+    async fn replay_outage_exhaustion_preserves_target_and_error() {
+        let offset = OffsetToken::new(10.into(), 1);
+        let mut calls = Vec::new();
+        calls.extend((0..3).map(|_| ExpectedCall::Status {
+            result: Err(http_error(reqwest::StatusCode::INTERNAL_SERVER_ERROR)),
+        }));
+        calls.push(ExpectedCall::Status { result: Ok(channel_status(Some(offset.clone()), 1)) });
+        let (mut channel, target) = replay_channel(Some(&offset), None, calls).await;
+        channel.wait_timeout = Duration::from_secs(2);
+        let started = Instant::now();
+
+        let error = channel.recover_streaming_replay(target.as_ref()).await.unwrap_err();
+
+        assert_eq!(started.elapsed(), Duration::from_secs(2));
+        assert_eq!(error.retryability(), Retryability::Retryable);
+        assert!(matches!(
+            error.source().unwrap().downcast_ref::<ChannelWaitError>(),
+            Some(ChannelWaitError::Timeout(Error::HttpStatus {
+                status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                ..
+            }))
+        ));
+        assert!(channel.needs_replay_recovery(&offset));
+        assert_eq!(channel.continuation_token.as_deref(), Some("accepted"));
+
+        channel.recover_streaming_replay(target.as_ref()).await.unwrap();
+
+        assert!(channel.is_offset_committed(&offset));
+        channel.client.assert_finished();
+    }
+
+    /// Repeated failures use exponential backoff capped at the shared HTTP
+    /// policy's maximum, rather than polling a failing endpoint tightly.
+    #[tokio::test(start_paused = true)]
+    async fn replay_transient_backoff_is_capped() {
+        let offset = OffsetToken::new(10.into(), 1);
+        let mut calls = Vec::new();
+        calls.extend((0..6).map(|_| ExpectedCall::Status {
+            result: Err(http_error(reqwest::StatusCode::TOO_MANY_REQUESTS)),
+        }));
+        calls.push(ExpectedCall::Status { result: Ok(channel_status(Some(offset.clone()), 1)) });
+        let (mut channel, target) = replay_channel(Some(&offset), None, calls).await;
+        let started = Instant::now();
+
+        channel.recover_streaming_replay(target.as_ref()).await.unwrap();
+
+        assert_eq!(started.elapsed(), Duration::from_millis(25_500));
+        channel.client.assert_finished();
+    }
+
+    /// Service retries never hide rejected rows, lineage changes, backward
+    /// offsets or counters, or permanent request and response errors.
+    #[tokio::test(start_paused = true)]
+    async fn replay_preserves_permanent_failures() {
+        let first = OffsetToken::new(10.into(), 1);
+        let second = OffsetToken::new(10.into(), 2);
+        let valid = channel_status(Some(second.clone()), 2);
+        let mut backward_offset = valid.clone();
+        backward_offset.offset_token = None;
+        let mut backward_rows = valid.clone();
+        backward_rows.rows_inserted = 0;
+        let mut changed_lineage = valid.clone();
+        changed_lineage.created_on_ms = Some(CHANNEL_CREATED_ON_MS + 1);
+        let mut rejected = valid;
+        rejected.rows_error_count = 1;
+        for opening in [false, true] {
+            let statuses = [
+                Err(http_error(reqwest::StatusCode::UNAUTHORIZED)),
+                Err(Error::Encoding("Invalid response.".to_owned())),
+                Ok(backward_offset.clone()),
+                Ok(backward_rows.clone()),
+                Ok(changed_lineage.clone()),
+                Ok(rejected.clone()),
+            ];
+            for status in statuses {
+                let failure = if opening {
+                    ExpectedCall::Open {
+                        offset: None,
+                        result: status.map(|status| OpenChannelResponse {
+                            continuation_token: "invalid".to_owned(),
+                            offset_token: status.offset_token.clone(),
+                            status,
+                        }),
+                    }
+                } else {
+                    ExpectedCall::Status { result: status }
+                };
+                let client = Arc::new(ScriptedStreamClient::new([
+                    normal_open_call("initial", Some(first.clone()), 1),
+                    insert_call(
+                        "initial",
+                        second.clone(),
+                        if opening {
+                            Err(http_error(reqwest::StatusCode::INTERNAL_SERVER_ERROR))
+                        } else {
+                            Ok(InsertRowsResponse { continuation_token: "accepted".to_owned() })
+                        },
+                    ),
+                    failure,
+                ]));
+                let mut channel = test_channel(Arc::clone(&client));
+                channel.open().await.unwrap();
+                let accepted = channel.accept_streaming_batch(&one_row_batch(&second)).await;
+                let target = if opening {
+                    accepted.unwrap_err();
+                    None
+                } else {
+                    Some(PendingDurabilityTarget::new(accepted.unwrap().unwrap()))
+                };
+                let started = Instant::now();
+
+                let error = channel.recover_streaming_replay(target.as_ref()).await.unwrap_err();
+
+                assert_eq!(error.retryability(), Retryability::Permanent);
+                assert_eq!(started.elapsed(), Duration::ZERO);
+                assert_eq!(channel.max_submitted_cdc_offset, Some(second.clone()));
+                client.assert_finished();
+            }
+        }
+    }
+
+    /// A committed prefix cannot release replay while accepted suffix rows or
+    /// their cumulative row counters are still unconfirmed.
+    #[tokio::test(start_paused = true)]
+    async fn replay_waits_for_pending_rows_and_row_count_proof() {
+        let first = OffsetToken::new(10.into(), 1);
+        let second = OffsetToken::new(10.into(), 2);
+        let client = Arc::new(ScriptedStreamClient::new([
+            normal_open_call("initial", None, 0),
+            insert_call(
+                "initial",
+                first.clone(),
+                Ok(InsertRowsResponse { continuation_token: "first".to_owned() }),
+            ),
+            insert_call(
+                "first",
+                second.clone(),
+                Ok(InsertRowsResponse { continuation_token: "second".to_owned() }),
+            ),
+            ExpectedCall::Status { result: Ok(channel_status(Some(first.clone()), 1)) },
+            ExpectedCall::Status { result: Ok(channel_status(Some(second.clone()), 1)) },
+            ExpectedCall::Status { result: Ok(channel_status(Some(second.clone()), 2)) },
+        ]));
+        let mut channel = test_channel(Arc::clone(&client));
+        channel.open().await.unwrap();
+        let mut target = PendingDurabilityTarget::new(
+            channel.accept_streaming_batch(&one_row_batch(&first)).await.unwrap().unwrap(),
+        );
+        target
+            .record(channel.accept_streaming_batch(&one_row_batch(&second)).await.unwrap().unwrap())
+            .unwrap();
+        let started = Instant::now();
+
+        channel.recover_streaming_replay(Some(&target)).await.unwrap();
+
+        assert!(started.elapsed() >= 2 * DEFAULT_COMMIT_POLL_INTERVAL);
+        assert_eq!(channel.progress.rows_inserted, 2);
+        assert_eq!(channel.continuation_token.as_deref(), Some("second"));
+        assert!(!channel.needs_replay_recovery(&first));
+        client.assert_finished();
+    }
+
+    /// Missing row-count proof times out without retiring the submitted marker.
+    #[tokio::test(start_paused = true)]
+    async fn replay_timeout_preserves_unproven_work() {
+        let offset = OffsetToken::new(10.into(), 1);
+        let (mut channel, target) = replay_channel(
+            Some(&offset),
+            None,
+            [ExpectedCall::Status { result: Ok(channel_status(Some(offset.clone()), 0)) }],
+        )
+        .await;
+        channel.wait_timeout = DEFAULT_COMMIT_POLL_INTERVAL;
+
+        let error = channel.recover_streaming_replay(target.as_ref()).await.unwrap_err();
+
+        assert!(matches!(
+            error.source().unwrap().downcast_ref::<ChannelWaitError>(),
+            Some(ChannelWaitError::Timeout(_))
+        ));
+        assert_eq!(error.retryability(), Retryability::Retryable);
+        assert_eq!(channel.max_submitted_cdc_offset, Some(offset));
+        channel.client.assert_finished();
+    }
+
+    /// Timeout handling outside replay preserves the original public error
+    /// and permanent classification for startup and ordinary status waits.
+    #[tokio::test]
+    async fn ordinary_channel_timeouts_remain_permanent() {
+        let client = Arc::new(ScriptedStreamClient::new([]));
+        let mut channel = test_channel(Arc::clone(&client));
+        channel.wait_timeout = Duration::ZERO;
+        for error in
+            [channel.open().await.unwrap_err(), channel.fetch_committed_offset().await.unwrap_err()]
+        {
+            assert!(matches!(&error, Error::Channel(message) if message.starts_with("Timed out")));
+            assert_eq!(error.retryability(), Retryability::Permanent);
+        }
+        client.assert_finished();
+    }
+
+    /// Synthetic copy requests do not enter CDC recovery tracking.
+    #[tokio::test]
+    async fn copy_does_not_mark_cdc_replay() {
+        let offset = OffsetToken::new(0.into(), 1);
+        let client = Arc::new(ScriptedStreamClient::new([
+            normal_open_call("initial", None, 0),
+            insert_call(
+                "initial",
+                offset.clone(),
+                Ok(InsertRowsResponse { continuation_token: "copy".to_owned() }),
+            ),
+            ExpectedCall::Status { result: Ok(channel_status(Some(offset.clone()), 1)) },
+        ]));
+        let mut channel = test_channel(Arc::clone(&client));
+        channel.open().await.unwrap();
+        channel.accept_table_copy_batch(one_row_batch(&offset)).await.unwrap();
+        channel.wait_for_table_copy_durability().await.unwrap();
+        assert_eq!(channel.max_submitted_cdc_offset, None);
+        client.assert_finished();
     }
 
     #[tokio::test]

@@ -19,7 +19,9 @@ use crate::{
         ERROR_TYPE_LABEL, ETL_SLOT_INVALIDATIONS_TOTAL, ETL_WORKER_ERRORS_TOTAL, WORKER_TYPE_LABEL,
     },
     pipeline::PipelineId,
-    postgres::client::{GetOrCreateSlotResult, PgReplicationClient, SlotState},
+    postgres::client::{
+        GetOrCreateSlotResult, PgReplicationClient, SlotCreationMonitor, SlotState,
+    },
     replication::{
         ApplyLoop, ApplyLoopResult, ApplyWorkerContext, DurabilityMonitor, ReplicationLagMonitor,
         WorkerContext, WorkerType,
@@ -97,6 +99,8 @@ pub(crate) struct ApplyWorker<S, D> {
     replication_lag_monitor: ReplicationLagMonitor,
     /// Outstanding durability survives individual apply-loop attempts.
     durability_monitor: DurabilityMonitor,
+    /// Slot creation observations shared with all table-sync workers.
+    slot_creation_monitor: SlotCreationMonitor,
     shutdown_token: CancellationToken,
     table_sync_worker_permits: Arc<Semaphore>,
     memory_monitor: MemoryMonitor,
@@ -119,12 +123,13 @@ impl<S, D> ApplyWorker<S, D> {
         destination: D,
         replication_lag_monitor: ReplicationLagMonitor,
         durability_monitor: DurabilityMonitor,
+        slot_creation_monitor: SlotCreationMonitor,
         shutdown_token: CancellationToken,
         table_sync_worker_permits: Arc<Semaphore>,
         memory_monitor: MemoryMonitor,
     ) -> Self {
         let batch_memory_governor = BatchMemoryGovernor::new(
-            pipeline_id,
+            pipeline_id.clone(),
             memory_monitor.clone(),
             config.batch.memory_budget_ratio,
             config.batch.max_bytes,
@@ -138,6 +143,7 @@ impl<S, D> ApplyWorker<S, D> {
             destination,
             replication_lag_monitor,
             durability_monitor,
+            slot_creation_monitor,
             shutdown_token,
             table_sync_worker_permits,
             memory_monitor,
@@ -227,7 +233,7 @@ where
 
         let apply_worker_span = tracing::info_span!(
             "apply_worker",
-            pipeline_id = self.pipeline_id,
+            pipeline_id = %self.pipeline_id,
             publication_name = self.config.publication_name
         );
         let apply_worker =
@@ -278,11 +284,12 @@ where
             async {
                 let mut replication_client = PgReplicationClient::connect_for_apply_worker(
                     self.config.pg_connection.clone(),
-                    self.pipeline_id,
+                    self.pipeline_id.clone(),
                 )
                 .await?;
+                replication_client.set_slot_creation_monitor(self.slot_creation_monitor.clone());
                 let start_lsn = get_start_lsn(
-                    self.pipeline_id,
+                    self.pipeline_id.clone(),
                     &mut replication_client,
                     &self.store,
                     &self.config.invalidated_slot_behavior,
@@ -299,13 +306,14 @@ where
         let (replication_client, start_lsn) = initialized?;
 
         let worker_context = WorkerContext::Apply(ApplyWorkerContext {
-            pipeline_id: self.pipeline_id,
+            pipeline_id: self.pipeline_id.clone(),
             config: Arc::clone(&self.config),
             pool: Arc::clone(&self.pool),
             store: self.store.clone(),
             destination: self.destination.clone(),
             replication_lag_monitor: self.replication_lag_monitor.clone(),
             durability_monitor: self.durability_monitor.clone(),
+            slot_creation_monitor: self.slot_creation_monitor.clone(),
             shutdown_token: self.shutdown_token.clone(),
             table_sync_worker_permits: Arc::clone(&self.table_sync_worker_permits),
             memory_monitor: self.memory_monitor.clone(),
@@ -316,7 +324,7 @@ where
         // would race with the state they still hold in memory.
         *entered_apply_loop = true;
         let apply_loop_result = ApplyLoop::start(
-            self.pipeline_id,
+            self.pipeline_id.clone(),
             start_lsn,
             Arc::clone(&self.config),
             &replication_client,
@@ -384,7 +392,7 @@ async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
     replication_slot: &ReplicationSlotConfig,
     entered_apply_loop: bool,
 ) -> EtlResult<PgLsn> {
-    let slot_name: String = EtlReplicationSlot::for_apply_worker(pipeline_id).try_into()?;
+    let slot_name: String = EtlReplicationSlot::for_apply_worker(&pipeline_id).try_into()?;
     let worker_type = WorkerType::Apply;
 
     if replication_slot.persistence == ReplicationSlotPersistence::Temporary {
@@ -559,7 +567,7 @@ async fn handle_invalidated_slot<S: TableStateLifecycleStore>(
         InvalidatedSlotBehavior::Recreate => {
             warn!(
                 slot_name,
-                pipeline_id,
+                %pipeline_id,
                 "replication slot is invalidated, resetting all table states and recreating slot"
             );
 

@@ -266,7 +266,10 @@ with rel as (
 direct_parent as (
     select i.inhparent as parent_oid
     from pg_catalog.pg_inherits i
+    join pg_catalog.pg_class c
+      on c.oid = i.inhrelid
     where i.inhrelid = p_table
+      and c.relispartition
     order by i.inhseqno
     limit 1
 ),
@@ -382,5 +385,6 @@ $$Returns compact identity metadata for one table, including primary-key attnums
 whether that primary key is deferrable, and replica-identity state.
 
 This helper intentionally avoids duplicating per-column identity annotations in
-the payload. For partitions, it falls back to the direct parent primary key when
-the leaf table does not expose a local primary-key constraint.$$;
+the payload. The direct-parent primary-key fallback applies only to declarative
+partitions: a legacy inheritance child does not inherit its parent's
+constraint, so the parent's key does not describe it.$$;

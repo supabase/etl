@@ -30,11 +30,11 @@ use tracing::info;
 use url::Url;
 
 use crate::common::{
-    BenchDestination, DestinationArgs, DestinationStatsSnapshot, DestinationType, LogTarget,
-    PgConnectionArgs, PipelineTuningArgs, bytes_to_mib, cleanup_destination,
-    cleanup_replication_slots, duration_millis, finish_run, format_decimal, format_duration_ms,
-    format_integer, init_benchmark_tracing, mib_per_second, per_second, pipeline_config,
-    run_etl_migrations, write_report,
+    BenchDestination, DEFAULT_COPY_PIPELINE_ID, DestinationArgs, DestinationStatsSnapshot,
+    DestinationType, LogTarget, PgConnectionArgs, PipelineTuningArgs, bytes_to_mib,
+    cleanup_destination, cleanup_replication_slots, duration_millis, finish_run, format_decimal,
+    format_duration_ms, format_integer, init_benchmark_tracing, mib_per_second, per_second,
+    pipeline_config, run_etl_migrations, write_report,
 };
 
 /// Command-line arguments for the table-copy benchmark.
@@ -66,9 +66,9 @@ pub struct RunArgs {
     /// Destination options.
     #[command(flatten)]
     destination: DestinationArgs,
-    /// Pipeline id to use for this benchmark.
-    #[arg(long, default_value_t = 1)]
-    pipeline_id: u64,
+    /// Pipeline ID used by this benchmark.
+    #[arg(long = "pipeline-id", default_value = DEFAULT_COPY_PIPELINE_ID)]
+    pipeline_id: String,
     /// Publication name.
     #[arg(long, default_value = "bench_pub")]
     publication_name: String,
@@ -94,7 +94,8 @@ pub struct RunArgs {
 struct TableCopyReport {
     benchmark: &'static str,
     destination: DestinationType,
-    pipeline_id: u64,
+    #[serde(rename = "pipeline_id")]
+    pipeline_id: String,
     publication_name: String,
     table_ids: Vec<u32>,
     expected_row_count: Option<u64>,
@@ -174,7 +175,7 @@ async fn run(args: RunArgs) -> Result<()> {
     let store = NotifyingStore::new();
     let destination_started = Instant::now();
     let destination =
-        BenchDestination::new(&args.destination, args.pipeline_id, store.clone()).await?;
+        BenchDestination::new(&args.destination, &args.pipeline_id, store.clone()).await?;
     let destination_init_ms = duration_millis(destination_started.elapsed());
     if args.destination_settle_ms > 0 {
         tokio::time::sleep(Duration::from_millis(args.destination_settle_ms)).await;
@@ -183,7 +184,7 @@ async fn run(args: RunArgs) -> Result<()> {
     // destination cleanup happen whether it succeeds or fails.
     let run_result: Result<(u128, Duration, u128)> = async {
         let config = pipeline_config(
-            args.pipeline_id,
+            &args.pipeline_id,
             args.publication_name.clone(),
             &args.pg,
             &args.tuning,
@@ -192,9 +193,8 @@ async fn run(args: RunArgs) -> Result<()> {
 
         config.validate().context("Invalid pipeline config")?;
 
-        let table_copy_notifications = register_table_copy_notifications(&store, &args.table_ids)
-            .await
-            .context("Failed to register table-copy notifications")?;
+        let table_copy_notifications =
+            register_table_copy_notifications(&store, &args.table_ids).await;
 
         let mut pipeline = Pipeline::new(config, store, destination.clone());
 
@@ -230,8 +230,9 @@ async fn run(args: RunArgs) -> Result<()> {
     .await;
 
     let cleanup_result =
-        cleanup_replication_slots(&args.pg, args.pipeline_id, &args.table_ids).await;
-    let destination_cleanup_result = cleanup_destination(&args.destination, args.pipeline_id).await;
+        cleanup_replication_slots(&args.pg, &args.pipeline_id, &args.table_ids).await;
+    let destination_cleanup_result =
+        cleanup_destination(&args.destination, &args.pipeline_id).await;
     let (pipeline_start_ms, copy_wait_duration, shutdown_ms) =
         finish_run(run_result, [cleanup_result, destination_cleanup_result])?;
 
@@ -386,10 +387,11 @@ struct TableCopyNotifications {
     errored: TimedNotify,
 }
 
+/// Registers completion and error notifications before table copy starts.
 async fn register_table_copy_notifications(
     store: &NotifyingStore,
     table_ids: &[u32],
-) -> Result<Vec<TableCopyNotifications>> {
+) -> Vec<TableCopyNotifications> {
     let mut notifications = Vec::with_capacity(table_ids.len());
     for table_id in table_ids {
         let table_id = *table_id;
@@ -401,7 +403,7 @@ async fn register_table_copy_notifications(
         notifications.push(TableCopyNotifications { table_id, finished, errored });
     }
 
-    Ok(notifications)
+    notifications
 }
 
 async fn wait_for_table_copies(

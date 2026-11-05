@@ -159,13 +159,12 @@ supported `ALTER TABLE` or publication column-list change:
 5. Destinations that support the transition apply any required DDL and record
    the new snapshot before writing following rows.
 
-Table DDL refreshes every published identity in the containing declarative
-partition tree, including ancestors, intermediate published roots, leaves, and
-siblings. Each snapshot reads that table's own schema; leaf-local changes are
-never copied to its ancestors. A refresh can leave schema contents unchanged.
-This supports root-only, leaf-only, and mixed publication modes without guessing
-which tables each ALTER TABLE variant changed. Ordinary SQL inheritance keeps
-downward-only capture. Partition attachment/removal still requires the lifecycle
+Table DDL refreshes every published identity in the altered table's subtree:
+the table itself and its partitions or inheritance children, which recursive
+commands change without reporting them separately. Each snapshot reads that
+table's own schema, and a refresh can leave schema contents unchanged. Ancestors
+and siblings are not refreshed, because PostgreSQL rejects adding, dropping,
+renaming, or retyping a partition's columns. Partition attachment/removal still requires the lifecycle
 and resynchronization steps described below: snapshots cannot supply missing
 inserts or deletes. The trigger checks membership before loading a full schema. Publication-wide changes discover members and their partitions
 without loading column metadata for unrelated tables. Explicit publication

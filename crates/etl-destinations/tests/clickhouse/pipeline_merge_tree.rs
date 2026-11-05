@@ -5,19 +5,17 @@
 
 use etl::{
     event::EventType,
-    pipeline::PipelineId,
     test_utils::{
         database::{spawn_source_database, test_table_name},
         event::EventCondition,
         notifying_store::NotifyingStore,
-        pipeline::create_pipeline,
+        pipeline::{create_pipeline, random_pipeline_id},
         test_destination_wrapper::TestDestinationWrapper,
     },
 };
 use etl_config::shared::ClickHouseEngine;
 use etl_destinations::clickhouse::test_utils::setup_clickhouse_database;
 use etl_telemetry::tracing::init_test_tracing;
-use rand::random;
 
 use crate::support::{clickhouse::current_state_query, crypto::install_crypto_provider};
 
@@ -73,7 +71,7 @@ async fn sequential_transactions_preserve_commit_order_merge_tree() {
 
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let destination = TestDestinationWrapper::wrap(
         clickhouse_db
             .build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree)
@@ -84,7 +82,7 @@ async fn sequential_transactions_preserve_commit_order_merge_tree() {
 
     let mut pipeline = create_pipeline(
         &database_1.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name.to_owned(),
         store,
         destination.clone(),
@@ -187,7 +185,7 @@ async fn same_transaction_primary_key_change_preserves_order_merge_tree() {
     let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
     let mut pipeline = create_pipeline(
         &database.config,
-        random::<PipelineId>(),
+        random_pipeline_id(),
         publication_name.to_owned(),
         store,
         destination.clone(),
