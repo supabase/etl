@@ -45,6 +45,8 @@ pub(crate) const ETL_SCHEMA_CLEANUP_PRUNED_VERSIONS_TOTAL: &str =
     "etl_schema_cleanup_pruned_versions_total";
 pub(crate) const ETL_DDL_SCHEMA_CHANGES_TOTAL: &str = "etl_ddl_schema_changes_total";
 pub(crate) const ETL_DDL_SCHEMA_CHANGE_COLUMNS: &str = "etl_ddl_schema_change_columns";
+pub(crate) const ETL_RELATION_SCHEMA_MISMATCHES_TOTAL: &str =
+    "etl_relation_schema_mismatches_total";
 pub(crate) const ETL_ROW_SIZE_BYTES: &str = "etl_row_size_bytes";
 pub(crate) const ETL_SLOT_INVALIDATIONS_TOTAL: &str = "etl_slot_invalidations_total";
 pub(crate) const ETL_WORKER_ERRORS_TOTAL: &str = "etl_worker_errors_total";
@@ -89,6 +91,8 @@ pub(crate) const STATUS_UPDATE_TYPE_LABEL: &str = "status_update_type";
 pub(crate) const COMMAND_TAG_LABEL: &str = "command_tag";
 /// Label key for the outcome of an operation.
 pub(crate) const OUTCOME_LABEL: &str = "outcome";
+/// Label key for how a relation message disagrees with the stored schema.
+pub(crate) const MISMATCH_KIND_LABEL: &str = "mismatch_kind";
 /// Label key for worker error classification ("timed", "manual", "no_retry").
 pub(crate) const ERROR_TYPE_LABEL: &str = "error_type";
 /// Label key for transition direction ("activate" or "resume").
@@ -309,6 +313,14 @@ pub(crate) fn register_metrics() {
             Unit::Count,
             "Total number of DDL schema change messages handled, labeled by worker_type, \
              command_tag, and outcome."
+        );
+
+        describe_counter!(
+            ETL_RELATION_SCHEMA_MISMATCHES_TOTAL,
+            Unit::Count,
+            "Total number of relation messages whose column order or types disagree with the \
+             stored table schema, labeled by worker_type and mismatch_kind. Replication continues \
+             with the stored schema."
         );
 
         describe_histogram!(
