@@ -21,7 +21,7 @@ use crate::{
     etl_error,
     observability::{ERROR_TYPE_LABEL, ETL_WORKER_ERRORS_TOTAL, WORKER_TYPE_LABEL},
     pipeline::PipelineId,
-    postgres::client::PgReplicationClient,
+    postgres::client::{PgReplicationClient, SlotCreationMonitor},
     replication::{
         ApplyLoop, ApplyLoopResult, ReplicationLagMonitor, TableSyncResult, TableSyncWorkerContext,
         WorkerContext, WorkerType, start_table_sync,
@@ -332,6 +332,8 @@ pub(crate) struct TableSyncWorker<S, D> {
     store: S,
     destination: D,
     replication_lag_monitor: ReplicationLagMonitor,
+    /// Shared observations aggregate concurrent slot creation attempts.
+    slot_creation_monitor: SlotCreationMonitor,
     shutdown_token: CancellationToken,
     run_permit: Arc<Semaphore>,
     memory_monitor: MemoryMonitor,
@@ -354,6 +356,7 @@ impl<S, D> TableSyncWorker<S, D> {
         store: S,
         destination: D,
         replication_lag_monitor: ReplicationLagMonitor,
+        slot_creation_monitor: SlotCreationMonitor,
         shutdown_token: CancellationToken,
         run_permit: Arc<Semaphore>,
         memory_monitor: MemoryMonitor,
@@ -366,6 +369,7 @@ impl<S, D> TableSyncWorker<S, D> {
             store,
             destination,
             replication_lag_monitor,
+            slot_creation_monitor,
             shutdown_token,
             run_permit,
             memory_monitor,
@@ -561,7 +565,7 @@ where
 
         let table_sync_worker_span = tracing::info_span!(
             "table_sync_worker",
-            pipeline_id = self.pipeline_id,
+            pipeline_id = %self.pipeline_id,
             publication_name = self.config.publication_name,
             table_id = self.table_id.0,
         );
@@ -698,7 +702,7 @@ where
         let ShutdownResult::Ok(replication_client) = with_shutdown!(
             PgReplicationClient::connect_for_table_sync_worker(
                 self.config.pg_connection.clone(),
-                self.pipeline_id,
+                self.pipeline_id.clone(),
                 self.table_id,
             ),
             self.shutdown_token,
@@ -706,9 +710,10 @@ where
             return Ok(TableSyncWorkerResult::Shutdown);
         };
         let mut replication_client = replication_client?;
+        replication_client.set_slot_creation_monitor(self.slot_creation_monitor.clone());
 
         let table_sync_result = start_table_sync(
-            self.pipeline_id,
+            self.pipeline_id.clone(),
             Arc::clone(&self.config),
             &mut replication_client,
             self.table_id,
@@ -753,7 +758,7 @@ where
         });
 
         let apply_loop_result = ApplyLoop::start(
-            self.pipeline_id,
+            self.pipeline_id.clone(),
             start_lsn,
             Arc::clone(&self.config),
             &replication_client,
@@ -839,7 +844,7 @@ where
             .await?;
 
         let slot_name: String =
-            EtlReplicationSlot::for_table_sync_worker(self.pipeline_id, self.table_id)
+            EtlReplicationSlot::for_table_sync_worker(&self.pipeline_id, self.table_id)
                 .try_into()?;
         replication_client.delete_slot_if_exists(&slot_name).await?;
 

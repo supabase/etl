@@ -386,12 +386,12 @@ impl<C: StreamClient> ChannelHandle<C> {
     /// New handle with no offset or continuation tokens.
     pub fn new(
         client: Arc<C>,
-        pipeline: PipelineId,
+        pipeline_id: PipelineId,
         database: String,
         schema: String,
         table: String,
     ) -> Self {
-        let channel = format!("supabase_etl_{pipeline}_{schema}_{table}_ch0");
+        let channel = format!("supabase_etl_{pipeline_id}_{schema}_{table}_ch0");
         Self {
             client,
             database,
@@ -1068,7 +1068,7 @@ mod tests {
         ] {
             let handle = ChannelHandle::new(
                 Arc::clone(&client),
-                pipeline,
+                pipeline.to_string().into(),
                 "DB".to_owned(),
                 schema.to_owned(),
                 table.to_owned(),
@@ -1138,7 +1138,7 @@ mod tests {
     fn test_channel(client: Arc<ScriptedStreamClient>) -> ChannelHandle<ScriptedStreamClient> {
         ChannelHandle::new(
             client,
-            PipelineId::from(1_u64),
+            "1".into(),
             "db".to_owned(),
             "schema".to_owned(),
             "table".to_owned(),

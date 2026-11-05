@@ -12,6 +12,7 @@ use etl::{
     test_utils::{
         destination::{drop_table_for_copy, write_events, write_table_rows},
         notifying_store::NotifyingStore,
+        pipeline::random_pipeline_id,
     },
 };
 use etl_destinations::snowflake::{
@@ -77,7 +78,8 @@ async fn materialization_history_lifetimes_and_restart() {
     let schema = ReplicatedTableSchema::all(Arc::new(table.clone()));
     let store = NotifyingStore::new();
     store.store_table_schema(table).await.unwrap();
-    let destination = Destination::new(Client::new(Arc::clone(&auth), 1173), store.clone());
+    let destination =
+        Destination::new(Client::new(Arc::clone(&auth), 1173.to_string().into()), store.clone());
     with_table_cleanup(&sql, &[&snapshot, &physical], || async {
         let rows = (1..=4).map(|id| row(id, Cell::String("original".into()), 0)).collect();
         assert_eq!(
@@ -157,7 +159,10 @@ async fn materialization_history_lifetimes_and_restart() {
         }
         // Reopening validates physical metadata and skips identically replayed
         // offsets.
-        let restarted = Destination::new(Client::new(Arc::clone(&auth), 1173), store.clone());
+        let restarted = Destination::new(
+            Client::new(Arc::clone(&auth), 1173.to_string().into()),
+            store.clone(),
+        );
         write_events(&restarted, WriteEventsDurability::RequireDurable, events).await.unwrap();
         assert_eq!(query_rows(&sql, &format!("{query} order by \"id\"")).await.unwrap(), records);
         let key_change = Event::Update(UpdateEvent {
@@ -326,14 +331,14 @@ async fn postgres_external_toast(full_identity: bool) {
         .to_uppercase();
     with_table_cleanup(&sql, &[&physical], || async {
         let store = NotifyingStore::new();
-        let pipeline_id = rand::random();
+        let pipeline_id = random_pipeline_id();
         let raw_destination =
-            Destination::new(Client::new(Arc::clone(&auth), pipeline_id), store.clone());
+            Destination::new(Client::new(Arc::clone(&auth), pipeline_id.as_str().into()), store.clone());
         let polling = raw_destination.clone();
         let destination = TestDestinationWrapper::wrap(raw_destination);
         let mut pipeline = create_pipeline(
             &database.config,
-            pipeline_id,
+            pipeline_id.as_str(),
             "partial_toast".into(),
             store.clone(),
             destination.clone(),
@@ -481,12 +486,12 @@ async fn postgres_external_toast(full_identity: bool) {
             ),
         ].into_iter().enumerate() {
             let destination = TestDestinationWrapper::wrap(Destination::new(
-                Client::new(Arc::clone(&auth), pipeline_id),
+                Client::new(Arc::clone(&auth), pipeline_id.as_str().into()),
                 store.clone(),
             ));
             let mut pipeline = create_pipeline(
                 &database.config,
-                pipeline_id,
+                pipeline_id.as_str(),
                 "partial_toast".into(),
                 store.clone(),
                 destination.clone(),
@@ -756,7 +761,8 @@ async fn legacy_format_upgrade_preserves_history_and_offsets() {
     let schema = ReplicatedTableSchema::all(Arc::new(table.clone()));
     let store = NotifyingStore::new();
     store.store_table_schema(table).await.unwrap();
-    let original = Destination::new(Client::new(Arc::clone(&auth), 1174), store.clone());
+    let original =
+        Destination::new(Client::new(Arc::clone(&auth), 1174.to_string().into()), store.clone());
     with_table_cleanup(&sql, &[&physical], || async {
         write_table_rows(
             &original,
@@ -793,7 +799,10 @@ async fn legacy_format_upgrade_preserves_history_and_offsets() {
         // here constructs the old physical format, including a key delete.
         sql.drop_column(&physical, "_cdc_missing_columns").await.unwrap();
         let metadata = store.get_destination_table_metadata(schema.id()).await.unwrap();
-        let upgraded = Destination::new(Client::new(Arc::clone(&auth), 1174), store.clone());
+        let upgraded = Destination::new(
+            Client::new(Arc::clone(&auth), 1174.to_string().into()),
+            store.clone(),
+        );
         // Opening upgrades the table and skips both committed events.
         write_events(&upgraded, WriteEventsDurability::RequireDurable, committed_events.clone())
             .await
@@ -806,7 +815,10 @@ async fn legacy_format_upgrade_preserves_history_and_offsets() {
         upgraded.shutdown().await.unwrap();
         // Reopen before new writes: the ARRAY column exists, historical masks
         // are still NULL, and committed events must still be skipped.
-        let upgraded = Destination::new(Client::new(Arc::clone(&auth), 1174), store.clone());
+        let upgraded = Destination::new(
+            Client::new(Arc::clone(&auth), 1174.to_string().into()),
+            store.clone(),
+        );
         write_events(&upgraded, WriteEventsDurability::RequireDurable, committed_events)
             .await
             .unwrap();
@@ -843,7 +855,10 @@ async fn legacy_format_upgrade_preserves_history_and_offsets() {
         assert_eq!(&rows[0][..3], &[json!("1"), json!("before upgrade"), json!("2")]);
         assert_eq!(&rows[1][..3], &[json!("2"), json!("new lifetime"), json!("3")]);
         upgraded.shutdown().await.unwrap();
-        let restarted = Destination::new(Client::new(Arc::clone(&auth), 1174), store.clone());
+        let restarted = Destination::new(
+            Client::new(Arc::clone(&auth), 1174.to_string().into()),
+            store.clone(),
+        );
         write_events(&restarted, WriteEventsDurability::RequireDurable, events).await.unwrap();
         assert_eq!(query_rows(&sql, &format!("{query} order by \"id\"")).await.unwrap(), rows);
         let fqn = format!("\"{}\".\"{}\".\"{physical}\"", config.database(), config.schema());
@@ -881,7 +896,10 @@ async fn legacy_upgrade_rejects_unrelated_schema_damage() {
         let schema = ReplicatedTableSchema::all(Arc::new(table.clone()));
         let store = NotifyingStore::new();
         store.store_table_schema(table).await.unwrap();
-        let original = Destination::new(Client::new(Arc::clone(&auth), 1175), store.clone());
+        let original = Destination::new(
+            Client::new(Arc::clone(&auth), 1175.to_string().into()),
+            store.clone(),
+        );
         with_table_cleanup(&sql, &[&physical], || async {
             // Rejection depends on column metadata; history preservation is
             // tested above.
@@ -899,7 +917,10 @@ async fn legacy_upgrade_rejects_unrelated_schema_damage() {
                     .await
                     .unwrap(),
             }
-            let restarted = Destination::new(Client::new(Arc::clone(&auth), 1175), store.clone());
+            let restarted = Destination::new(
+                Client::new(Arc::clone(&auth), 1175.to_string().into()),
+                store.clone(),
+            );
             let event = Event::Update(UpdateEvent {
                 commit_lsn: 10_u64.into(),
                 tx_ordinal: 1,

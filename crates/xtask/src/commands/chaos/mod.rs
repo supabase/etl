@@ -253,28 +253,7 @@ impl ChaosClient {
         loss_pct: u8,
         direction: &str,
     ) -> NetworkChaos {
-        let (direction_val, pod_target, external_targets) = match target {
-            Target::All => (Some(direction.to_owned()), None, None),
-            Target::Pods(labels) => (
-                Some(direction.to_owned()),
-                Some(PodTarget {
-                    selector: Selector {
-                        namespaces: vec![self.namespace.clone()],
-                        label_selectors: labels.into_iter().collect(),
-                    },
-                    mode: "all".into(),
-                }),
-                None,
-            ),
-            Target::Url(url) => (Some(direction.to_owned()), None, Some(vec![url])),
-            // ipset hash:net,port rejects 0.0.0.0/0 (/0 mask is invalid as a hash key). Split into
-            // two /1 CIDRs that together cover all IPv4 addresses.
-            Target::Port(port) => (
-                Some(direction.to_owned()),
-                None,
-                Some(vec![format!("0.0.0.0/1:{port}"), format!("128.0.0.0/1:{port}")]),
-            ),
-        };
+        let (pod_target, external_targets) = target.into_filters(&self.namespace);
         NetworkChaos::new(
             name,
             NetworkChaosSpec {
@@ -282,7 +261,7 @@ impl ChaosClient {
                 mode: "all".into(),
                 selector: sel(&self.namespace, source),
                 loss: Some(LossSpec { loss: loss_pct.to_string(), correlation: "25".into() }),
-                direction: direction_val,
+                direction: Some(direction.to_owned()),
                 target: pod_target,
                 external_targets,
                 delay: None,
@@ -302,26 +281,7 @@ impl ChaosClient {
         jitter_ms: u32,
         direction: &str,
     ) -> NetworkChaos {
-        let (direction_val, pod_target, external_targets) = match target {
-            Target::All => (Some(direction.to_owned()), None, None),
-            Target::Pods(labels) => (
-                Some(direction.to_owned()),
-                Some(PodTarget {
-                    selector: Selector {
-                        namespaces: vec![self.namespace.clone()],
-                        label_selectors: labels.into_iter().collect(),
-                    },
-                    mode: "all".into(),
-                }),
-                None,
-            ),
-            Target::Url(url) => (Some(direction.to_owned()), None, Some(vec![url])),
-            Target::Port(port) => (
-                Some(direction.to_owned()),
-                None,
-                Some(vec![format!("0.0.0.0/1:{port}"), format!("128.0.0.0/1:{port}")]),
-            ),
-        };
+        let (pod_target, external_targets) = target.into_filters(&self.namespace);
         NetworkChaos::new(
             name,
             NetworkChaosSpec {
@@ -337,7 +297,7 @@ impl ChaosClient {
                 corrupt: None,
                 bandwidth: None,
                 duration: None,
-                direction: direction_val,
+                direction: Some(direction.to_owned()),
                 target: pod_target,
                 external_targets,
             },
@@ -352,26 +312,7 @@ impl ChaosClient {
         rate: &str,
         direction: &str,
     ) -> NetworkChaos {
-        let (direction_val, pod_target, external_targets) = match target {
-            Target::All => (Some(direction.to_owned()), None, None),
-            Target::Pods(labels) => (
-                Some(direction.to_owned()),
-                Some(PodTarget {
-                    selector: Selector {
-                        namespaces: vec![self.namespace.clone()],
-                        label_selectors: labels.into_iter().collect(),
-                    },
-                    mode: "all".into(),
-                }),
-                None,
-            ),
-            Target::Url(url) => (Some(direction.to_owned()), None, Some(vec![url])),
-            Target::Port(port) => (
-                Some(direction.to_owned()),
-                None,
-                Some(vec![format!("0.0.0.0/1:{port}"), format!("128.0.0.0/1:{port}")]),
-            ),
-        };
+        let (pod_target, external_targets) = target.into_filters(&self.namespace);
         NetworkChaos::new(
             name,
             NetworkChaosSpec {
@@ -383,7 +324,7 @@ impl ChaosClient {
                 delay: None,
                 corrupt: None,
                 duration: None,
-                direction: direction_val,
+                direction: Some(direction.to_owned()),
                 target: pod_target,
                 external_targets,
             },
@@ -442,6 +383,25 @@ pub(crate) enum Target {
     /// Uses `"0.0.0.0/0:PORT"` notation, which requires Chaos Mesh ≥ 2.3 with
     /// iptables MARK support enabled on the node.
     Port(u16),
+}
+
+impl Target {
+    /// Converts the target into pod and external filters for the given
+    /// namespace.
+    fn into_filters(self, namespace: &str) -> (Option<PodTarget>, Option<Vec<String>>) {
+        match self {
+            Self::All => (None, None),
+            Self::Pods(labels) => {
+                (Some(PodTarget { selector: sel(namespace, labels), mode: "all".into() }), None)
+            }
+            Self::Url(url) => (None, Some(vec![url])),
+            // ipset hash:net,port rejects 0.0.0.0/0 (/0 mask is invalid as a hash key). Split into
+            // two /1 CIDRs that together cover all IPv4 addresses.
+            Self::Port(port) => {
+                (None, Some(vec![format!("0.0.0.0/1:{port}"), format!("128.0.0.0/1:{port}")]))
+            }
+        }
+    }
 }
 
 // ─── Helpers

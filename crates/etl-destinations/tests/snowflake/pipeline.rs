@@ -3,13 +3,12 @@ use std::sync::Arc;
 use etl::{
     event::{Event, EventType},
     failpoints::{APPLY_LOOP_EXPIRE_DURABILITY_FP, etl_fail_point_active_for_parameter},
-    pipeline::PipelineId,
     schema::TableName,
     test_utils::{
         database::{spawn_source_database, test_table_name},
         event::EventCondition,
         notifying_store::NotifyingStore,
-        pipeline::{PipelineBuilder, create_pipeline},
+        pipeline::{PipelineBuilder, create_pipeline, random_pipeline_id},
         test_destination_wrapper::TestDestinationWrapper,
     },
 };
@@ -19,7 +18,6 @@ use etl_destinations::snowflake::{
 };
 use etl_postgres::tokio::test_utils::TableModification;
 use fail::FailScenario;
-use rand::random;
 use tokio::time::Duration;
 
 use crate::snowflake::common::{
@@ -89,14 +87,14 @@ async fn schema_change_batched_operations() {
 
     with_table_cleanup(&sql, &[&snowflake_table], || async {
         let store = NotifyingStore::new();
-        let pipeline_id: PipelineId = random();
-        let client = Client::new(Arc::clone(&auth), pipeline_id);
+        let pipeline_id = random_pipeline_id();
+        let client = Client::new(Arc::clone(&auth), pipeline_id.as_str().into());
         let raw_destination = Destination::new(client, store.clone());
         let destination_for_polling = raw_destination.clone();
         let destination = TestDestinationWrapper::wrap(raw_destination);
         let mut pipeline = create_pipeline(
             &database.config,
-            pipeline_id,
+            pipeline_id.as_str(),
             publication_name.to_owned(),
             store.clone(),
             destination.clone(),
@@ -227,13 +225,14 @@ async fn durability_deadline_advances_live_snowflake_checkpoint() {
 
     with_table_cleanup(&sql, &[&snowflake_table], || async {
         let store = NotifyingStore::new();
-        let pipeline_id: PipelineId = random();
-        let raw_destination = Destination::new(Client::new(auth, pipeline_id), store.clone());
+        let pipeline_id = random_pipeline_id();
+        let raw_destination =
+            Destination::new(Client::new(auth, pipeline_id.as_str().into()), store.clone());
         let destination_for_polling = raw_destination.clone();
         let destination = TestDestinationWrapper::wrap(raw_destination);
         let mut pipeline = PipelineBuilder::new(
             database.config.clone(),
-            pipeline_id,
+            pipeline_id.as_str(),
             publication.to_owned(),
             store.clone(),
             destination.clone(),

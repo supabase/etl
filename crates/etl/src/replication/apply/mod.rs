@@ -60,7 +60,7 @@ use crate::{
     pipeline::PipelineId,
     postgres::{
         ReplicationMessageStream,
-        client::{PgReplicationClient, PostgresConnectionUpdate},
+        client::{PgReplicationClient, PostgresConnectionUpdate, SlotCreationMonitor},
         codec::{
             DDL_MESSAGE_PREFIX, SchemaChangeMessage, delete_message_payload_bytes,
             insert_message_payload_bytes, parse_event_from_begin_message,
@@ -187,6 +187,8 @@ pub(crate) struct ApplyWorkerContext<S, D> {
     pub(crate) replication_lag_monitor: ReplicationLagMonitor,
     /// Pipeline-owned durability age, retained through worker retries.
     pub(crate) durability_monitor: DurabilityMonitor,
+    /// Pipeline-owned slot creation observations for child table-sync workers.
+    pub(crate) slot_creation_monitor: SlotCreationMonitor,
     /// Cancellation token for graceful termination.
     pub(crate) shutdown_token: CancellationToken,
     /// Semaphore controlling maximum concurrent table sync workers.
@@ -936,7 +938,7 @@ where
         );
 
         let worker_type = worker_context.worker_type();
-        let slot_name: String = worker_type.build_etl_replication_slot(pipeline_id).try_into()?;
+        let slot_name: String = worker_type.build_etl_replication_slot(&pipeline_id).try_into()?;
 
         // No events or background tasks exist until the replication handshake
         // completes, so stalled protocol setup can be cancelled as one unit.
@@ -2203,7 +2205,9 @@ where
         self.record_cdc_event_received();
 
         match &message {
-            LogicalReplicationMessage::Begin(begin_body) => self.handle_begin_message(begin_body),
+            LogicalReplicationMessage::Begin(begin_body) => {
+                Ok(self.handle_begin_message(begin_body))
+            }
             LogicalReplicationMessage::Commit(commit_body) => {
                 self.handle_commit_message(commit_body).await
             }
@@ -2408,10 +2412,7 @@ where
     }
 
     /// Handles Postgres BEGIN messages.
-    fn handle_begin_message(
-        &mut self,
-        message: &protocol::BeginBody,
-    ) -> EtlResult<HandleMessageResult> {
+    fn handle_begin_message(&mut self, message: &protocol::BeginBody) -> HandleMessageResult {
         let final_lsn = PgLsn::from(message.final_lsn());
         self.state.remote_final_lsn = Some(final_lsn);
 
@@ -2423,7 +2424,7 @@ where
         let tx_ordinal = self.state.next_tx_ordinal();
         let event = parse_event_from_begin_message(final_lsn, tx_ordinal, message);
 
-        Ok(HandleMessageResult::return_event(Event::Begin(event)))
+        HandleMessageResult::return_event(Event::Begin(event))
     }
 
     /// Handles Postgres COMMIT messages.
@@ -3181,7 +3182,7 @@ where
                 .await
             }
             WorkerContext::TableSync(ctx) => {
-                table_sync_worker::process_syncing_tables_after_commit_event(ctx, lsn).await
+                Ok(table_sync_worker::process_syncing_tables_after_commit_event(ctx, lsn).await)
             }
         }?;
 
@@ -3564,7 +3565,7 @@ mod apply_worker {
         worker_state: &TableSyncWorkerState,
         catchup_lsn: PgLsn,
         wait_reason: CatchupWaitReason,
-    ) -> EtlResult<Option<ExitIntent>>
+    ) -> Option<ExitIntent>
     where
         S: SchemaStore,
     {
@@ -3606,7 +3607,7 @@ mod apply_worker {
                         "apply worker unblocked: table sync worker errored, skipping table",
                     );
 
-                    return Ok(None);
+                    return None;
                 }
 
                 info!(
@@ -3616,7 +3617,7 @@ mod apply_worker {
                     "apply worker unblocked: table sync worker reached sync_done",
                 );
 
-                Ok(None)
+                None
             }
             ShutdownResult::Shutdown(_) => {
                 info!(
@@ -3625,7 +3626,7 @@ mod apply_worker {
                     "apply worker unblocked: shutdown signal received while waiting for table sync worker",
                 );
 
-                Ok(Some(ExitIntent::Pause))
+                Some(ExitIntent::Pause)
             }
         }
     }
@@ -3693,7 +3694,7 @@ mod apply_worker {
                         catchup_lsn,
                         CatchupWaitReason::EnteredCatchup,
                     )
-                    .await?
+                    .await
                     {
                         return Ok(Some(exit_intent));
                     }
@@ -3717,7 +3718,7 @@ mod apply_worker {
                         catchup_lsn,
                         CatchupWaitReason::AlreadyInCatchup,
                     )
-                    .await?
+                    .await
                     {
                         return Ok(Some(exit_intent));
                     }
@@ -4083,7 +4084,7 @@ mod apply_worker {
                         catchup_lsn,
                         CatchupWaitReason::EnteredCatchup,
                     )
-                    .await?
+                    .await
                     {
                         return Ok(Some(exit_intent));
                     }
@@ -4130,7 +4131,7 @@ mod apply_worker {
                         catchup_lsn,
                         CatchupWaitReason::AlreadyInCatchup,
                     )
-                    .await?
+                    .await
                     {
                         return Ok(Some(exit_intent));
                     }
@@ -4281,12 +4282,13 @@ mod apply_worker {
         info!(table_id = table_id.0, "creating table sync worker");
 
         TableSyncWorker::new(
-            ctx.pipeline_id,
+            ctx.pipeline_id.clone(),
             Arc::clone(&ctx.config),
             table_id,
             ctx.store.clone(),
             ctx.destination.clone(),
             ctx.replication_lag_monitor.clone(),
+            ctx.slot_creation_monitor.clone(),
             ctx.shutdown_token.clone(),
             Arc::clone(&ctx.table_sync_worker_permits),
             ctx.memory_monitor.clone(),
@@ -4367,7 +4369,7 @@ mod table_sync_worker {
     pub(super) async fn process_syncing_tables_after_commit_event<S>(
         ctx: &TableSyncWorkerContext<S>,
         current_lsn: PgLsn,
-    ) -> EtlResult<Option<ExitIntent>> {
+    ) -> Option<ExitIntent> {
         let worker_type = WorkerType::TableSync { table_id: ctx.table_id };
 
         // Check if catchup position reached, if so, signal end batch but don't
@@ -4382,7 +4384,7 @@ mod table_sync_worker {
                     "catchup target lsn reached after commit, requesting early batch flush before transitioning to sync_done",
                 );
 
-                return Ok(Some(ExitIntent::Complete));
+                return Some(ExitIntent::Complete);
             }
 
             debug!(
@@ -4394,7 +4396,7 @@ mod table_sync_worker {
             );
         }
 
-        Ok(None)
+        None
     }
 
     /// Processes syncing tables after batch flush.

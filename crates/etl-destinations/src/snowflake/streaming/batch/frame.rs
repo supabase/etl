@@ -202,6 +202,7 @@ mod tests {
     use crate::snowflake::{
         Error,
         encoding::{CdcMeta, CdcOperation, serialize_row},
+        test_utils::random_text,
     };
 
     fn table() -> TableId {
@@ -225,17 +226,6 @@ mod tests {
 
     fn limits(request_limit: usize) -> BatchLimits {
         BatchLimits { request_limit, small_row_limit: 1024, flush_interval: 512 }
-    }
-
-    fn random_text(len: usize, seed: u64) -> String {
-        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-        let mut state = seed;
-        (0..len)
-            .map(|_| {
-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-                ALPHABET[((state >> 33) % 62) as usize] as char
-            })
-            .collect()
     }
 
     fn serialized(payload: &str) -> Vec<u8> {

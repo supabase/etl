@@ -57,7 +57,7 @@ struct TestHarness {
 
 impl TestHarness {
     fn new() -> Self {
-        Self::with_pipeline_id(1)
+        Self::with_pipeline_id("1".into())
     }
 
     fn with_pipeline_id(pipeline_id: PipelineId) -> Self {
@@ -254,7 +254,7 @@ async fn assert_status_default_absent(
 #[tokio::test]
 #[ignore = "requires Snowflake credentials"]
 async fn boundary_underscore_names_survive_destination_lifecycle() {
-    let harness = TestHarness::with_pipeline_id(u64::MAX);
+    let harness = TestHarness::with_pipeline_id(u64::MAX.to_string().into());
     let cases = table_name_schemas();
     let names: Vec<_> = cases.iter().map(|(_, name)| name.to_uppercase()).collect();
     let cleanup_names: Vec<_> = names.iter().map(String::as_str).collect();
@@ -309,8 +309,10 @@ async fn boundary_underscore_names_survive_destination_lifecycle() {
         }
         harness.destination.shutdown().await.unwrap();
 
-        let restarted =
-            Destination::new(Client::new(build_auth(), u64::MAX), harness.store.clone());
+        let restarted = Destination::new(
+            Client::new(build_auth(), u64::MAX.to_string().into()),
+            harness.store.clone(),
+        );
         // One batch submits every table before waiting for CDC durability.
         let events = cases
             .iter()
@@ -541,8 +543,8 @@ async fn write_table_rows_empty() {
 #[tokio::test]
 #[ignore = "requires Snowflake credentials"]
 async fn fresh_generation_rejects_existing_table_without_destination_metadata() {
-    let first = TestHarness::with_pipeline_id(1);
-    let second = TestHarness::with_pipeline_id(2);
+    let first = TestHarness::with_pipeline_id("1".into());
+    let second = TestHarness::with_pipeline_id("2".into());
     let src_table = format!("ETL_TEST_{}", uuid::Uuid::new_v4().simple()).to_uppercase();
     let sf_table = snowflake_table_name("public", &src_table);
     let table_id = TableId::new(1013);
@@ -673,7 +675,7 @@ async fn resync_after_source_name_swap(cold_client: bool) {
 
             let restarted = if cold_client {
                 etl::destination::Destination::shutdown(&harness.destination).await.unwrap();
-                Some(Destination::new(Client::new(build_auth(), 1), harness.store.clone()))
+                Some(Destination::new(Client::new(build_auth(), "1".into()), harness.store.clone()))
             } else {
                 None
             };
@@ -889,9 +891,9 @@ async fn whole_transaction_replay_restores_post_truncate_rows() {
         // Simulate a crash after Snowflake durably applied the transaction but
         // before its source checkpoint advanced. The fresh destination must
         // therefore replay the whole transaction, including the first insert.
-        let pipeline_id: PipelineId = 1;
+        let pipeline_id: PipelineId = "1".into();
         let first_restarted_destination =
-            Destination::new(Client::new(build_auth(), pipeline_id), harness.store.clone());
+            Destination::new(Client::new(build_auth(), pipeline_id.clone()), harness.store.clone());
         let replay_status = invoke_write_events(
             &first_restarted_destination,
             WriteEventsDurability::RequireDurable,
@@ -922,7 +924,7 @@ async fn whole_transaction_replay_restores_post_truncate_rows() {
         // cycle must derive a new request ID and clear the previously restored
         // row before inserting it again.
         let second_restarted_destination =
-            Destination::new(Client::new(build_auth(), pipeline_id), harness.store.clone());
+            Destination::new(Client::new(build_auth(), pipeline_id.clone()), harness.store.clone());
         let second_replay_status = invoke_write_events(
             &second_restarted_destination,
             WriteEventsDurability::RequireDurable,
@@ -1043,7 +1045,7 @@ async fn cold_open_rejects_unexpected_column() {
             .expect("out-of-band alter table failed");
 
         let restarted_destination = Destination::new(
-            Client::new(build_auth(), PipelineId::from(1_u64)),
+            Client::new(build_auth(), 1_u64.to_string().into()),
             harness.store.clone(),
         );
         let error = invoke_write_events(
@@ -1194,7 +1196,7 @@ async fn schema_evolution_add_column_rejects_stale_replay() {
         // has no offset of its own, so the destination must reject it before
         // considering whether the following rows were already committed.
         let restarted_destination = Destination::new(
-            Client::new(build_auth(), PipelineId::from(1_u64)),
+            Client::new(build_auth(), 1_u64.to_string().into()),
             harness.store.clone(),
         );
         let replay_error = invoke_write_events(
@@ -2153,7 +2155,7 @@ async fn json_null_preservation_and_legacy_defaults() {
     );
     let schema = ReplicatedTableSchema::all(Arc::new(table_schema.clone()));
     harness.store.store_table_schema(table_schema).await.unwrap();
-    let restarted = Destination::new(Client::new(build_auth(), 1), harness.store.clone());
+    let restarted = Destination::new(Client::new(build_auth(), "1".into()), harness.store.clone());
     let fqn = format!(
         "\"{}\".\"{}\".\"{sf_table}\"",
         harness.config.database().replace('"', "\"\""),

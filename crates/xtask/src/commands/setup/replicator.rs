@@ -19,8 +19,8 @@ use crate::{
     utils::DestinationPreset,
 };
 
-/// Pipeline id written into generated local replicator configuration.
-const LOCAL_PIPELINE_ID: u64 = 1;
+/// Pipeline ID written into local replicator configuration.
+const LOCAL_PIPELINE_ID: &str = "03dg2o5teb2eucxr9ggh3uie6";
 /// Placeholder accepted by interactive prompts when a secret will be supplied
 /// later through the environment.
 const REPLACE_ME: &str = "REPLACE_ME";
@@ -167,15 +167,13 @@ impl ReplicatorSetup {
     }
 
     /// Replaces the BigQuery service-account key when this setup is BigQuery.
-    pub(super) fn set_bigquery_service_account_key(&mut self, key: &str) -> Result<()> {
+    pub(super) fn set_bigquery_service_account_key(&mut self, key: &str) {
         match &mut self.destination {
             DestinationSetup::BigQuery { service_account_key, .. } => {
                 *service_account_key = key.to_owned();
-                Ok(())
             }
             _ => {
                 println!("Ignoring --bq-sa-key-file because the destination is not bigquery.");
-                Ok(())
             }
         }
     }
@@ -707,7 +705,7 @@ mod tests {
         let yaml = test_setup(DestinationPreset::ClickHouse, IcebergCatalog::Rest).to_yaml();
         assert!(yaml.contains("  clickhouse:"));
         assert!(yaml.contains("password: \"etl\""));
-        assert!(yaml.contains("  id: 1"));
+        assert!(yaml.contains("  id: 03dg2o5teb2eucxr9ggh3uie6"));
         assert!(yaml.contains("name: \"etl_testdata\""));
         load_replicator_yaml(&yaml);
     }

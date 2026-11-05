@@ -3,14 +3,13 @@
 use etl::{
     error::ErrorKind,
     event::EventType,
-    pipeline::PipelineId,
     test_utils::{
         database::TEST_DATABASE_SCHEMA,
         event::{EventCondition, group_events_by_type_and_table_id},
         faults::FaultyOp,
         memory_destination::MemoryDestination,
         notifying_store::NotifyingStore,
-        pipeline::PipelineBuilder,
+        pipeline::{PipelineBuilder, random_pipeline_id},
         test_destination_wrapper::TestDestinationWrapper,
         test_schema::{
             TableSelection, assert_events_equal, build_expected_users_inserts, insert_users_data,
@@ -21,7 +20,6 @@ use etl::{
 use etl_postgres::slots::EtlReplicationSlot;
 use etl_telemetry::tracing::init_test_tracing;
 use pg_escape::quote_identifier;
-use rand::random;
 
 use crate::support::Multigres;
 
@@ -46,15 +44,15 @@ async fn pipeline_multigres_failover() {
     let table_id = users_schema.id;
     insert_users_data(&mut multigres, &users_schema.name, 1..=1).await;
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let apply_slot_name: String =
-        EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
+        EtlReplicationSlot::for_apply_worker(&pipeline_id).try_into().unwrap();
 
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
     let mut pipeline = PipelineBuilder::new(
         multigres.config.clone(),
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),

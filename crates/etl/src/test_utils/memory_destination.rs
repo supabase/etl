@@ -182,7 +182,9 @@ where
 
         let mut inner = self.inner.lock().await;
         info!(%table_id, row_count = table_rows.len(), "writing table rows");
-        inner.table_rows.insert(table_id, table_rows);
+        // Copies arrive in several batches; append them like a real table.
+        // A recopy starts clean only if the table was dropped first.
+        inner.table_rows.entry(table_id).or_default().extend(table_rows);
 
         async_result.send(Ok(DestinationWriteStatus::Durable));
 

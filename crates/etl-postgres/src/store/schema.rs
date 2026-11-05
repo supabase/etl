@@ -244,7 +244,7 @@ define_type_mappings! {
 /// same transaction to replace a schema version atomically.
 pub async fn upsert_table_schema<'c, E>(
     executor: E,
-    pipeline_id: i64,
+    pipeline_id: &str,
     table_schema: &TableSchema,
 ) -> Result<i64, sqlx::Error>
 where
@@ -253,9 +253,9 @@ where
     sqlx::query_scalar(
         r#"
         insert into etl.table_schemas
-            (pipeline_id, table_id, schema_name, table_name, snapshot_id, primary_key_deferrable)
+            (pipeline_id_v2, table_id, schema_name, table_name, snapshot_id, primary_key_deferrable)
         values ($1, $2, $3, $4, $5, $6)
-        on conflict (pipeline_id, table_id, snapshot_id)
+        on conflict (pipeline_id_v2, table_id, snapshot_id)
         do update set
             schema_name = excluded.schema_name,
             table_name = excluded.table_name,
@@ -334,7 +334,7 @@ where
 /// lookups. Obsolete versions are removed by durable-checkpoint pruning.
 pub async fn load_table_schemas<'c, E>(
     executor: E,
-    pipeline_id: i64,
+    pipeline_id: &str,
 ) -> Result<Vec<TableSchema>, sqlx::Error>
 where
     E: PgExecutor<'c>,
@@ -357,7 +357,7 @@ where
             tc.default_expression
         from etl.table_schemas ts
         left join etl.table_columns tc on ts.id = tc.table_schema_id
-        where ts.pipeline_id = $1
+        where ts.pipeline_id_v2 = $1
         order by ts.id, tc.ordinal_position
         "#,
     )
@@ -403,7 +403,7 @@ where
 /// records.
 pub async fn delete_table_schemas_for_all_tables<'c, E>(
     executor: E,
-    pipeline_id: i64,
+    pipeline_id: &str,
 ) -> Result<u64, sqlx::Error>
 where
     E: PgExecutor<'c>,
@@ -411,7 +411,7 @@ where
     let result = sqlx::query(
         r#"
         delete from etl.table_schemas
-        where pipeline_id = $1
+        where pipeline_id_v2 = $1
         "#,
     )
     .bind(pipeline_id)
@@ -426,7 +426,7 @@ where
 /// Also cascades to `etl.table_columns` via FK.
 pub async fn delete_table_schema_for_table<'c, E>(
     executor: E,
-    pipeline_id: i64,
+    pipeline_id: &str,
     table_id: TableId,
 ) -> Result<u64, sqlx::Error>
 where
@@ -435,7 +435,7 @@ where
     let result = sqlx::query(
         r#"
         delete from etl.table_schemas
-        where pipeline_id = $1 and table_id = $2
+        where pipeline_id_v2 = $1 and table_id = $2
         "#,
     )
     .bind(pipeline_id)
@@ -461,7 +461,7 @@ where
 /// order.
 pub async fn delete_obsolete_table_schema_versions<'c, E>(
     executor: E,
-    pipeline_id: i64,
+    pipeline_id: &str,
     retention_snapshot_ids: &BTreeMap<TableId, SnapshotId>,
 ) -> Result<u64, sqlx::Error>
 where
@@ -498,7 +498,7 @@ where
             from etl.table_schemas ts
             join cleanup_retentions cleanup
               on cleanup.table_id = ts.table_id
-            where ts.pipeline_id = $1
+            where ts.pipeline_id_v2 = $1
               and (
                   pg_catalog.split_part(ts.snapshot_id, ':', 1)::pg_catalog.numeric,
                   pg_catalog.split_part(ts.snapshot_id, ':', 2)::pg_catalog.numeric
@@ -510,7 +510,7 @@ where
         )
         delete from etl.table_schemas ts
         using retained_snapshots rs
-        where ts.pipeline_id = $1
+        where ts.pipeline_id_v2 = $1
           and ts.table_id = rs.table_id
           and (
               pg_catalog.split_part(ts.snapshot_id, ':', 1)::pg_catalog.numeric,

@@ -8,7 +8,7 @@ pub(crate) fn init(replicator_config: &ReplicatorConfig) -> ReplicatorResult<Log
     init_tracing_with_top_level_fields(
         env!("CARGO_BIN_NAME"),
         replicator_config.project_ref(),
-        Some(replicator_config.pipeline.id),
+        Some(&replicator_config.pipeline.id),
     )
     .map_err(ReplicatorError::config)
 }

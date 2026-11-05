@@ -5,7 +5,10 @@ use etl_config::shared::{
     PipelineConfig, ReplicationSlotConfig, ReplicationSlotPersistence, TableSyncCopyConfig,
 };
 use etl_postgres::tokio::test_utils::PgDatabase;
-use rand::random;
+use rand::{
+    distr::{Alphanumeric, SampleString},
+    random,
+};
 use tokio_postgres::Client;
 use uuid::Uuid;
 
@@ -53,6 +56,11 @@ where
 pub fn test_slot_name(slot_name: &str) -> String {
     let uuid = Uuid::new_v4().simple().to_string();
     format!("test_{slot_name}_{uuid}")
+}
+
+/// Generates a random lowercase alphanumeric pipeline ID for tests.
+pub fn random_pipeline_id() -> String {
+    Alphanumeric.sample_string(&mut rand::rng(), 25).to_ascii_lowercase()
 }
 
 /// Builder for creating test pipelines with configurable options.
@@ -146,14 +154,14 @@ where
     /// * Table sync copy: default configuration
     pub fn new(
         pg_connection_config: PgConnectionConfig,
-        pipeline_id: PipelineId,
+        pipeline_id: impl Into<PipelineId>,
         publication_name: String,
         store: S,
         destination: D,
     ) -> Self {
         Self {
             pg_connection_config,
-            pipeline_id,
+            pipeline_id: pipeline_id.into(),
             publication_name,
             store,
             destination,
@@ -281,7 +289,7 @@ where
     /// their default values.
     pub fn build(self) -> Pipeline<S, D> {
         let config = PipelineConfig {
-            id: self.pipeline_id,
+            id: self.pipeline_id.into(),
             publication_name: self.publication_name,
             pg_connection: self.pg_connection_config,
             store_pg_connection: None,
@@ -314,7 +322,7 @@ where
 /// (1000ms), and minimal retry attempts (2).
 pub fn create_pipeline<S, D>(
     pg_connection_config: &PgConnectionConfig,
-    pipeline_id: PipelineId,
+    pipeline_id: impl Into<PipelineId>,
     publication_name: String,
     store: S,
     destination: D,
@@ -340,7 +348,7 @@ where
 /// retry attempts to 5 (vs the default 2).
 pub fn create_pipeline_with_batch_config<S, D>(
     pg_connection_config: &PgConnectionConfig,
-    pipeline_id: PipelineId,
+    pipeline_id: impl Into<PipelineId>,
     publication_name: String,
     store: S,
     destination: D,
@@ -368,7 +376,7 @@ where
 /// using default values for other settings.
 pub fn create_pipeline_with_table_sync_copy_config<S, D>(
     pg_connection_config: &PgConnectionConfig,
-    pipeline_id: PipelineId,
+    pipeline_id: impl Into<PipelineId>,
     publication_name: String,
     store: S,
     destination: D,
@@ -418,10 +426,10 @@ pub async fn create_database_and_sync_done_pipeline_with_table(
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id: PipelineId = random_pipeline_id().into();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.clone(),
         publication_name.clone(),
         store.clone(),
         destination.clone(),
