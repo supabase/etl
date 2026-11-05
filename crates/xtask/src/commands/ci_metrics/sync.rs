@@ -65,7 +65,7 @@ enum SyncError {
     /// The day failed and will back off; other days continue.
     Day { kind: &'static str, source: anyhow::Error },
     /// GitHub refused the token (401 or 403). Fatal for Actions data; code
-    /// scanning treats a 403 as unavailable and continues.
+    /// scanning and Dependabot treat a 403 as unavailable and continue.
     Denied { status: StatusCode },
     /// The sync cannot continue: database or schema errors.
     Fatal(anyhow::Error),
@@ -162,8 +162,8 @@ pub(super) async fn run(
     result
 }
 
-/// Runs the sync phases while holding the lock: workflows, planned days, code
-/// scanning, then Dependabot.
+/// Runs the sync phases while holding the lock: workflows, planned days,
+/// Dependabot, then code scanning.
 async fn run_locked(
     conn: &mut PgConnection,
     client: &GitHubClient,
@@ -215,8 +215,26 @@ async fn run_locked(
     }
 
     // Security alerts run even when days spent their budget: they get the
-    // reserve, unless GitHub's own rate limit is low.
+    // reserve, unless GitHub's own rate limit is low. Dependabot goes first: a
+    // full listing costs one request per 100 alerts, while a code-scanning
+    // analyses backfill can spend the whole reserve.
     syncer.request_limit = config.max_requests;
+    if !syncer.low_rate_limit {
+        match syncer.sync_dependabot(conn).await {
+            Ok(()) | Err(SyncError::Exhausted) => {}
+            Err(SyncError::Fatal(error)) => return Err(error),
+            // A token without the `vulnerability-alerts` permission, or a
+            // repository with Dependabot alerts disabled, should not stop the
+            // sync.
+            Err(SyncError::Denied { status: StatusCode::FORBIDDEN }) => {
+                eprintln!("ci-metrics: Dependabot alerts unavailable (HTTP 403); skipped");
+            }
+            Err(SyncError::Denied { status }) => return Err(denied_error(status)),
+            Err(SyncError::Day { source, .. }) => {
+                eprintln!("ci-metrics: Dependabot sync failed: {source:#}");
+            }
+        }
+    }
     if !syncer.low_rate_limit {
         match syncer
             .sync_code_scanning(conn, settings.history_since, settings.analyses_backfilled)
@@ -231,22 +249,6 @@ async fn run_locked(
             Err(SyncError::Denied { status }) => return Err(denied_error(status)),
             Err(SyncError::Day { source, .. }) => {
                 eprintln!("ci-metrics: code scanning sync failed: {source:#}");
-            }
-        }
-    }
-    if !syncer.low_rate_limit {
-        match syncer.sync_dependabot(conn).await {
-            Ok(()) | Err(SyncError::Exhausted) => {}
-            Err(SyncError::Fatal(error)) => return Err(error),
-            // A token without the `vulnerability-alerts` permission, or a
-            // repository with Dependabot alerts disabled, should not stop the
-            // sync.
-            Err(SyncError::Denied { status: StatusCode::FORBIDDEN }) => {
-                eprintln!("ci-metrics: Dependabot alerts unavailable (HTTP 403); skipped");
-            }
-            Err(SyncError::Denied { status }) => return Err(denied_error(status)),
-            Err(SyncError::Day { source, .. }) => {
-                eprintln!("ci-metrics: Dependabot sync failed: {source:#}");
             }
         }
     }

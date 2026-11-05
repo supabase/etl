@@ -173,11 +173,13 @@ pub(super) struct DependabotAlert {
     pub(super) security_advisory: SecurityAdvisory,
 }
 
-/// The vulnerable dependency behind a Dependabot alert.
+/// The vulnerable dependency behind a Dependabot alert. GitHub's schema does
+/// not require the package or manifest, so a missing one must not fail the
+/// whole page.
 #[derive(Debug, Deserialize)]
 pub(super) struct AlertDependency {
-    pub(super) package: AlertPackage,
-    pub(super) manifest_path: String,
+    pub(super) package: Option<AlertPackage>,
+    pub(super) manifest_path: Option<String>,
 }
 
 /// A package in a dependency manifest.

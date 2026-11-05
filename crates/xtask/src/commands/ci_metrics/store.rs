@@ -625,6 +625,7 @@ pub(super) async fn upsert_dependabot_alert(
     conn: &mut PgConnection,
     alert: &DependabotAlert,
 ) -> Result<()> {
+    let package = alert.dependency.package.as_ref();
     sqlx::query(
         "insert into ci.dependabot_alert (
              number, ecosystem, package, manifest_path, advisory_id, severity, state, created_at,
@@ -644,9 +645,9 @@ pub(super) async fn upsert_dependabot_alert(
          where excluded.updated_at >= ci.dependabot_alert.updated_at",
     )
     .bind(alert.number)
-    .bind(&alert.dependency.package.ecosystem)
-    .bind(&alert.dependency.package.name)
-    .bind(&alert.dependency.manifest_path)
+    .bind(package.map_or("unknown", |package| package.ecosystem.as_str()))
+    .bind(package.map_or("unknown", |package| package.name.as_str()))
+    .bind(alert.dependency.manifest_path.as_deref().unwrap_or("unknown"))
     .bind(&alert.security_advisory.ghsa_id)
     .bind(&alert.security_advisory.severity)
     .bind(&alert.state)

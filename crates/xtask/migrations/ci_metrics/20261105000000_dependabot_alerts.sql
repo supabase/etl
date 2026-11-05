@@ -13,8 +13,11 @@
 -- Deploy: the collector refuses to sync until its newest embedded migration
 -- is applied, so run `cargo x ci-metrics migrate` as the owner when the
 -- collector change reaches `main`. Syncs started in between fail and the next
--- hourly sync catches up. Rollback: restore the previous view definition and
--- drop the table; no other object depends on it.
+-- hourly sync catches up. Rollback: revert the collector, restore the
+-- previous view definition, drop the table, and delete version
+-- 20261105000000 from `ci._sqlx_migrations`, because the reverted collector
+-- requires its own newest migration to be the newest applied one. No other
+-- object depends on the table.
 
 create table ci.dependabot_alert (
     number integer primary key,
