@@ -51,6 +51,7 @@ use tokio::{
     },
     time::{Instant, MissedTickBehavior},
 };
+use tokio_stream::{StreamExt, wrappers::IntervalStream};
 use tracing::{debug, info, warn};
 use url::Url;
 
@@ -3481,11 +3482,11 @@ where
             DUCKLAKE_LAYOUT_RECONCILIATION_INTERVAL,
         );
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut ticks = IntervalStream::new(interval);
         let destination = self.clone();
         self.tasks
             .spawn_with(move || async move {
-                loop {
-                    interval.tick().await;
+                while ticks.next().await.is_some() {
                     if let Err(error) = destination.reconcile_applied_table_layouts().await {
                         warn!(error = %error, "ducklake periodic layout reconciliation failed");
                     }
