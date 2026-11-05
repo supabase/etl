@@ -10,18 +10,20 @@ use tokio::sync::watch;
 use tokio_postgres::{CopyOutStream, SimpleQueryMessage, Transaction};
 use tracing::warn;
 
-use super::{
-    child::ChildPgReplicationClient,
-    query::{PgReplicationQueryTarget, classify_table_copy_error},
-    raw::{PgReplicationClient, PgReplicationConnectionConfig},
-    types::{CtidPartition, PostgresConnectionUpdate},
-    utils::get_row_value,
-};
 use crate::{
     bail,
     error::{ErrorKind, EtlResult},
     etl_error,
-    postgres::codec::{ColumnSchemaMessage, IdentityMessage, build_table_schema},
+    postgres::{
+        client::{
+            child::ChildPgReplicationClient,
+            query::{PgReplicationQueryTarget, classify_table_copy_error},
+            raw::{PgReplicationClient, PgReplicationConnectionConfig},
+            types::{CtidPartition, PostgresConnectionUpdate},
+            utils::get_row_value,
+        },
+        codec::{ColumnSchemaMessage, IdentityMessage, build_table_schema},
+    },
     schema::{ColumnSchema, SnapshotId, TableId, TableName, TableSchema},
 };
 
@@ -274,75 +276,27 @@ impl<'a> PgReplicationTransactionCore<'a> {
         table_schema: &TableSchema,
         publication_name: &str,
     ) -> EtlResult<HashSet<String>> {
-        // Column filtering in publications was added in Postgres 15. For
-        // earlier versions, all columns are replicated.
-        if below_version!(self.server_version, POSTGRES_15) {
-            return Ok(table_schema
-                .column_schemas
-                .iter()
-                .map(|column_schema| column_schema.name.clone())
-                .collect());
-        }
-
-        // Read publication membership and column lists from MVCC catalogs.
-        // Expansion helpers consult current catalog caches and open unrelated
-        // published tables, potentially waiting behind queued DDL. Only
-        // declarative partition ancestors contribute inherited membership.
-        let publication_name_sql = quote_literal(publication_name);
+        // Copy and DDL capture use the same MVCC catalog rules. The copy's
+        // imported snapshot and retained relation lock preserve its boundary.
         let column_query = format!(
-            "with recursive ancestors as (
-                 select oid, relnamespace, relispartition from pg_catalog.pg_class
-                 where oid = {table_id}
-                 union all
-                 select c.oid, c.relnamespace, c.relispartition
-                 from ancestors a
-                 join pg_catalog.pg_inherits i on i.inhrelid = a.oid
-                 join pg_catalog.pg_class c on c.oid = i.inhparent
-                 where a.relispartition and not i.inhdetachpending
-             ), published_ancestors as (
-                 select a.oid, p.oid as pubid
-                 from ancestors a cross join pg_catalog.pg_publication p
-                 where p.pubname = {publication_name_sql} and (p.puballtables or exists (
-                     select 1 from pg_catalog.pg_publication_rel pr
-                     where pr.prpubid = p.oid and pr.prrelid = a.oid
-                 ) or exists (
-                     select 1 from pg_catalog.pg_publication_namespace pn
-                     where pn.pnpubid = p.oid and pn.pnnspid = a.relnamespace
-                 ))
-             )
-             select a.attname as column_name
-             from pg_catalog.pg_publication p
-             join pg_catalog.pg_class c on c.oid = {table_id}
-             left join pg_catalog.pg_publication_rel pr
-               on pr.prpubid = p.oid and pr.prrelid = c.oid
-             left join pg_catalog.pg_attribute a
-               on a.attrelid = c.oid and a.attnum = any(pr.prattrs)
-               and not p.puballtables
-               and not exists (
-                   select 1 from pg_catalog.pg_publication_namespace pn
-                   where pn.pnpubid = p.oid and pn.pnnspid = c.relnamespace
-               )
-             where p.pubname = {publication_name_sql} and exists (
-                 select 1 from published_ancestors pa where pa.pubid = p.oid
-             ) and (
-                 (not p.pubviaroot and c.relkind != 'p') or
-                 (p.pubviaroot and not exists (
-                     select 1 from published_ancestors pa
-                     where pa.pubid = p.oid and pa.oid != c.oid
-                 ))
-             )",
+            "select p.column_attnums is null as all_columns, published.attnum from \
+             etl.describe_table_publication_columns({table_id}, {}) p left join lateral \
+             pg_catalog.unnest(p.column_attnums) as published(attnum) on true",
+            quote_literal(publication_name),
         );
 
         let rows = self.transaction.simple_query(&column_query).await?;
-        let mut column_names = HashSet::new();
+        let mut column_attnums = HashSet::<i32>::new();
         let mut table_in_publication = false;
+        let mut all_columns = false;
 
         for row in rows {
             if let SimpleQueryMessage::Row(row) = row {
                 table_in_publication = true;
+                all_columns |= row.try_get::<&str>("all_columns")? == Some("t");
 
-                if let Some(column_name) = row.try_get::<&str>("column_name")? {
-                    column_names.insert(column_name.to_owned());
+                if row.try_get::<&str>("attnum")?.is_some() {
+                    column_attnums.insert(get_row_value(&row, "attnum", "publication columns")?);
                 }
             }
         }
@@ -359,15 +313,14 @@ impl<'a> PgReplicationTransactionCore<'a> {
             );
         }
 
-        if column_names.is_empty() {
-            return Ok(table_schema
-                .column_schemas
-                .iter()
-                .map(|column_schema| column_schema.name.clone())
-                .collect());
-        }
-
-        Ok(column_names)
+        // Resolve names against the same immutable schema used by copy,
+        // including attnum gaps and excluded generated columns.
+        Ok(table_schema
+            .column_schemas
+            .iter()
+            .filter(|column| all_columns || column_attnums.contains(&column.ordinal_position))
+            .map(|column| column.name.clone())
+            .collect())
     }
 
     /// Exports the current transaction snapshot.
@@ -407,10 +360,10 @@ impl<'a> PgReplicationTransactionCore<'a> {
         let table_ids_sql = table_ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(",");
         let estimate_query = format!(
             "select c.oid as table_id,
-             pg_relation_size(c.oid)::bigint / current_setting('block_size')::bigint as \
-             table_blocks,
+             pg_catalog.pg_relation_size(c.oid)::bigint / \
+             pg_catalog.current_setting('block_size')::bigint as table_blocks,
              greatest(c.reltuples, 0)::bigint as estimated_rows
-             from pg_class c
+             from pg_catalog.pg_class c
              where c.oid = any(array[{table_ids_sql}]::oid[]);"
         );
 
@@ -576,8 +529,8 @@ impl<'a> PgReplicationTransactionCore<'a> {
         let query = format!(
             "select n.nspname as schema_name, c.relname as table_name,
                     {row_filter} as row_filter
-             from pg_class c
-             join pg_namespace n on c.relnamespace = n.oid
+             from pg_catalog.pg_class c
+             join pg_catalog.pg_namespace n on c.relnamespace = n.oid
              where c.oid = {table_id}",
         );
 
@@ -603,7 +556,7 @@ impl<'a> PgReplicationTransactionCore<'a> {
         let generated_columns_check_query = format!(
             r#"select exists (
                 select 1
-                from pg_attribute
+                from pg_catalog.pg_attribute
                 where attrelid = {table_id}
                     and attnum > 0
                     and not attisdropped
@@ -647,8 +600,8 @@ impl<'a> PgReplicationTransactionCore<'a> {
                 select
                     n.nspname as schema_name,
                     c.relname as table_name
-                from pg_class c
-                join pg_namespace n on c.relnamespace = n.oid
+                from pg_catalog.pg_class c
+                join pg_catalog.pg_namespace n on c.relnamespace = n.oid
                 where c.oid = {table_id}
             ),
             schema_snapshot as (
@@ -661,12 +614,14 @@ impl<'a> PgReplicationTransactionCore<'a> {
                             'atttypmod', s.atttypmod,
                             'attnotnull', s.attnotnull,
                             'default_expression', s.default_expression
-                        )
+                        ) || case when s.missing_value_expression is null then '{{}}'::pg_catalog.jsonb
+                                  else pg_catalog.jsonb_build_object('missing_value_expression', s.missing_value_expression)
+                             end
                         order by s.attnum
                     ),
                     '[]'::pg_catalog.jsonb
                 ) as columns
-                from etl.describe_table_schema({table_id}) s
+                from etl.describe_table_columns({table_id}) s
             )
             select
                 ti.schema_name,
@@ -678,11 +633,6 @@ impl<'a> PgReplicationTransactionCore<'a> {
             "#,
         );
 
-        // TODO: there's a lot of code using simple_query but only checking for
-        // SimpleQueryMessage::Row, a small optimization could be done here if
-        // we upgraded tokio-postgres to a newer version in order to use
-        // https://docs.rs/tokio-postgres/0.7.15/tokio_postgres/struct.Client.html#method.simple_query_raw
-        // to filter on SimpleQueryMessage::Row and avoid useless allocations.
         for message in self.transaction.simple_query(&schema_snapshot_query).await? {
             if let SimpleQueryMessage::Row(row) = message {
                 let schema_name = get_row_value::<String>(&row, "schema_name", "pg_namespace")?;
@@ -694,10 +644,8 @@ impl<'a> PgReplicationTransactionCore<'a> {
                         etl_error!(
                             ErrorKind::DeserializationError,
                             "Invalid table schema snapshot",
-                            format!(
-                                "Failed to parse describe_table_schema payload for table {}: {}",
-                                table_id, err
-                            )
+                            format!("Failed to parse describe_table_columns payload for table {table_id}"),
+                            source: err
                         )
                     })?;
                 let identity: IdentityMessage =
@@ -705,10 +653,8 @@ impl<'a> PgReplicationTransactionCore<'a> {
                         etl_error!(
                             ErrorKind::DeserializationError,
                             "Invalid table identity snapshot",
-                            format!(
-                                "Failed to parse describe_table_identity payload for table {}: {}",
-                                table_id, err
-                            )
+                            format!("Failed to parse describe_table_identity payload for table {table_id}"),
+                            source: err
                         )
                     })?;
 

@@ -6,15 +6,20 @@ use etl::{
         PgConnectionConfig, PgConnectionOptions, PipelineConfig, TableSyncCopyConfig,
     },
     pipeline::Pipeline,
-    postgres::migrations::{ETL_SCHEMA_LOCK_ID, run_source_migrations},
+    postgres::{
+        client::PgReplicationClient,
+        migrations::{ETL_SCHEMA_LOCK_ID, run_source_migrations},
+    },
     store::{MemoryStore, PostgresStore, StateStore, WorkerType},
-    test_utils::memory_destination::MemoryDestination,
+    test_utils::{memory_destination::MemoryDestination, pipeline::test_slot_name},
 };
 use etl_postgres::{
     test_utils::{local_tls_config_from_env, test_database_port_from_env},
     tokio::test_utils::PgDatabase,
 };
 use etl_telemetry::tracing::init_test_tracing;
+use futures::StreamExt;
+use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
 use sqlx::{Connection, Executor, PgConnection, migrate::Migrator, postgres::PgConnectOptions};
 use tokio_postgres::{Client, types::PgLsn};
 use uuid::Uuid;
@@ -28,6 +33,7 @@ const POSTGRES_STORE_PRE_CREATING_STATUS_VERSION: i64 = 20260810120000;
 const POSTGRES_STORE_PRE_PIPELINE_ID_V2_VERSION: i64 = 20261002120100;
 const SOURCE_PRE_PUBLICATION_SCHEMA_CHANGE_VERSION: i64 = 20260415100000;
 const SOURCE_PRE_PRIMARY_KEY_DEFERRABILITY_VERSION: i64 = 20260724120000;
+const SOURCE_PRE_SYNTHETIC_RELATION_VERSION: i64 = 20261018120000;
 const APP_NAME_TEST_MIGRATIONS: &str = "supabase_etl_test_migrations";
 
 static TEST_MIGRATION_OPTIONS: LazyLock<PgConnectionOptions> =
@@ -1163,6 +1169,130 @@ async fn postgres_store_schema_storage_down_migration_keeps_destination_snapshot
     assert_eq!(restored_mapping, "destination_snapshot_items");
 }
 
+/// Fresh installations of the previous source migration set can retain WAL
+/// through an upgrade, including payloads readable by the previous decoder.
+#[tokio::test(flavor = "multi_thread")]
+async fn source_upgrade_from_main_preserves_queued_identity_messages() {
+    /// The required identity fields read by the pre-synthetic decoder.
+    #[derive(serde::Deserialize)]
+    struct LegacyIdentity {
+        /// Destination primary-key metadata.
+        primary_key_attnums: Vec<i32>,
+        /// Whether the source primary key is deferrable.
+        #[serde(default)]
+        primary_key_condeferrable: bool,
+        /// The source replica-identity mode.
+        relreplident: String,
+        /// The explicit-index field required by the previous decoder.
+        replica_identity_index_attnums: Vec<i32>,
+    }
+
+    let database = spawn_unmigrated_database().await;
+    let mut connection = migration_connection(&database.config).await;
+    source_migrator().run_to(SOURCE_PRE_SYNTHETIC_RELATION_VERSION, &mut connection).await.unwrap();
+    drop(connection);
+    assert_eq!(
+        applied_migration_versions(&database).await,
+        source_migration_versions()
+            .into_iter()
+            .filter(|version| *version <= SOURCE_PRE_SYNTHETIC_RELATION_VERSION)
+            .collect::<Vec<_>>()
+    );
+    let client = database.client.as_ref().unwrap();
+    client
+        .batch_execute(
+            "create table public.upgrade_identity (id integer primary key, value integer not \
+             null);
+             create unique index upgrade_identity_value on public.upgrade_identity (value);
+             create publication upgrade_pub for table public.upgrade_identity",
+        )
+        .await
+        .unwrap();
+    let mut replication_client =
+        PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let slot_name = test_slot_name("identity_upgrade");
+    let slot = replication_client.create_slot(&slot_name, &Default::default()).await.unwrap();
+
+    client
+        .batch_execute(
+            "alter table public.upgrade_identity replica identity using index \
+             upgrade_identity_value",
+        )
+        .await
+        .unwrap();
+
+    run_source_migrations(&database.config).await.unwrap();
+
+    client
+        .batch_execute(
+            "alter table public.upgrade_identity owner to current_user;
+             alter table public.upgrade_identity replica identity default",
+        )
+        .await
+        .unwrap();
+
+    // Start decoding only after both formats are already queued in the slot.
+    let (stream, _) = replication_client
+        .start_logical_replication("upgrade_pub", &slot_name, slot.consistent_point, None)
+        .await
+        .unwrap();
+    tokio::pin!(stream);
+    let mut messages = Vec::<serde_json::Value>::new();
+    while messages.len() < 3 {
+        let event = tokio::time::timeout(Duration::from_secs(10), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        if let ReplicationMessage::XLogData(event) = event
+            && let LogicalReplicationMessage::Message(message) = event.data()
+            && message.prefix().unwrap() == "supabase_etl_ddl"
+        {
+            messages.push(serde_json::from_slice(message.content()).unwrap());
+        }
+    }
+    assert!(messages[0].get("publication_column_attnums").is_none());
+    assert!(messages[0]["identity"].get("replica_identity_attnums").is_none());
+    assert_eq!(messages[1]["identity"]["replica_identity_attnums"], serde_json::json!([2]));
+    assert_eq!(messages[2]["identity"]["replica_identity_attnums"], serde_json::json!([1]));
+    for (message, mode, legacy_keys) in
+        [(&messages[0], "i", vec![2]), (&messages[1], "i", vec![2]), (&messages[2], "d", vec![])]
+    {
+        let legacy: LegacyIdentity = serde_json::from_value(message["identity"].clone()).unwrap();
+        assert_eq!(legacy.primary_key_attnums, vec![1]);
+        assert!(!legacy.primary_key_condeferrable);
+        assert_eq!(legacy.relreplident, mode);
+        assert_eq!(legacy.replica_identity_index_attnums, legacy_keys);
+    }
+}
+
+/// Upgrades replace the trigger function in place, so an operator-disabled
+/// event trigger stays disabled.
+#[tokio::test(flavor = "multi_thread")]
+async fn source_upgrade_preserves_disabled_ddl_trigger() {
+    let database = spawn_unmigrated_database().await;
+    let mut conn = migration_connection(&database.config).await;
+    source_migrator().run_to(SOURCE_PRE_SYNTHETIC_RELATION_VERSION, &mut conn).await.unwrap();
+    drop(conn);
+    let client = database.client.as_ref().unwrap();
+    client
+        .batch_execute("alter event trigger supabase_etl_ddl_message_trigger disable")
+        .await
+        .unwrap();
+
+    run_source_migrations(&database.config).await.unwrap();
+
+    assert!(
+        query_bool(
+            &database,
+            "select evtenabled = 'D' and evtfoid = \
+             'etl.emit_schema_change_messages()'::pg_catalog.regprocedure
+             from pg_catalog.pg_event_trigger where evtname = 'supabase_etl_ddl_message_trigger'",
+        )
+        .await
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn split_migrations_can_be_reverted_independently() {
     init_test_tracing();
@@ -1181,6 +1311,46 @@ async fn split_migrations_can_be_reverted_independently() {
             'etl.replication_state'::pg_catalog.regclass
         ) ? 'primary_key_condeferrable'";
     assert!(query_bool(&database, identity_reports_deferrability).await);
+
+    let protocol_identity = "select etl.describe_table_identity(
+        'etl.replication_state'::pg_catalog.regclass
+    ) ? 'replica_identity_attnums'";
+    let publication_helper = "select to_regprocedure(
+        'etl.describe_table_publication_columns(oid,text)'
+    ) is not null";
+    let publication_candidates = "select to_regprocedure(
+        'etl.publication_table_candidates(oid)'
+    ) is not null";
+    let decoder_columns = "select to_regprocedure(
+        'etl.describe_table_columns(oid)'
+    ) is not null";
+    assert!(query_bool(&database, protocol_identity).await);
+    assert!(query_bool(&database, publication_helper).await);
+    assert!(query_bool(&database, publication_candidates).await);
+    assert!(query_bool(&database, decoder_columns).await);
+
+    let stored_missing_value = "select exists (
+        select 1 from pg_catalog.pg_attribute
+        where attrelid = 'etl.table_columns'::pg_catalog.regclass
+          and attname = 'missing_value_expression'
+          and not attnotnull and not attisdropped
+    )";
+    assert!(query_bool(&database, stored_missing_value).await);
+    let mut conn = migration_connection(&database.config).await;
+    postgres_store_migrator().undo(&mut conn, 20261002120100).await.unwrap();
+    drop(conn);
+    assert!(!query_bool(&database, stored_missing_value).await);
+    assert!(query_bool(&database, decoder_columns).await);
+    let _upgraded_store = PostgresStore::new("1", database.config.clone()).await.unwrap();
+    assert!(query_bool(&database, stored_missing_value).await);
+
+    let mut conn = migration_connection(&database.config).await;
+    source_migrator().undo(&mut conn, SOURCE_PRE_SYNTHETIC_RELATION_VERSION).await.unwrap();
+    drop(conn);
+    assert!(!query_bool(&database, protocol_identity).await);
+    assert!(!query_bool(&database, publication_helper).await);
+    assert!(!query_bool(&database, publication_candidates).await);
+    assert!(!query_bool(&database, decoder_columns).await);
 
     let mut conn = migration_connection(&database.config).await;
     source_migrator().undo(&mut conn, SOURCE_PRE_PRIMARY_KEY_DEFERRABILITY_VERSION).await.unwrap();

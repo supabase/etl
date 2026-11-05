@@ -30,6 +30,33 @@ pub(crate) fn warn_unsupported_column_type_change(
     );
 }
 
+/// Returns whether a relation replays a snapshot older than the applied one.
+///
+/// ETL emits a relation for every captured DDL statement, so recovery can
+/// replay older relations after their successors were applied. A relation
+/// carries no rows, so skipping it cannot lose data or rewind DDL. Rows
+/// replayed at the older snapshot still fail
+/// [`ensure_destination_schema_matches_metadata`].
+pub(crate) fn is_stale_relation_replay(
+    destination_name: &str,
+    table_id: TableId,
+    applied_snapshot_id: SnapshotId,
+    received_snapshot_id: SnapshotId,
+) -> bool {
+    let stale = received_snapshot_id < applied_snapshot_id;
+    if stale {
+        tracing::debug!(
+            destination_name,
+            table_id = %table_id,
+            %applied_snapshot_id,
+            %received_snapshot_id,
+            "skipping replayed relation older than the applied schema snapshot"
+        );
+    }
+
+    stale
+}
+
 /// Validates that a relation can advance an applied destination schema.
 ///
 /// Supported schema and publication-mask changes receive a new [`SnapshotId`].

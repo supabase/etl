@@ -2009,10 +2009,7 @@ async fn schema_change_add_column_defaults() {
     table_sync_complete_notify.notified().await;
 
     let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 1),
-            EventCondition::TableCount(EventType::Insert, table_id, 1),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
         .await;
 
     database
@@ -2157,10 +2154,7 @@ async fn publication_mask_adds_nullable_columns_with_future_only_defaults() {
     table_sync_complete_notify.notified().await;
 
     let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 1),
-            EventCondition::TableCount(EventType::Insert, table_id, 1),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
         .await;
     database
         .run_sql(&format!(
@@ -2282,10 +2276,7 @@ async fn schema_change_tolerates_nullability_and_default_divergence() {
     table_sync_complete_notify.notified().await;
 
     let set_not_null_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 1),
-            EventCondition::TableCount(EventType::Insert, table_id, 1),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
         .await;
 
     database
@@ -2317,10 +2308,7 @@ async fn schema_change_tolerates_nullability_and_default_divergence() {
     set_not_null_notify.notified().await;
 
     let drop_not_null_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 2),
-            EventCondition::TableCount(EventType::Insert, table_id, 2),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 2)])
         .await;
 
     database
@@ -2347,10 +2335,7 @@ async fn schema_change_tolerates_nullability_and_default_divergence() {
     drop_not_null_notify.notified().await;
 
     let drop_default_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 3),
-            EventCondition::TableCount(EventType::Insert, table_id, 3),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 3)])
         .await;
 
     database
@@ -2479,14 +2464,11 @@ async fn schema_change_applies_rename_cycle_and_same_name_replacement() {
 
     events_notify.notified().await;
 
-    // PostgreSQL requires each column rename to be a separate statement. With
-    // no intervening DML, pgoutput emits no intermediate Relation, so the
-    // destination observes the old and final names as one rename cycle.
+    // PostgreSQL requires each column rename to be a separate statement. Each
+    // statement emits its own synthetic relation, so the destination applies
+    // the cycle one rename at a time.
     let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 2),
-            EventCondition::TableCount(EventType::Insert, table_id, 2),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 2)])
         .await;
 
     database
