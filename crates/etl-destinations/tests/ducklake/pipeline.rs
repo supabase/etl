@@ -13,7 +13,7 @@ use etl::{
         database::{spawn_source_database, test_table_name},
         event::EventCondition,
         notifying_store::NotifyingStore,
-        pipeline::{create_pipeline, create_pipeline_with_batch_config},
+        pipeline::{create_pipeline, create_pipeline_with_batch_config, random_pipeline_id},
         test_destination_wrapper::TestDestinationWrapper,
         test_schema::{TableSelection, insert_mock_data, setup_test_database_schema},
     },
@@ -25,7 +25,6 @@ use etl_maintenance::ducklake::RedactedDuckDbError;
 use etl_postgres::{below_version, tokio::test_utils::TableModification, version::POSTGRES_15};
 use etl_telemetry::tracing::init_test_tracing;
 use pg_escape::{quote_identifier, quote_literal};
-use rand::random;
 use rust_decimal::Decimal;
 use url::Url;
 
@@ -441,12 +440,12 @@ async fn table_copy_and_streaming_with_restart() {
     .await;
 
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
 
     let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -482,7 +481,7 @@ async fn table_copy_and_streaming_with_restart() {
     let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -585,7 +584,7 @@ async fn table_copy_preserves_identical_oversized_rows_across_batches() {
     let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
     let mut pipeline = create_pipeline_with_batch_config(
         &database.config,
-        random(),
+        random_pipeline_id(),
         publication_name.to_owned(),
         store.clone(),
         destination.clone(),
@@ -621,7 +620,7 @@ async fn table_copy_reset_drops_destination_table_before_recopy() {
     let users_schema = database_schema.users_schema();
     let users_table_name = table_name_to_ducklake_table_name(&users_schema.name).unwrap();
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
 
     database
         .insert_values(users_schema.name.clone(), &["name", "age"], &[&"before_1", &1])
@@ -636,7 +635,7 @@ async fn table_copy_reset_drops_destination_table_before_recopy() {
 
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -675,7 +674,7 @@ async fn table_copy_reset_drops_destination_table_before_recopy() {
 
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -722,12 +721,12 @@ async fn table_copy_and_streaming_without_restart() {
     .await;
 
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
 
     let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -800,14 +799,14 @@ async fn table_insert_update_delete() {
         table_name_to_ducklake_table_name(&database_schema.users_schema().name).unwrap();
 
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let users_sync_complete_notify =
         store.notify_on_table_sync_complete(database_schema.users_schema().id).await;
 
     let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -845,7 +844,7 @@ async fn table_insert_update_delete() {
     let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -882,7 +881,7 @@ async fn table_insert_update_delete() {
     let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -928,12 +927,12 @@ async fn cdc_streaming_with_truncate() {
         table_name_to_ducklake_table_name(&database_schema.orders_schema().name).unwrap();
 
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -1041,11 +1040,11 @@ async fn schema_change_add_column() {
     let data_url = lake.data_url.clone();
     let ducklake_table_name = table_name_to_ducklake_table_name(&table_name).unwrap();
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name.to_owned(),
         store.clone(),
         destination.clone(),
@@ -1150,7 +1149,7 @@ async fn case_only_rename_keeps_canonical_ducklake_column() {
     let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
     let mut pipeline = create_pipeline(
         &database.config,
-        random(),
+        random_pipeline_id(),
         publication_name.to_owned(),
         store.clone(),
         destination.clone(),
@@ -1238,11 +1237,11 @@ async fn publication_mask_adds_existing_defaulted_column_without_backfill() {
     let data_url = lake.data_url.clone();
     let ducklake_table_name = table_name_to_ducklake_table_name(&table_name).unwrap();
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name.to_owned(),
         store.clone(),
         destination.clone(),
@@ -1316,11 +1315,11 @@ async fn schema_change_is_visible_to_already_open_connection() {
     let data_url = lake.data_url.clone();
     let ducklake_table_name = table_name_to_ducklake_table_name(&table_name).unwrap();
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name.to_owned(),
         store.clone(),
         destination.clone(),
@@ -1396,11 +1395,11 @@ async fn schema_change_ordered_name_reuse() {
     let data_url = lake.data_url.clone();
     let ducklake_table_name = table_name_to_ducklake_table_name(&table_name).unwrap();
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name.to_owned(),
         store.clone(),
         destination.clone(),
@@ -1520,11 +1519,11 @@ async fn schema_change_then_update_and_delete() {
     let data_url = lake.data_url.clone();
     let ducklake_table_name = table_name_to_ducklake_table_name(&table_name).unwrap();
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name.to_owned(),
         store.clone(),
         destination.clone(),
@@ -1619,11 +1618,11 @@ async fn schema_change_handles_generated_column_rotation() {
     let data_url = lake.data_url.clone();
     let ducklake_table_name = table_name_to_ducklake_table_name(&table_name).unwrap();
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name.to_owned(),
         store.clone(),
         destination.clone(),
@@ -1757,11 +1756,11 @@ async fn schema_change_handles_generated_column_types() {
     let data_url = lake.data_url.clone();
     let ducklake_table_name = table_name_to_ducklake_table_name(&table_name).unwrap();
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name.to_owned(),
         store.clone(),
         destination.clone(),
@@ -1965,7 +1964,7 @@ async fn special_temporal_values_survive_copy_and_cdc() {
     let destination = build_destination(&lake.catalog_url, &lake.data_url, store.clone()).await;
     let mut pipeline = create_pipeline(
         &database.config,
-        random(),
+        random_pipeline_id(),
         publication.to_owned(),
         store,
         destination.clone(),
@@ -2069,7 +2068,7 @@ async fn build_shutdown_replay_pipeline(
     >,
     etl::store::PostgresStore,
 ) {
-    let store = etl::store::PostgresStore::new(pipeline_id, config.clone()).await.unwrap();
+    let store = etl::store::PostgresStore::new(&pipeline_id, config.clone()).await.unwrap();
     let destination = DuckLakeDestination::new(
         catalog.clone(),
         data.clone(),
@@ -2135,8 +2134,8 @@ async fn bounded_shutdown_replays_partial_commits_under_mixed_traffic() {
     let mut database = spawn_source_database().await;
     let schema = setup_test_database_schema(&database, TableSelection::Both).await;
     let lake = create_test_lake("bounded_shutdown_replay").await;
-    let pipeline_id: PipelineId = random();
-    let slot: String = EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
+    let pipeline_id = random_pipeline_id();
+    let slot: String = EtlReplicationSlot::for_apply_worker(&pipeline_id).try_into().unwrap();
     // Scope the test hook to this table even when another test uses the same
     // fixture table names in a different database concurrently.
     let mut users_name = schema.users_schema().name;
@@ -2169,7 +2168,7 @@ async fn bounded_shutdown_replays_partial_commits_under_mixed_traffic() {
 
     let (mut pipeline, store) = build_shutdown_replay_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str().into(),
         schema.publication_name(),
         &lake.catalog_url,
         &lake.data_url,
@@ -2249,7 +2248,8 @@ async fn bounded_shutdown_replays_partial_commits_under_mixed_traffic() {
         producer.await.unwrap();
         drop(release);
 
-        let cold_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+        let cold_store =
+            PostgresStore::new(pipeline_id.as_str(), database.config.clone()).await.unwrap();
         assert!(
             cold_store.get_replication_checkpoint(WorkerType::Apply).await.unwrap()
                 < Some(burst_lsn)
@@ -2275,7 +2275,7 @@ async fn bounded_shutdown_replays_partial_commits_under_mixed_traffic() {
         let restart_started = Instant::now();
         let (mut restarted, restarted_store) = build_shutdown_replay_pipeline(
             &database.config,
-            pipeline_id,
+            pipeline_id.as_str().into(),
             schema.publication_name(),
             &lake.catalog_url,
             &lake.data_url,
@@ -2324,9 +2324,9 @@ async fn bounded_shutdown_replays_partial_commits_under_mixed_traffic() {
         // cannot prove this because resetting a table also clears its markers.
         let copies: i64 = client
             .query_one(
-                "select count(*) from etl.replication_state where pipeline_id = $1 and state = \
+                "select count(*) from etl.replication_state where pipeline_id_v2 = $1 and state = \
                  'data_sync'",
-                &[&(pipeline_id as i64)],
+                &[&pipeline_id],
             )
             .await
             .unwrap()
@@ -2343,7 +2343,7 @@ async fn bounded_shutdown_replays_partial_commits_under_mixed_traffic() {
         drop(conn);
         let (mut next, _) = build_shutdown_replay_pipeline(
             &database.config,
-            pipeline_id,
+            pipeline_id.as_str().into(),
             schema.publication_name(),
             &lake.catalog_url,
             &lake.data_url,

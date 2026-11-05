@@ -3,7 +3,6 @@
 use etl::{
     data::{ArrayCell, Cell, Date},
     event::{Event, EventType},
-    pipeline::PipelineId,
     schema::{ColumnSchema, SnapshotId, TableId, TableSchema},
     store::TableStateType,
     test_utils::{
@@ -11,7 +10,9 @@ use etl::{
         event::{EventCondition, group_events_by_type_and_table_id},
         memory_destination::MemoryDestination,
         notifying_store::NotifyingStore,
-        pipeline::{create_database_and_sync_done_pipeline_with_table, create_pipeline},
+        pipeline::{
+            create_database_and_sync_done_pipeline_with_table, create_pipeline, random_pipeline_id,
+        },
         schema::{
             assert_replicated_schema_column_names_types, assert_schema_snapshots_ordering,
             assert_table_schema_column_names_types,
@@ -23,7 +24,6 @@ use etl::{
 use etl_postgres::tokio::test_utils::TableModification;
 use etl_telemetry::{metrics::init_metrics_handle, tracing::init_test_tracing};
 use pg_escape::quote_identifier;
-use rand::random;
 use tokio_postgres::types::Type;
 
 fn get_last_relation_event(events: &[Event], table_id: TableId) -> &Event {
@@ -935,7 +935,7 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
     // Rename column + change type + insert, then restart.
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        &pipeline_id,
         publication.clone(),
         store.clone(),
         destination.clone(),
@@ -980,7 +980,7 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
     // Drop column + insert, then restart.
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        &pipeline_id,
         publication.clone(),
         store.clone(),
         destination.clone(),
@@ -1128,10 +1128,10 @@ async fn partitioned_table_schema_change_updates_relation_message() {
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name,
         state_store.clone(),
         destination.clone(),

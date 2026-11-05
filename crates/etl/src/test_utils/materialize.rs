@@ -30,26 +30,31 @@ pub trait FromTableRow: Sized {
 }
 
 /// Event payloads that the oracle cannot apply to the materialized table.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum MaterializeError {
     /// A full row did not convert to the record type.
+    #[error("Row {values} did not convert")]
     UnconvertibleRow {
         /// Debug rendering of the row values.
         values: String,
     },
     /// A key row did not yield an identity.
+    #[error("Key row {values} did not convert")]
     UnconvertibleKeyRow {
         /// Debug rendering of the key values.
         values: String,
     },
     /// A delete carried no old-side row.
+    #[error("Delete carried no old row")]
     DeleteWithoutOldRow,
     /// An insert, or an update to a new key, targeted a key already present.
+    #[error("Key {id} is already present")]
     DuplicateKey {
         /// Debug rendering of the key.
         id: String,
     },
     /// An update or delete targeted a key that is not present.
+    #[error("{operation} targeted missing key {id}")]
     MissingKey {
         /// Operation that needed the key.
         operation: &'static str,
@@ -57,22 +62,6 @@ pub enum MaterializeError {
         id: String,
     },
 }
-
-impl fmt::Display for MaterializeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::UnconvertibleRow { values } => write!(f, "Row {values} did not convert"),
-            Self::UnconvertibleKeyRow { values } => write!(f, "Key row {values} did not convert"),
-            Self::DeleteWithoutOldRow => write!(f, "Delete carried no old row"),
-            Self::DuplicateKey { id } => write!(f, "Key {id} is already present"),
-            Self::MissingKey { operation, id } => {
-                write!(f, "{operation} targeted missing key {id}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for MaterializeError {}
 
 /// Returns the identity of a full row.
 fn full_row_id<T: FromTableRow>(row: &TableRow) -> Result<T::Id, MaterializeError> {

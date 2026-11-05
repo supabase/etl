@@ -73,6 +73,21 @@ fn render_default_expression(expression: &DefaultExpression, typ: &Type) -> Opti
         DefaultExpression::StringLiteral(expression) if is_bigquery_string_default_type(typ) => {
             bigquery_string_literal(expression)
         }
+        DefaultExpression::NumericLiteral(expression) if matches!(typ, &Type::FLOAT4) => {
+            // The wire format widens the source's single-precision value to
+            // FLOAT64. Defaults must apply the same source-side rounding.
+            expression
+                .parse::<f32>()
+                .ok()
+                .filter(|value| value.is_finite())
+                .map(|value| format!("{:e}", f64::from(value)))
+        }
+        DefaultExpression::NumericLiteral(expression) if matches!(typ, &Type::NUMERIC) => {
+            // Bare integer literals are parsed as INT64 even for BIGNUMERIC
+            // columns. Cast decimal text to preserve precision and let BigQuery
+            // round excess fractional digits instead of rejecting a literal.
+            Some(format!("cast({} as bignumeric)", quote_string_literal(expression)))
+        }
         DefaultExpression::NumericLiteral(expression) => {
             if is_bigquery_numeric_default_type(typ) {
                 Some(expression.clone())
@@ -341,12 +356,17 @@ mod tests {
             ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, TableId, TableName,
             TableSchema, Type,
         },
+        test_utils::property::run_property,
     };
     use gcp_bigquery_client::storage::{ColumnMode, ColumnType};
+    use proptest::prop_assert_eq;
     use prost::Message;
 
     use super::*;
-    use crate::bigquery::encoding::BigQueryTableRow;
+    use crate::{
+        bigquery::encoding::BigQueryTableRow,
+        default_literals::{default_string_value, postgres_text_default},
+    };
 
     /// Creates a test column schema with common defaults.
     fn test_column(
@@ -521,6 +541,9 @@ mod tests {
             (Type::TEXT, "'don''t'::text", r"'don\'t'"),
             (Type::TEXT, r"'C:\temp\new'::text", r"'C:\\temp\\new'"),
             (Type::TEXT, "'line\nnext'::text", r"'line\nnext'"),
+            (Type::TEXT, "'Hello 👋 😀'::text", r"'Hello \U0001f44b \U0001f600'"),
+            (Type::TEXT, r"'\ud83d\ude00'::text", r"'\\ud83d\\ude00'"),
+            (Type::JSONB, r#"'{"message": "😀"}'::jsonb"#, r#"JSON '{"message": "\U0001f600"}'"#),
             (
                 Type::JSONB,
                 r#"'{"path": "C:\\temp", "note": "it''s"}'::jsonb"#,
@@ -536,6 +559,44 @@ mod tests {
                 "expression: {expression}"
             );
         }
+    }
+
+    #[test]
+    fn default_expression_casts_numeric_text_to_bignumeric() {
+        for expression in [
+            "42",
+            "9223372036854775808",
+            "-9223372036854775809",
+            "12345678901234567890123456789012345678",
+            "0.12345678901234567890123456789012345678",
+            "0.00000000000000000000000000000000000001",
+            "0.123456789012345678901234567890123456789",
+            "-0.123456789012345678901234567890123456789",
+            "0.000000000000000000000000000000000000001",
+        ] {
+            assert_eq!(
+                default_expression_sql(expression, &Type::NUMERIC, -1),
+                Some(format!("cast('{expression}' as bignumeric)"))
+            );
+            assert_eq!(
+                default_expression_sql(&format!("'{expression}'::numeric"), &Type::NUMERIC, -1),
+                Some(format!("cast('{expression}' as bignumeric)"))
+            );
+        }
+    }
+
+    #[test]
+    fn default_expression_preserves_real_rounding_in_float64_columns() {
+        for (expression, expected) in
+            [("0.1", "1.0000000149011612e-1"), ("16777217", "1.6777216e7"), ("-0.0", "-0e0")]
+        {
+            assert_eq!(
+                default_expression_sql(expression, &Type::FLOAT4, -1).as_deref(),
+                Some(expected)
+            );
+        }
+
+        assert_eq!(default_expression_sql("0.1", &Type::FLOAT8, -1).as_deref(), Some("0.1"));
     }
 
     #[test]
@@ -793,5 +854,52 @@ mod tests {
             decode_integers_as(&descriptor.field_descriptors[1].typ, &array_row.encode_to_vec()),
             vec![3_000_000_000, 7]
         );
+    }
+
+    /// Decodes a GoogleSQL single-quoted string literal, or returns `None` when
+    /// GoogleSQL would reject it: an unescaped quote, a raw newline or carriage
+    /// return, or an unknown escape.
+    fn decode_googlesql_string(literal: &str) -> Option<String> {
+        let mut chars = literal.strip_prefix('\'')?.strip_suffix('\'')?.chars();
+        let mut value = String::new();
+        while let Some(ch) = chars.next() {
+            match ch {
+                '\'' | '\n' | '\r' => return None,
+                '\\' => value.push(match chars.next()? {
+                    'a' => '\u{7}',
+                    'b' => '\u{8}',
+                    'f' => '\u{c}',
+                    'n' => '\n',
+                    'r' => '\r',
+                    't' => '\t',
+                    'v' => '\u{b}',
+                    escaped @ ('\\' | '?' | '"' | '\'' | '`') => escaped,
+                    'u' => {
+                        let hex: String = chars.by_ref().take(4).collect();
+                        if hex.len() != 4 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                            return None;
+                        }
+                        char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?
+                    }
+                    _ => return None,
+                }),
+                ch => value.push(ch),
+            }
+        }
+        Some(value)
+    }
+
+    /// Any text default, as Postgres stores it, renders as a GoogleSQL literal
+    /// that decodes back to the same text.
+    #[test]
+    fn string_defaults_roundtrip_through_googlesql() {
+        run_property("bigquery string defaults roundtrip", &default_string_value(), |value| {
+            let rendered = default_expression_sql(&postgres_text_default(value), &Type::TEXT, -1);
+            prop_assert_eq!(
+                rendered.as_deref().and_then(decode_googlesql_string),
+                Some(value.clone())
+            );
+            Ok(())
+        });
     }
 }

@@ -1,4 +1,6 @@
 //! SQL helpers for ETL-owned metadata tables stored in Postgres.
+//!
+//! String identities are authoritative.
 
 pub mod catalog;
 pub mod checkpoint;

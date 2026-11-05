@@ -21,11 +21,11 @@ use tracing_log::{LogTracer, NormalizeEvent, log_tracer::SetLoggerError};
 use tracing_subscriber::{
     EnvFilter,
     fmt::{
-        self as tracing_fmt, FmtContext, FormattedFields, MakeWriter, fmt,
+        self as tracing_fmt, FmtContext, MakeWriter, fmt,
         format::{self, FormatEvent, FormatFields, Writer},
         time::FormatTime,
     },
-    registry::{LookupSpan, SpanRef},
+    registry::LookupSpan,
 };
 
 /// JSON field name for project identification in logs.
@@ -38,7 +38,7 @@ static INIT_TEST_TRACING: Once = Once::new();
 /// Global project reference storage
 static PROJECT_REF: OnceLock<String> = OnceLock::new();
 /// Global pipeline id storage.
-static PIPELINE_ID: OnceLock<u64> = OnceLock::new();
+static PIPELINE_ID: OnceLock<String> = OnceLock::new();
 
 /// Errors that can occur during tracing initialization.
 #[derive(Debug, Error)]
@@ -100,15 +100,15 @@ pub fn get_global_project_ref() -> Option<&'static str> {
 ///
 /// The pipeline id will be injected into all structured log entries as a
 /// top-level field named "pipeline_id" for identification and filtering.
-pub fn set_global_pipeline_id(pipeline_id: u64) {
-    let _ = PIPELINE_ID.set(pipeline_id);
+pub fn set_global_pipeline_id(pipeline_id: &str) {
+    let _ = PIPELINE_ID.set(pipeline_id.to_owned());
 }
 
 /// Returns the current global pipeline id.
 ///
 /// Returns `None` if no pipeline id has been set.
-pub fn get_global_pipeline_id() -> Option<u64> {
-    PIPELINE_ID.get().copied()
+pub fn get_global_pipeline_id() -> Option<&'static str> {
+    PIPELINE_ID.get().map(String::as_str)
 }
 
 /// Event formatter that emits global context directly into JSON log entries.
@@ -131,7 +131,7 @@ where
 {
     fn format_event(
         &self,
-        ctx: &FmtContext<'_, S, N>,
+        _ctx: &FmtContext<'_, S, N>,
         mut writer: Writer<'_>,
         event: &Event<'_>,
     ) -> stdfmt::Result {
@@ -140,10 +140,6 @@ where
 
         let normalized_meta = event.normalized_metadata();
         let meta = normalized_meta.as_ref().unwrap_or_else(|| event.metadata());
-
-        let spans = ctx.event_scope().map(|scope| {
-            scope.from_root().map(|span| span_to_json_value::<S, N>(&span)).collect::<Vec<_>>()
-        });
 
         let mut output = Vec::new();
         let mut serializer = serde_json::Serializer::new(&mut output);
@@ -161,14 +157,6 @@ where
         }
 
         map.serialize_entry("fields", &SerializableEvent(event)).map_err(|_| stdfmt::Error)?;
-
-        if let Some(span) = spans.as_ref().and_then(|spans| spans.last()) {
-            map.serialize_entry("span", span).map_err(|_| stdfmt::Error)?;
-        }
-
-        if let Some(spans) = spans.as_ref() {
-            map.serialize_entry("spans", spans).map_err(|_| stdfmt::Error)?;
-        }
 
         map.end().map_err(|_| stdfmt::Error)?;
 
@@ -189,27 +177,6 @@ impl serde::Serialize for SerializableEvent<'_> {
         self.0.record(&mut visitor);
         visitor.values.serialize(serializer)
     }
-}
-
-/// Converts a span reference into the JSON shape used by the JSON formatter.
-fn span_to_json_value<S, N>(span: &SpanRef<'_, S>) -> serde_json::Value
-where
-    S: tracing::Subscriber + for<'lookup> LookupSpan<'lookup>,
-    N: for<'writer> FormatFields<'writer> + 'static,
-{
-    let mut map = serde_json::Map::new();
-
-    let ext = span.extensions();
-    if let Some(data) = ext.get::<FormattedFields<N>>()
-        && let Ok(serde_json::Value::Object(fields)) =
-            serde_json::from_str::<serde_json::Value>(data)
-    {
-        map.extend(fields);
-    }
-
-    map.insert("name".to_owned(), serde_json::Value::String(span.metadata().name().to_owned()));
-
-    serde_json::Value::Object(map)
 }
 
 /// JSON visitor for event fields.
@@ -299,7 +266,7 @@ pub fn init_tracing_for_environment(
 pub fn init_tracing_with_top_level_fields(
     app_name: &str,
     project_ref: Option<&str>,
-    pipeline_id: Option<u64>,
+    pipeline_id: Option<&str>,
 ) -> Result<LogFlusher, TracingError> {
     // Set a global project reference if provided.
     if let Some(project) = project_ref {
@@ -343,7 +310,6 @@ fn configure_prod_tracing(filter: EnvFilter, app_name: &str) -> Result<LogFlushe
 
     let subscriber = fmt()
         .with_env_filter(filter)
-        .fmt_fields(format::JsonFields::new())
         .event_format(JsonContextFormatter::new(tracing_fmt::time::SystemTime))
         .with_writer(move || file_appender.make_writer())
         .finish();

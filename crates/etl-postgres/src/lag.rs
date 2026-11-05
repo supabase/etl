@@ -4,14 +4,11 @@
 //! outside the publication and padding. They are not payload sizes, row counts,
 //! elapsed time, or estimates of catchup duration.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt::Display};
 
 use sqlx::{FromRow, PgExecutor};
 
-use crate::{
-    schema::TableId,
-    slots::{EtlReplicationSlot, table_sync_like_pattern},
-};
+use crate::{schema::TableId, slots::EtlReplicationSlot};
 
 /// Source positions sampled once for all slots in a pipeline.
 #[derive(Debug, Default, Clone, Copy)]
@@ -167,16 +164,17 @@ fn parse_lsn(value: Option<&str>) -> sqlx::Result<Option<u64>> {
 /// report usable lag. Inactive slots retain their backlog and status.
 pub async fn get_pipeline_lag_metrics<'c, E>(
     executor: E,
-    pipeline_id: u64,
+    pipeline_id: impl Display,
 ) -> sqlx::Result<PipelineLagMetrics>
 where
     E: PgExecutor<'c>,
 {
-    let Ok(apply_prefix) = EtlReplicationSlot::apply_prefix(pipeline_id) else {
+    let pipeline_id = pipeline_id.to_string();
+    let Ok(apply_prefix) = EtlReplicationSlot::apply_prefix(&pipeline_id) else {
         return Ok(PipelineLagMetrics::default());
     };
 
-    let Ok(table_sync_pattern) = table_sync_like_pattern(pipeline_id) else {
+    let Ok(table_sync_prefix) = EtlReplicationSlot::table_sync_prefix(&pipeline_id) else {
         return Ok(PipelineLagMetrics::default());
     };
 
@@ -218,12 +216,15 @@ where
         left join pg_replication_slots as s
           on s.slot_type = 'logical'
          and s.database = current_database()
-         and (s.slot_name = $1 or s.slot_name like $2 escape '\')
+         and (s.slot_name = $1 or (
+             starts_with(s.slot_name::text, $2)
+             and substr(s.slot_name::text, length($2) + 1) ~ '^[0-9]+$'
+         ))
         left join pg_stat_replication as r on s.active_pid = r.pid
         "#,
     )
     .bind(apply_prefix)
-    .bind(table_sync_pattern)
+    .bind(table_sync_prefix)
     .fetch_all(executor)
     .await?;
 

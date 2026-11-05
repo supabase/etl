@@ -5,13 +5,12 @@ use etl::{
     config::BatchConfig,
     data::{Cell, OldTableRow, PgNumeric, TableRow, UpdatedTableRow},
     event::{Event, EventType},
-    pipeline::PipelineId,
     store::StateStore,
     test_utils::{
         database::{spawn_source_database, test_table_name},
         event::EventCondition,
         notifying_store::NotifyingStore,
-        pipeline::{create_pipeline, create_pipeline_with_batch_config},
+        pipeline::{create_pipeline, create_pipeline_with_batch_config, random_pipeline_id},
         test_destination_wrapper::TestDestinationWrapper,
         test_schema::{TableSelection, insert_mock_data, setup_test_database_schema},
     },
@@ -20,12 +19,14 @@ use etl_config::shared::{
     BigQueryPartitionBy, BigQueryTableOptions, BigQueryTableOptionsConfig,
     BigQueryTimePartitionGranularity,
 };
-use etl_destinations::bigquery::test_utils::{
-    setup_bigquery_database, skip_if_missing_bigquery_env_vars,
+use etl_destinations::bigquery::{
+    BigQueryClient,
+    test_utils::{parse_table_cell, setup_bigquery_database, skip_if_missing_bigquery_env_vars},
 };
 use etl_postgres::{below_version, tokio::test_utils::TableModification, version::POSTGRES_15};
 use etl_telemetry::tracing::init_test_tracing;
-use rand::{Rng, distr::Alphanumeric, random};
+use gcp_bigquery_client::model::query_request::QueryRequest;
+use rand::{Rng, distr::Alphanumeric};
 
 use crate::support::{
     bigquery::{
@@ -112,7 +113,7 @@ async fn pipeline_creates_partitioned_and_clustered_tables_without_reconfiguring
 
     let bigquery_database = setup_bigquery_database().await;
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let initial_options = pipeline_table_options(
         users_schema.id,
         Some(BigQueryPartitionBy::IntegerRange {
@@ -124,12 +125,16 @@ async fn pipeline_creates_partitioned_and_clustered_tables_without_reconfiguring
         &["name", "id"],
     );
     let raw_destination = bigquery_database
-        .build_destination_with_table_options(pipeline_id, store.clone(), initial_options)
+        .build_destination_with_table_options(
+            pipeline_id.as_str().into(),
+            store.clone(),
+            initial_options,
+        )
         .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination,
@@ -168,7 +173,11 @@ async fn pipeline_creates_partitioned_and_clustered_tables_without_reconfiguring
         &["age"],
     );
     let raw_destination = bigquery_database
-        .build_destination_with_table_options(pipeline_id, store.clone(), changed_options)
+        .build_destination_with_table_options(
+            pipeline_id.as_str().into(),
+            store.clone(),
+            changed_options,
+        )
         .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
     let events = destination
@@ -176,7 +185,7 @@ async fn pipeline_creates_partitioned_and_clustered_tables_without_reconfiguring
         .await;
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination,
@@ -230,14 +239,15 @@ async fn table_copy_and_streaming_with_restart() {
     .await;
 
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let pipeline_id = random_pipeline_id();
+    let raw_destination =
+        bigquery_database.build_destination(pipeline_id.as_str().into(), store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch.
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -276,14 +286,15 @@ async fn table_copy_and_streaming_with_restart() {
     // Rebuild the destination for the restart so the test exercises
     // state/schema recovery instead of relying on a reused, previously
     // shut-down wrapper.
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let raw_destination =
+        bigquery_database.build_destination(pipeline_id.as_str().into(), store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // We restart the pipeline and check that we can process events since we
     // have loaded the table schema from persisted state.
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -356,7 +367,7 @@ async fn table_copy_reset_drops_destination_table_before_recopy() {
     let users_schema = database_schema.users_schema();
     let orders_schema = database_schema.orders_schema();
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
 
     database
         .insert_values(users_schema.name.clone(), &["name", "age"], &[&"before_1", &1])
@@ -371,12 +382,13 @@ async fn table_copy_reset_drops_destination_table_before_recopy() {
         .await
         .unwrap();
 
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let raw_destination =
+        bigquery_database.build_destination(pipeline_id.as_str().into(), store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -418,12 +430,13 @@ async fn table_copy_reset_drops_destination_table_before_recopy() {
         .await
         .unwrap();
 
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let raw_destination =
+        bigquery_database.build_destination(pipeline_id.as_str().into(), store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -481,14 +494,15 @@ async fn table_insert_update_delete() {
     let bigquery_database = setup_bigquery_database().await;
 
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let pipeline_id = random_pipeline_id();
+    let raw_destination =
+        bigquery_database.build_destination(pipeline_id.as_str().into(), store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch.
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -595,14 +609,15 @@ async fn table_subsequent_updates() {
     let bigquery_database = setup_bigquery_database().await;
 
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let pipeline_id = random_pipeline_id();
+    let raw_destination =
+        bigquery_database.build_destination(pipeline_id.as_str().into(), store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch.
     let mut pipeline = create_pipeline(
         &database_1.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -691,13 +706,14 @@ async fn table_primary_key_update_rewrites_row() {
     let bigquery_database = setup_bigquery_database().await;
 
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let pipeline_id = random_pipeline_id();
+    let raw_destination =
+        bigquery_database.build_destination(pipeline_id.as_str().into(), store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -805,8 +821,9 @@ async fn table_full_replica_identity_update_preserves_unchanged_toasted_columns(
         .unwrap();
 
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let pipeline_id = random_pipeline_id();
+    let raw_destination =
+        bigquery_database.build_destination(pipeline_id.as_str().into(), store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub_full_replica_identity".to_owned();
@@ -817,7 +834,7 @@ async fn table_full_replica_identity_update_preserves_unchanged_toasted_columns(
 
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name,
         store.clone(),
         destination.clone(),
@@ -907,7 +924,7 @@ async fn table_truncate_with_batching() {
     bigquery_database.create_table("test_users_1", &[("age", "integer")]).await;
 
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let table_options = pipeline_table_options(
         database_schema.users_schema().id,
         Some(BigQueryPartitionBy::IntegerRange {
@@ -919,14 +936,18 @@ async fn table_truncate_with_batching() {
         &[],
     );
     let raw_destination = bigquery_database
-        .build_destination_with_table_options(pipeline_id, store.clone(), table_options)
+        .build_destination_with_table_options(
+            pipeline_id.as_str().into(),
+            store.clone(),
+            table_options,
+        )
         .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch.
     let mut pipeline = create_pipeline_with_batch_config(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -1051,8 +1072,9 @@ async fn table_nullable_scalar_columns() {
         .unwrap();
 
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let pipeline_id = random_pipeline_id();
+    let raw_destination =
+        bigquery_database.build_destination(pipeline_id.as_str().into(), store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub".to_owned();
@@ -1063,7 +1085,7 @@ async fn table_nullable_scalar_columns() {
 
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name,
         store.clone(),
         destination.clone(),
@@ -1252,8 +1274,9 @@ async fn table_non_nullable_scalar_columns() {
         .unwrap();
 
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let pipeline_id = random_pipeline_id();
+    let raw_destination =
+        bigquery_database.build_destination(pipeline_id.as_str().into(), store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub_non_null".to_owned();
@@ -1264,7 +1287,7 @@ async fn table_non_nullable_scalar_columns() {
 
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name,
         store.clone(),
         destination.clone(),
@@ -1494,8 +1517,9 @@ async fn table_non_nullable_array_columns() {
         .unwrap();
 
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let pipeline_id = random_pipeline_id();
+    let raw_destination =
+        bigquery_database.build_destination(pipeline_id.as_str().into(), store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub_non_null_array".to_owned();
@@ -1506,7 +1530,7 @@ async fn table_non_nullable_array_columns() {
 
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name,
         store.clone(),
         destination.clone(),
@@ -1730,6 +1754,211 @@ async fn table_non_nullable_array_columns() {
     pipeline.shutdown_and_wait().await.unwrap();
 }
 
+/// Literal defaults preserve source values during copy, CDC, and default DDL.
+#[tokio::test(flavor = "multi_thread")]
+async fn literal_defaults_preserve_unicode_and_numeric_values() {
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+
+    init_test_tracing();
+    install_crypto_provider();
+
+    let database = spawn_source_database().await;
+    let bigquery_database = setup_bigquery_database().await;
+    let table_name = test_table_name("literal_defaults");
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            true,
+            &[
+                ("message_template", "text default 'Hello 😀 ''quoted'' \\path'"),
+                ("payload", r#"jsonb default '{"message": "😀"}'::jsonb"#),
+                ("amount", "numeric default 12345678901234567890123456789012345678"),
+                ("ratio", "real default 0.1"),
+            ],
+        )
+        .await
+        .unwrap();
+    let publication_name = "test_pub_bq_literal_defaults";
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
+    for statement in [
+        format!("insert into {} default values", table_name.as_quoted_identifier()),
+        format!(
+            "insert into {} (message_template) values (null)",
+            table_name.as_quoted_identifier()
+        ),
+    ] {
+        database.run_sql(&statement).await.unwrap();
+    }
+
+    let store = NotifyingStore::new();
+    let pipeline_id = random_pipeline_id();
+    let raw_destination =
+        bigquery_database.build_destination(pipeline_id.as_str().into(), store.clone()).await;
+    let destination = TestDestinationWrapper::wrap(raw_destination);
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id.as_str(),
+        publication_name.to_owned(),
+        store.clone(),
+        destination.clone(),
+    );
+    let copy_complete = store.notify_on_table_sync_complete(table_id).await;
+
+    pipeline.start().await.unwrap();
+
+    copy_complete.notified().await;
+
+    let streamed = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 2)])
+        .await;
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[
+                TableModification::AlterColumn {
+                    name: "message_template",
+                    alteration: "set default 'Updated 🐘'",
+                },
+                TableModification::AlterColumn {
+                    name: "amount",
+                    alteration: "set default 0.123456789012345678901234567890123456789",
+                },
+                TableModification::AddColumn {
+                    name: "added_message",
+                    data_type: "text default 'Added 👋'",
+                },
+            ],
+        )
+        .await
+        .unwrap();
+    // Keep row values representable to isolate higher-scale default DDL from
+    // the Storage Write API's separate numeric value handling.
+    for statement in [
+        format!(
+            "insert into {} (amount) values (0.12345678901234567890123456789012345679)",
+            table_name.as_quoted_identifier()
+        ),
+        format!(
+            "insert into {} (message_template, amount) values (null, \
+             0.12345678901234567890123456789012345679)",
+            table_name.as_quoted_identifier()
+        ),
+    ] {
+        database.run_sql(&statement).await.unwrap();
+    }
+
+    streamed.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let mut rows = bigquery_database
+        .query_table(table_name)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| {
+            let columns = row.columns.unwrap();
+            (
+                parse_table_cell::<i32>(columns[0].clone()).unwrap(),
+                parse_table_cell::<String>(columns[1].clone()),
+                serde_json::from_str::<serde_json::Value>(
+                    &parse_table_cell::<String>(columns[2].clone()).unwrap(),
+                )
+                .unwrap(),
+                PgNumeric::from_str(&parse_table_cell::<String>(columns[3].clone()).unwrap())
+                    .unwrap(),
+                parse_table_cell::<f64>(columns[4].clone()).unwrap(),
+                parse_table_cell::<String>(columns[5].clone()),
+            )
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|row| row.0);
+    assert_eq!(
+        rows,
+        vec![
+            (
+                1,
+                Some("Hello 😀 'quoted' \\path".to_owned()),
+                serde_json::json!({"message": "😀"}),
+                PgNumeric::from_str("12345678901234567890123456789012345678").unwrap(),
+                f64::from(0.1_f32),
+                None,
+            ),
+            (
+                2,
+                None,
+                serde_json::json!({"message": "😀"}),
+                PgNumeric::from_str("12345678901234567890123456789012345678").unwrap(),
+                f64::from(0.1_f32),
+                None,
+            ),
+            (
+                3,
+                Some("Updated 🐘".to_owned()),
+                serde_json::json!({"message": "😀"}),
+                PgNumeric::from_str("0.12345678901234567890123456789012345679").unwrap(),
+                f64::from(0.1_f32),
+                Some("Added 👋".to_owned()),
+            ),
+            (
+                4,
+                None,
+                serde_json::json!({"message": "😀"}),
+                PgNumeric::from_str("0.12345678901234567890123456789012345679").unwrap(),
+                f64::from(0.1_f32),
+                Some("Added 👋".to_owned()),
+            ),
+        ]
+    );
+
+    // Evaluate the stored defaults independently of the source-evaluated row
+    // values so successful replication cannot hide divergent metadata.
+    let metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    let defaults = bigquery_database.query_column_defaults_by_id(metadata.table_id()).await;
+    let expressions = defaults
+        .iter()
+        .filter_map(|column| {
+            column
+                .column_default
+                .as_ref()
+                .map(|expression| format!("{expression} as `{}`", column.column_name))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(expressions.len(), 5);
+    let client = BigQueryClient::new_with_key_path(
+        bigquery_database.project_id().to_owned(),
+        bigquery_database.sa_key_path(),
+        1,
+    )
+    .await
+    .unwrap();
+    let mut defaults = client
+        .query(QueryRequest::new(format!("select {}", expressions.join(", "))))
+        .await
+        .unwrap();
+    assert!(defaults.next_row());
+    assert_eq!(
+        defaults.get_string_by_name("message_template").unwrap().as_deref(),
+        Some("Updated 🐘")
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(
+            &defaults.get_string_by_name("payload").unwrap().unwrap()
+        )
+        .unwrap(),
+        serde_json::json!({"message": "😀"})
+    );
+    assert_eq!(
+        defaults.get_string_by_name("amount").unwrap().as_deref(),
+        Some("0.12345678901234567890123456789012345679")
+    );
+    assert_eq!(defaults.get_f64_by_name("ratio").unwrap(), Some(f64::from(0.1_f32)));
+    assert_eq!(defaults.get_string_by_name("added_message").unwrap().as_deref(), Some("Added 👋"));
+    assert!(!defaults.next_row());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn schema_change_add_column_defaults() {
     if skip_if_missing_bigquery_env_vars() {
@@ -1761,12 +1990,13 @@ async fn schema_change_add_column_defaults() {
         .unwrap();
 
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let pipeline_id = random_pipeline_id();
+    let raw_destination =
+        bigquery_database.build_destination(pipeline_id.as_str().into(), store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name,
         store.clone(),
         destination.clone(),
@@ -1910,12 +2140,13 @@ async fn publication_mask_adds_nullable_columns_with_future_only_defaults() {
         .unwrap();
 
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let pipeline_id = random_pipeline_id();
+    let raw_destination =
+        bigquery_database.build_destination(pipeline_id.as_str().into(), store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name.to_owned(),
         store.clone(),
         destination.clone(),
@@ -2032,12 +2263,13 @@ async fn schema_change_tolerates_nullability_and_default_divergence() {
         .unwrap();
 
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let pipeline_id = random_pipeline_id();
+    let raw_destination =
+        bigquery_database.build_destination(pipeline_id.as_str().into(), store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name,
         store.clone(),
         destination.clone(),
@@ -2206,8 +2438,9 @@ async fn schema_change_applies_rename_cycle_and_same_name_replacement() {
         .unwrap();
 
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let pipeline_id = random_pipeline_id();
+    let raw_destination =
+        bigquery_database.build_destination(pipeline_id.as_str().into(), store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub_multi_ops".to_owned();
@@ -2218,7 +2451,7 @@ async fn schema_change_applies_rename_cycle_and_same_name_replacement() {
 
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name,
         store.clone(),
         destination.clone(),

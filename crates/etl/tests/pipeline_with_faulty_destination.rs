@@ -4,7 +4,6 @@ use etl::{
     data::Cell,
     error::ErrorKind,
     event::{Event, EventType},
-    pipeline::PipelineId,
     schema::TableId,
     store::{StateStore, TableRetryPolicy, TableState, TableStateType},
     test_utils::{
@@ -17,7 +16,7 @@ use etl::{
         memory_destination::MemoryDestination,
         notify::DEFAULT_NOTIFY_TIMEOUT,
         notifying_store::NotifyingStore,
-        pipeline::{PipelineBuilder, create_pipeline},
+        pipeline::{PipelineBuilder, create_pipeline, random_pipeline_id},
         property::{block_on, run_expensive_property},
         test_destination_wrapper::TestDestinationWrapper,
         test_schema::{TableSelection, insert_users_data, setup_test_database_schema},
@@ -26,7 +25,6 @@ use etl::{
 use etl_postgres::{slots::EtlReplicationSlot, tokio::test_utils::PgDatabase};
 use etl_telemetry::tracing::init_test_tracing;
 use proptest::prelude::*;
-use rand::random;
 use tokio_postgres::{Client, types::PgLsn};
 
 use crate::support::cdc_workload::{
@@ -196,12 +194,12 @@ async fn run_walsender_roulette_case(
 
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let apply_slot_name: String =
-        EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
+        EtlReplicationSlot::for_apply_worker(&pipeline_id).try_into().unwrap();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         WORKLOAD_PUBLICATION.to_owned(),
         store.clone(),
         destination.clone(),
@@ -268,10 +266,10 @@ async fn destination_shutdown_error_is_returned_by_shutdown_and_wait() {
         )
         .await;
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -305,12 +303,12 @@ async fn apply_retry_reselects_relation_snapshots_after_ambiguous_write() {
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let apply_slot_name: String =
-        EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
+        EtlReplicationSlot::for_apply_worker(&pipeline_id).try_into().unwrap();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -443,10 +441,10 @@ async fn drop_table_for_copy_rejection_keeps_table_restartable_until_retry() {
     let memory_destination = MemoryDestination::new(store.clone());
     let destination = TestDestinationWrapper::wrap(memory_destination.clone());
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -523,10 +521,10 @@ async fn drop_table_for_copy_failure_after_write_keeps_table_restartable_until_r
     let memory_destination = MemoryDestination::new(store.clone());
     let destination = TestDestinationWrapper::wrap(memory_destination.clone());
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -603,10 +601,10 @@ async fn shutdown_drains_pending_write_events_before_destination_shutdown() {
     let memory_destination = MemoryDestination::new(store.clone());
     let destination = TestDestinationWrapper::wrap(memory_destination.clone());
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -659,10 +657,10 @@ async fn shutdown_without_drain_abandons_pending_write_events() {
     let memory_destination = MemoryDestination::new(store.clone());
     let destination = TestDestinationWrapper::wrap(memory_destination.clone());
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = PipelineBuilder::new(
         database.config.clone(),
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -690,7 +688,7 @@ async fn shutdown_without_drain_abandons_pending_write_events() {
     // The apply loop reports its last received LSN as written, so this proves
     // the second row is buffered behind the held write before shutdown.
     let apply_slot_name: String =
-        EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
+        EtlReplicationSlot::for_apply_worker(&pipeline_id).try_into().unwrap();
     tokio::time::timeout(DEFAULT_NOTIFY_TIMEOUT, async {
         loop {
             let write_lsn: Option<PgLsn> = client
@@ -754,12 +752,12 @@ async fn apply_disconnect_with_write_released_before_reconnect_recovers_without_
     let memory_destination = MemoryDestination::new(store.clone());
     let destination = TestDestinationWrapper::wrap(memory_destination.clone());
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let apply_slot_name: String =
-        EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
+        EtlReplicationSlot::for_apply_worker(&pipeline_id).try_into().unwrap();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -849,10 +847,10 @@ async fn shutdown_deadline_abandons_pending_write_without_checkpointing() {
     let table_id = schema.users_schema().id;
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = PipelineBuilder::new(
         database.config.clone(),
-        pipeline_id,
+        pipeline_id.as_str(),
         schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -882,7 +880,7 @@ async fn shutdown_deadline_abandons_pending_write_without_checkpointing() {
     shutdown.await.unwrap().unwrap();
     reached_teardown.unwrap();
     assert!(started.elapsed() >= Duration::from_millis(200));
-    let slot: String = EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
+    let slot: String = EtlReplicationSlot::for_apply_worker(&pipeline_id).try_into().unwrap();
     let (confirmed, _) = replication_slot_state(client, &slot).await;
     assert!(confirmed < insert_lsn, "abandoned writes must replay on restart");
 }

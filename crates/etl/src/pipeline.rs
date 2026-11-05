@@ -37,13 +37,10 @@ use crate::{
     task::abort_and_join,
 };
 
-/// Unique identifier for an ETL pipeline instance.
-///
-/// [`PipelineId`] provides a simple numeric identifier to distinguish between
-/// multiple pipeline instances running concurrently. This ID is used for
-/// logging, monitoring, and coordinating shutdown operations across pipeline
-/// components.
-pub type PipelineId = u64;
+mod identity;
+
+pub use etl_postgres::slots::{PipelineIdError, validate_pipeline_id};
+pub use identity::PipelineId;
 
 /// Task ownership transferred together so a failed or cancelled wait drops
 /// every remaining pipeline-owned handle.
@@ -97,6 +94,7 @@ enum PipelineState {
 /// cleanup before returning.
 #[derive(Debug)]
 pub struct Pipeline<S, D> {
+    pipeline_id: PipelineId,
     config: Arc<PipelineConfig>,
     store: S,
     destination: D,
@@ -127,6 +125,7 @@ where
         register_metrics();
 
         Self {
+            pipeline_id: PipelineId::from(&config.id),
             config: Arc::new(config),
             store,
             destination,
@@ -138,7 +137,7 @@ where
 
     /// Returns the unique identifier for this pipeline.
     pub fn id(&self) -> PipelineId {
-        self.config.id
+        self.pipeline_id.clone()
     }
 
     /// Starts the pipeline and begins replication processing.
@@ -147,15 +146,20 @@ where
     /// store cache, creates the table synchronization worker pool, and starts
     /// the apply worker for processing replication stream events.
     ///
-    /// Invalid copy concurrency, an unsupported retry delay, a zero monitor
-    /// interval, invalid slot options, or a blank trust bundle with source TLS
-    /// enabled returns [`ErrorKind::ConfigError`] before any startup work.
+    /// An invalid pipeline ID, invalid copy concurrency, an unsupported retry
+    /// delay, a zero monitor interval, invalid slot options, or a blank trust
+    /// bundle with source TLS enabled returns [`ErrorKind::ConfigError`]
+    /// before any startup work.
     /// After this method succeeds, subsequent calls return
     /// [`ErrorKind::InvalidState`] without performing any startup work.
     pub async fn start(&mut self) -> EtlResult<()> {
         if !matches!(&self.state, PipelineState::NotStarted) {
             bail!(ErrorKind::InvalidState, "Pipeline has already been started");
         }
+
+        validate_pipeline_id(self.pipeline_id.as_str()).map_err(
+            |err| etl_error!(ErrorKind::ConfigError, "Invalid pipeline ID", source: err),
+        )?;
 
         validate_copy_concurrency(
             self.config.max_table_sync_workers,
@@ -185,7 +189,7 @@ where
 
         info!(
             publication_name = %self.config.publication_name,
-            pipeline_id = %self.config.id,
+            pipeline_id = %self.pipeline_id,
             "starting pipeline"
         );
 
@@ -229,7 +233,7 @@ where
         // Share one lazy source SQL pool and one sampler across all copy and
         // CDC workers without using their replication connections.
         let replication_lag_monitor = ReplicationLagMonitor::new(
-            self.config.id,
+            self.pipeline_id.clone(),
             &self.config.pg_connection,
             Duration::from_millis(self.config.replication_lag_refresh_interval_ms),
         );
@@ -245,12 +249,12 @@ where
             self.config.memory_refresh_interval_ms,
         );
 
-        let durability_monitor = DurabilityMonitor::new(self.config.id);
+        let durability_monitor = DurabilityMonitor::new(self.pipeline_id.clone());
         let durability_metrics_task = durability_monitor.spawn_durability_metrics_task();
 
         // We create and start the apply worker.
         let apply_worker = ApplyWorker::new(
-            self.config.id,
+            self.pipeline_id.clone(),
             Arc::clone(&self.config),
             Arc::clone(&pool),
             self.store.clone(),
@@ -501,7 +505,7 @@ where
 
                 // We try to delete the replication slot.
                 let slot_name: String =
-                    EtlReplicationSlot::for_table_sync_worker(self.config.id, table_id)
+                    EtlReplicationSlot::for_table_sync_worker(&self.pipeline_id, table_id)
                         .try_into()?;
                 replication_client.delete_slot_if_exists(&slot_name).await?;
 
@@ -536,7 +540,7 @@ mod tests {
         let store = NotifyingStore::new();
         let pipeline = PipelineBuilder::new(
             config,
-            1,
+            "1",
             "test".to_owned(),
             store.clone(),
             MemoryDestination::new(store),

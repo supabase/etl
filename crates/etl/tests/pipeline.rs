@@ -26,7 +26,8 @@ use etl::{
         notifying_store::NotifyingStore,
         pipeline::{
             PipelineBuilder, create_pipeline, create_pipeline_with_batch_config,
-            create_pipeline_with_table_sync_copy_config, wait_for_pipeline_error,
+            create_pipeline_with_table_sync_copy_config, random_pipeline_id,
+            wait_for_pipeline_error,
         },
         schema::assert_table_schema_columns,
         test_destination_wrapper::TestDestinationWrapper,
@@ -363,7 +364,7 @@ async fn pipeline_rejects_second_start_before_destination_startup() {
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id: PipelineId = "03dg2o5teb2eucxr9ggh3uie6".parse().unwrap();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -406,7 +407,7 @@ async fn pipeline_preserves_shutdown_requested_before_start() {
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
     let mut pipeline = create_pipeline(
         &database.config,
-        random(),
+        random_pipeline_id(),
         database_schema.publication_name(),
         store,
         destination.clone(),
@@ -428,9 +429,9 @@ async fn shutdown_interrupts_worker_slot_creation() {
         let schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
         let observer = PgDatabase::try_connect(database.config.clone()).await.unwrap();
         let client = observer.client.as_ref().unwrap();
-        let pipeline_id = random();
+        let pipeline_id = random_pipeline_id();
         let apply_slot: String =
-            EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
+            EtlReplicationSlot::for_apply_worker(&pipeline_id).try_into().unwrap();
         if existing_apply_slot {
             client
                 .query(
@@ -441,7 +442,7 @@ async fn shutdown_interrupts_worker_slot_creation() {
                 .unwrap();
         }
         let waiting_slot: String = if existing_apply_slot {
-            EtlReplicationSlot::for_table_sync_worker(pipeline_id, schema.users_schema().id)
+            EtlReplicationSlot::for_table_sync_worker(&pipeline_id, schema.users_schema().id)
                 .try_into()
                 .unwrap()
         } else {
@@ -451,7 +452,7 @@ async fn shutdown_interrupts_worker_slot_creation() {
         let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
         let mut pipeline = create_pipeline(
             &database.config,
-            pipeline_id,
+            pipeline_id.as_str(),
             schema.publication_name(),
             store.clone(),
             destination.clone(),
@@ -490,7 +491,7 @@ async fn shutdown_interrupts_worker_slot_creation() {
 
         let mut pipeline = create_pipeline(
             &database.config,
-            pipeline_id,
+            pipeline_id.as_str(),
             schema.publication_name(),
             store.clone(),
             destination.clone(),
@@ -520,7 +521,7 @@ async fn cancelled_startup_shuts_down_destination() {
         .await;
     let mut pipeline = create_pipeline(
         &database.config,
-        random(),
+        random_pipeline_id(),
         schema.publication_name(),
         store,
         destination.clone(),
@@ -550,10 +551,10 @@ async fn pipeline_shutdown_calls_destination_shutdown() {
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -585,7 +586,7 @@ async fn pipeline_shutdown_while_waiting_propagates_destination_error() {
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
     let mut pipeline = create_pipeline(
         &database.config,
-        random(),
+        random_pipeline_id(),
         schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -621,7 +622,7 @@ async fn pipeline_failure_returns_without_destination_teardown() {
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
     let mut pipeline = create_pipeline(
         &database.config,
-        random(),
+        random_pipeline_id(),
         schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -671,10 +672,10 @@ async fn table_copy_errors_when_async_result_is_dropped() {
         StallMode::DropResult,
     );
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination,
@@ -713,10 +714,10 @@ async fn table_copy_shutdown_interrupts_pending_result_wait() {
         StallMode::HoldResult,
     );
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -746,10 +747,10 @@ async fn drop_table_for_copy_errors_when_async_result_is_dropped() {
     let store = NotifyingStore::new();
     let immediate_destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         immediate_destination.clone(),
@@ -772,7 +773,7 @@ async fn drop_table_for_copy_errors_when_async_result_is_dropped() {
     );
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination,
@@ -807,10 +808,10 @@ async fn drop_table_for_copy_shutdown_interrupts_pending_result_wait() {
     let store = NotifyingStore::new();
     let immediate_destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         immediate_destination.clone(),
@@ -831,7 +832,7 @@ async fn drop_table_for_copy_shutdown_interrupts_pending_result_wait() {
     );
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -871,10 +872,10 @@ async fn reset_during_active_copy_is_overwritten_by_active_worker() {
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
     let held_write = destination.hold_next(FaultyOp::WriteTableRows).await;
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -924,12 +925,12 @@ async fn exclusive_table_copy_fails_when_slot_invalidated() {
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
     let held_write = destination.hold_next(FaultyOp::WriteTableRows).await;
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let slot_name: String =
-        EtlReplicationSlot::for_table_sync_worker(pipeline_id, table_id).try_into().unwrap();
+        EtlReplicationSlot::for_table_sync_worker(&pipeline_id, table_id).try_into().unwrap();
     let mut pipeline = PipelineBuilder::new(
         database.config.clone(),
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination,
@@ -971,14 +972,14 @@ async fn pipeline_recreates_missing_apply_slot_with_mixed_table_states() {
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
 
     let apply_slot_name: String =
-        EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
+        EtlReplicationSlot::for_apply_worker(&pipeline_id).try_into().unwrap();
 
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -1080,7 +1081,7 @@ async fn pipeline_recreates_missing_apply_slot_with_mixed_table_states() {
     // from the new slot, and the Errored table should remain stopped.
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -1153,15 +1154,15 @@ async fn exclusive_pipeline_fails_when_slot_invalidated_with_error_behavior() {
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
 
     let apply_slot_name: String =
-        EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
+        EtlReplicationSlot::for_apply_worker(&pipeline_id).try_into().unwrap();
 
     // Create pipeline with default Error behavior for invalidated slots.
     let mut pipeline = PipelineBuilder::new(
         database.config.clone(),
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -1189,7 +1190,7 @@ async fn exclusive_pipeline_fails_when_slot_invalidated_with_error_behavior() {
     // error behavior is configured.
     let mut pipeline = PipelineBuilder::new(
         database.config.clone(),
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -1219,15 +1220,15 @@ async fn exclusive_pipeline_recovers_when_slot_invalidated_with_recreate_behavio
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
 
     let apply_slot_name: String =
-        EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
+        EtlReplicationSlot::for_apply_worker(&pipeline_id).try_into().unwrap();
 
     // Create pipeline with Recreate behavior for invalidated slots.
     let mut pipeline = PipelineBuilder::new(
         database.config.clone(),
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -1266,7 +1267,7 @@ async fn exclusive_pipeline_recovers_when_slot_invalidated_with_recreate_behavio
     // recreate it, and reset all table states to Init.
     let mut pipeline = PipelineBuilder::new(
         database.config.clone(),
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -1327,10 +1328,10 @@ async fn table_copy_replicates_many_rows_with_parallel_connections() {
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     // Create a pipeline with many parallel copy connections.
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = PipelineBuilder::new(
         database.config.clone(),
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name,
         store.clone(),
         destination.clone(),
@@ -1375,10 +1376,10 @@ async fn table_copy_waits_for_durable_terminal_barrier_after_accepted_write() {
     let immediate_destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
     let destination = DeferredCopyDestination::wrap(immediate_destination);
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = PipelineBuilder::new(
         database.config.clone(),
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -1462,10 +1463,10 @@ async fn table_copy_with_row_filter_and_parallel_connections() {
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     // Create a pipeline with parallel copy connections.
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = PipelineBuilder::new(
         database.config.clone(),
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name,
         store.clone(),
         destination.clone(),
@@ -1503,10 +1504,10 @@ async fn table_schema_copy_survives_pipeline_restarts() {
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     // We start the pipeline from scratch.
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -1542,7 +1543,7 @@ async fn table_schema_copy_survives_pipeline_restarts() {
     // same state and destination.
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -1618,7 +1619,7 @@ async fn publication_row_filter_changes_apply_without_restart() {
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
     let mut pipeline = create_pipeline(
         &database.config,
-        random(),
+        random_pipeline_id(),
         "filtered_pub".to_owned(),
         store.clone(),
         destination.clone(),
@@ -1706,10 +1707,10 @@ async fn publication_changes_are_correctly_handled() {
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name.to_owned(),
         store.clone(),
         destination.clone(),
@@ -1768,7 +1769,7 @@ async fn publication_changes_are_correctly_handled() {
     // Restart pipeline; it should detect table_2 is gone and purge its state
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name.to_owned(),
         store.clone(),
         destination.clone(),
@@ -1808,7 +1809,7 @@ async fn publication_changes_are_correctly_handled() {
 
     // Assert that the table sync slot for table_2 is also deleted.
     let table_2_slot_name: String =
-        EtlReplicationSlot::for_table_sync_worker(pipeline_id, table_2_id).try_into().unwrap();
+        EtlReplicationSlot::for_table_sync_worker(&pipeline_id, table_2_id).try_into().unwrap();
     let slot_state = database.get_replication_slot_state(&table_2_slot_name).await.unwrap();
     assert_eq!(slot_state, None);
 
@@ -1831,13 +1832,13 @@ async fn streaming_reconnect_does_not_replay_already_flushed_events() {
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let apply_slot_name: String =
-        EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
+        EtlReplicationSlot::for_apply_worker(&pipeline_id).try_into().unwrap();
 
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -1961,10 +1962,10 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name.to_owned(),
         store.clone(),
         destination.clone(),
@@ -2018,7 +2019,7 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
     // We restart the pipeline and verify that the new table is now processed.
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name.to_owned(),
         store.clone(),
         destination.clone(),
@@ -2084,11 +2085,11 @@ async fn run_table_sync_copy_case<F>(
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let table_sync_copy = table_sync_copy_fn(users_table_id, orders_table_id);
     let mut pipeline = create_pipeline_with_table_sync_copy_config(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -2197,10 +2198,10 @@ async fn table_copy_replicates_existing_data() {
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     // Start pipeline from scratch.
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -2234,11 +2235,11 @@ async fn table_copy_replicates_existing_data() {
 
     // Check that the replication slots for the two tables have been removed.
     let users_replication_slot: String =
-        EtlReplicationSlot::for_table_sync_worker(pipeline_id, database_schema.users_schema().id)
+        EtlReplicationSlot::for_table_sync_worker(&pipeline_id, database_schema.users_schema().id)
             .try_into()
             .unwrap();
     let orders_replication_slot: String =
-        EtlReplicationSlot::for_table_sync_worker(pipeline_id, database_schema.orders_schema().id)
+        EtlReplicationSlot::for_table_sync_worker(&pipeline_id, database_schema.orders_schema().id)
             .try_into()
             .unwrap();
     assert_eq!(database.get_replication_slot_state(&users_replication_slot).await.unwrap(), None);
@@ -2266,10 +2267,10 @@ async fn table_copy_and_sync_streams_new_data() {
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     // Start pipeline from scratch.
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -2368,11 +2369,11 @@ async fn table_copy_and_sync_streams_new_data() {
 
     // Check that the replication slots for the two tables have been removed.
     let users_replication_slot: String =
-        EtlReplicationSlot::for_table_sync_worker(pipeline_id, database_schema.users_schema().id)
+        EtlReplicationSlot::for_table_sync_worker(&pipeline_id, database_schema.users_schema().id)
             .try_into()
             .unwrap();
     let orders_replication_slot: String =
-        EtlReplicationSlot::for_table_sync_worker(pipeline_id, database_schema.orders_schema().id)
+        EtlReplicationSlot::for_table_sync_worker(&pipeline_id, database_schema.orders_schema().id)
             .try_into()
             .unwrap();
     assert_eq!(database.get_replication_slot_state(&users_replication_slot).await.unwrap(), None);
@@ -2389,7 +2390,7 @@ async fn table_sync_streams_new_data_with_batch_timeout_expired() {
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     // Start pipeline from scratch.
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     // We set a batch of 1000 elements to check if after 1000ms we still get the
     // batch which is < 1000 elements.
     let batch_config = BatchConfig {
@@ -2399,7 +2400,7 @@ async fn table_sync_streams_new_data_with_batch_timeout_expired() {
     };
     let mut pipeline = create_pipeline_with_batch_config(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -2458,10 +2459,10 @@ async fn table_sync_no_event_handover_waits_for_first_dml_before_ready() {
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -2537,10 +2538,10 @@ async fn publication_column_filter_changes_update_snapshots_without_shifting_dml
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name.clone(),
         state_store.clone(),
         destination.clone(),
@@ -2742,10 +2743,10 @@ async fn empty_tables_are_created_at_destination() {
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
     // Start the pipeline.
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name,
         state_store.clone(),
         destination.clone(),
@@ -2819,10 +2820,10 @@ async fn table_sync_drops_destination_table_after_state_reset() {
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -2978,10 +2979,10 @@ async fn pipeline_processes_concurrent_inserts_during_startup() {
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -3208,13 +3209,36 @@ async fn pipeline_processes_concurrent_inserts_during_startup() {
     assert_eq!(orders_deletes, rows_to_delete);
 }
 
+/// Unsupported IDs fail before migrations, connections, or destination startup.
+#[tokio::test]
+async fn pipeline_id_is_validated_before_startup() {
+    for id in ["".to_owned(), "A".to_owned(), "pipeline-example".to_owned(), "a".repeat(29)] {
+        let config: PipelineConfig = serde_json::from_value(serde_json::json!({
+            "id": id,
+            "publication_name": "publication",
+            "pg_connection": {
+                "host": "127.0.0.1", "port": 0, "name": "postgres", "username": "postgres",
+                "tls": { "enabled": false, "trusted_root_certs": "" }
+            }
+        }))
+        .unwrap();
+        let store = NotifyingStore::new();
+        let destination = MemoryDestination::new(store.clone());
+        let mut pipeline = Pipeline::new(config, store, destination);
+
+        let error = pipeline.start().await.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ConfigError);
+        assert!(error.source().unwrap().is::<etl_postgres::slots::PipelineIdError>());
+    }
+}
+
 /// Direct library callers receive a config error before any source startup
 /// work.
 #[tokio::test]
 async fn pipeline_retry_delay_is_validated_before_startup() {
     for delay_ms in [0, 999, 86_400_001, u64::MAX] {
         let config: PipelineConfig = serde_json::from_value(serde_json::json!({
-            "id": 1,
+            "id": "1",
             "publication_name": "publication",
             "table_error_retry_delay_ms": delay_ms,
             "pg_connection": {
@@ -3238,7 +3262,7 @@ async fn pipeline_retry_delay_is_validated_before_startup() {
 async fn pipeline_source_tls_is_validated_before_startup() {
     for trusted_root_certs in ["", " \t\r\n"] {
         let config: PipelineConfig = serde_json::from_value(serde_json::json!({
-            "id": 1,
+            "id": "1",
             "publication_name": "publication",
             "pg_connection": {
                 "host": "127.0.0.1", "port": 0, "name": "postgres", "username": "postgres",
@@ -3266,7 +3290,7 @@ async fn pipeline_source_tls_is_validated_before_startup() {
 async fn pipeline_copy_concurrency_is_validated_before_startup() {
     for (workers, connections) in [(1, 257), (257, 1), (17, 16), (u16::MAX, u16::MAX)] {
         let config: PipelineConfig = serde_json::from_value(serde_json::json!({
-            "id": 1,
+            "id": "1",
             "publication_name": "publication",
             "max_table_sync_workers": workers,
             "max_copy_connections_per_table": connections,

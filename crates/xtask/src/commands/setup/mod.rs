@@ -110,7 +110,7 @@ impl SetupReplicatorArgs {
             options.set_bigquery_service_account_key(
                 &fs::read_to_string(path)
                     .with_context(|| format!("Failed to read {}", path.display()))?,
-            )?;
+            );
         }
         if self.interactive {
             println!("Interactive mode: press Enter to keep each default.");

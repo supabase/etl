@@ -12,7 +12,7 @@ pub(crate) fn init(
 ) -> ReplicatorResult<AbortOnDropHandle<io::Result<()>>> {
     init_metrics(
         replicator_config.project_ref(),
-        Some(replicator_config.pipeline.id),
+        Some(&replicator_config.pipeline.id),
         Some(replicator_config.destination.kind().as_str()),
     )
     .map_err(ReplicatorError::config)

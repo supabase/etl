@@ -33,6 +33,15 @@ use crate::{
     retry::{ClassifiedError, classified_error_with_detail},
 };
 
+/// Server error statuses that HTTP proxies commonly report in their own error
+/// body, as `(status, reason phrase, status line)`.
+const PROXY_SERVER_ERRORS: [(u16, &str, &str); 4] = [
+    (500, "Internal Server Error", "500 Internal Server Error"),
+    (502, "Bad Gateway", "502 Bad Gateway"),
+    (503, "Service Unavailable", "503 Service Unavailable"),
+    (504, "Gateway Timeout", "504 Gateway Timeout"),
+];
+
 /// Returns the `outcome` label for an error returned by [`timeout_call`]:
 /// `"timeout"` when the client-side deadline fired, `"failed"` otherwise.
 fn outcome_label(err: &EtlError) -> &'static str {
@@ -78,13 +87,13 @@ fn escape_query_text(sql: &str) -> String {
 }
 
 /// Removes response text that can quote source values, retaining classification
-/// codes.
+/// codes and HTTP statuses.
 pub(super) fn redact_clickhouse_error(error: clickhouse::error::Error) -> clickhouse::error::Error {
     match error {
         clickhouse::error::Error::BadResponse(message) => {
             let message = if let Some(code) = clickhouse_error_code(&message) {
                 format!("Code: {code}. Response body omitted")
-            } else if let Some(status) = http_status(&message) {
+            } else if let Some(status) = response_status(&message) {
                 format!("{status} Response body omitted")
             } else {
                 "Response body omitted".to_owned()
@@ -223,9 +232,9 @@ fn server_response_retryability(message: &str) -> Retryability {
         // lost Keeper), TOO_MANY_PARTS, CANNOT_SCHEDULE_TASK, KEEPER_EXCEPTION.
         Some(159 | 202 | 209 | 210 | 241 | 242 | 252 | 439 | 999) => Retryability::Retryable,
         Some(_) => Retryability::Permanent,
-        // No ClickHouse code: the crate reports the bare HTTP status, for
-        // example from a proxy. Retry server-side (5xx) statuses only.
-        None if http_status(message).is_some_and(|status| (500..600).contains(&status)) => {
+        // No ClickHouse code: the response came from something else, for
+        // example a proxy. Retry server-side (5xx) statuses only.
+        None if response_status(message).is_some_and(|status| (500..600).contains(&status)) => {
             Retryability::Retryable
         }
         None => Retryability::Permanent,
@@ -242,6 +251,22 @@ fn http_status(message: &str) -> Option<u16> {
         return None;
     }
     status.parse().ok()
+}
+
+/// Returns the HTTP status of a response that carries no ClickHouse code.
+///
+/// The `clickhouse` crate reports the status line, such as `503 Service
+/// Unavailable`, only when the body is empty. Otherwise the body replaces it,
+/// so a proxy's own error body is matched against common proxy server errors:
+/// a bare reason phrase (`Bad Gateway`) or a status line inside an error page
+/// (`<title>502 Bad Gateway</title>`).
+fn response_status(message: &str) -> Option<u16> {
+    http_status(message).or_else(|| {
+        let body = message.trim();
+        PROXY_SERVER_ERRORS.iter().find_map(|&(status, reason, status_line)| {
+            (body.eq_ignore_ascii_case(reason) || body.contains(status_line)).then_some(status)
+        })
+    })
 }
 
 /// Failure of a [`ClickHouseClient::insert_rows`] call.
@@ -1012,6 +1037,8 @@ mod tests {
             "Code: 117. DB::Exception: placeholder-source-value",
             "Code: 241. DB::Exception: placeholder-source-value",
             "503 placeholder-source-value",
+            "Bad Gateway",
+            "<html><title>502 Bad Gateway</title>placeholder-source-value</html>",
             "placeholder-source-value",
         ] {
             let raw = clickhouse::error::Error::BadResponse(message.to_owned());
@@ -1034,6 +1061,21 @@ mod tests {
 
             assert!(!error.to_string().contains("placeholder-source-value"));
             assert!(!format!("{error:?}").contains("placeholder-source-value"));
+        }
+    }
+
+    /// Redaction keeps the HTTP status of a proxy error body, so operators can
+    /// still tell a gateway failure from an unexplained rejection.
+    #[test]
+    fn redacted_proxy_errors_keep_their_status() {
+        for (message, expected) in [
+            ("Bad Gateway", "bad response: 502 Response body omitted"),
+            ("<h1>504 Gateway Timeout</h1>", "bad response: 504 Response body omitted"),
+            ("placeholder-source-value", "bad response: Response body omitted"),
+        ] {
+            let raw = clickhouse::error::Error::BadResponse(message.to_owned());
+
+            assert_eq!(redact_clickhouse_error(raw).to_string(), expected);
         }
     }
 
@@ -1371,6 +1413,10 @@ mod tests {
             ),
             bad_response("Code: 999"),
             bad_response("503 Service Unavailable"),
+            // A proxy's own error body replaces the status line.
+            bad_response("Bad Gateway"),
+            bad_response("service unavailable"),
+            bad_response("<html><head><title>502 Bad Gateway</title></head></html>"),
         ] {
             assert_eq!(error.retryability(), Retryability::Retryable, "{error}");
         }
@@ -1382,6 +1428,8 @@ mod tests {
             bad_response("Code: 43. DB::Exception: Nested type ... (ILLEGAL_TYPE_OF_ARGUMENT)"),
             bad_response("Code: 60. DB::Exception: Unknown table. (UNKNOWN_TABLE)"),
             bad_response("400 Bad Request"),
+            bad_response("Forbidden"),
+            bad_response("placeholder Bad Gateway"),
             bad_response("5000 rows"),
             bad_response(""),
             Error::NotEnoughData,
@@ -1400,20 +1448,9 @@ mod tests {
         use clickhouse::error::Error;
 
         /// Stand-in for a connector error that exposes its cause as `source()`.
-        #[derive(Debug)]
-        struct ConnectError(io::Error);
-
-        impl std::fmt::Display for ConnectError {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("dns error")
-            }
-        }
-
-        impl std::error::Error for ConnectError {
-            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-                Some(&self.0)
-            }
-        }
+        #[derive(Debug, thiserror::Error)]
+        #[error("dns error")]
+        struct ConnectError(#[source] io::Error);
 
         let denied = || io::Error::new(io::ErrorKind::PermissionDenied, "non-public IP address");
 

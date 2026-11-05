@@ -85,3 +85,34 @@ and exercise upgrades, down migrations, schema helpers, and shared history. With
 ```bash
 cargo nextest run --locked -p etl --all-features --test main -E 'test(migrations::)'
 ```
+
+## Pipeline identity backfill
+
+Deploy the dual-writing release to all writers sharing a source database
+before deploying the backfill migration. Store initialization applies it to all
+four state tables, including historical rows and other pipelines in that database.
+It fills only missing string IDs and requires them to match the existing numeric
+IDs. Negative stored IDs or conflicting string IDs abort the entire transaction;
+existing identities are not replaced.
+
+The migration adds non-null checks and matching string-key indexes while retaining
+numeric-key reads and indexes. The transaction locks metadata tables before
+updating rows; active pipelines wait for commit before their metadata operations
+continue. If that wait exceeds a writer's query timeout, the writer may need to
+restart after the migration commits.
+Rollback removes the new constraints and indexes but preserves populated strings.
+
+## String-key cutover
+
+After backfill, deploy API readers using `pipeline_id_v2` first. Its reset operation
+must still populate the legacy integer for older replicators. Updating the API's
+ETL dependency does not run state-store migrations. Keep creating numeric string
+IDs until the string-key ETL image is the default for new pipelines.
+
+Then deploy the string-key ETL release across the fleet. It makes the old column
+nullable and reads and writes only V2. Once every replicator is upgraded, remove
+the API's temporary legacy reset write. Drop the old column in a later release,
+after all writers have stopped referencing it.
+
+After V2-only writes begin, an older ETL image needs its legacy keys restored
+before it can resume that pipeline. Use the new image for rollout retries.

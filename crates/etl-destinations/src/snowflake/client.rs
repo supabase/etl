@@ -24,6 +24,7 @@ use crate::{
         Config, Error, Result, SnowpipeError,
         auth::{AuthManager, HttpExchanger, TokenProvider},
         config::{HTTP_CONNECT_TIMEOUT, HTTP_REQUEST_TIMEOUT},
+        identity::{LegacyCompatiblePipelineId, legacy_compatible_pipeline_id},
         metrics::{
             ETL_SNOWFLAKE_STREAMING_DURABILITY_WAIT_FAILURES_TOTAL,
             ETL_SNOWFLAKE_STREAMING_DURABILITY_WAIT_SECONDS, ETL_SNOWFLAKE_STREAMING_PENDING_BYTES,
@@ -98,13 +99,17 @@ const STREAMING_PENDING_MAX_BYTES: usize = 256 * 1024 * 1024;
 const TRUNCATE_ATTEMPT_NAMESPACE: Uuid = Uuid::from_u128(0x4b929faf_9687_4544_a34f_f934369a37f7);
 
 /// Version tag for the truncate-attempt identity encoding.
-const TRUNCATE_ATTEMPT_IDENTITY_VERSION: &[u8] = b"supabase-etl/snowflake/truncate-attempt/v1";
+const LEGACY_TRUNCATE_ATTEMPT_IDENTITY_VERSION: &[u8] =
+    b"supabase-etl/snowflake/truncate-attempt/v1";
+
+/// Version tag for truncate attempts owned by string pipeline identities.
+const TRUNCATE_ATTEMPT_IDENTITY_VERSION: &[u8] = b"supabase-etl/snowflake/truncate-attempt/v2";
 
 /// Stable identity for one physical Snowflake truncate attempt.
 #[derive(Clone, Copy)]
 struct TruncateAttemptIdentity<'a> {
-    /// ETL pipeline that owns the target channel.
-    pipeline_id: PipelineId,
+    /// Pipeline owning this physical truncate attempt.
+    pipeline_id: &'a PipelineId,
     /// Source Postgres table identifier.
     table_id: TableId,
     /// Exact Snowflake database identifier used by SQL.
@@ -132,8 +137,16 @@ impl TruncateAttemptIdentity<'_> {
         }
 
         let mut identity = Vec::new();
-        append_identity_component(&mut identity, TRUNCATE_ATTEMPT_IDENTITY_VERSION);
-        identity.extend_from_slice(&self.pipeline_id.to_be_bytes());
+        match legacy_compatible_pipeline_id(self.pipeline_id.as_str()) {
+            LegacyCompatiblePipelineId::Integer(id) => {
+                append_identity_component(&mut identity, LEGACY_TRUNCATE_ATTEMPT_IDENTITY_VERSION);
+                identity.extend_from_slice(&id.to_be_bytes());
+            }
+            LegacyCompatiblePipelineId::String(id) => {
+                append_identity_component(&mut identity, TRUNCATE_ATTEMPT_IDENTITY_VERSION);
+                append_identity_component(&mut identity, id.as_bytes());
+            }
+        }
         identity.extend_from_slice(&self.table_id.into_inner().to_be_bytes());
         append_identity_component(&mut identity, self.database.as_bytes());
         append_identity_component(&mut identity, self.schema.as_bytes());
@@ -266,6 +279,7 @@ pub struct Client<T, C = RestStreamClient<T>> {
     stream_client: Arc<C>,
     database: String,
     schema: String,
+    /// Pipeline owning Snowflake channels, views, and truncate attempts.
     pipeline_id: PipelineId,
     channels: ChannelMap<C>,
     /// Tables whose companion view has been reconciled in this process.
@@ -282,7 +296,7 @@ impl<T: TokenProvider, C: StreamClient> Clone for Client<T, C> {
             stream_client: Arc::clone(&self.stream_client),
             database: self.database.clone(),
             schema: self.schema.clone(),
-            pipeline_id: self.pipeline_id,
+            pipeline_id: self.pipeline_id.clone(),
             channels: Arc::clone(&self.channels),
             prepared_views: Arc::clone(&self.prepared_views),
             table_gates: Arc::clone(&self.table_gates),
@@ -428,7 +442,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         if self.prepared_views.read().await.contains(&table.table_id) {
             return Ok(());
         }
-        CompanionView::new(self.pipeline_id, table.table_id, name)
+        CompanionView::new(self.pipeline_id.clone(), table.table_id, name)
             .prepare(&self.sql_client, name, schema)
             .await?;
         self.prepared_views.write().await.insert(table.table_id);
@@ -444,7 +458,9 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
     /// Invalidates cached readiness before making the public view unavailable.
     pub(super) async fn park_view(&self, table: &TableLifecycleGuard, name: &str) -> Result<()> {
         self.prepared_views.write().await.remove(&table.table_id);
-        CompanionView::new(self.pipeline_id, table.table_id, name).park(&self.sql_client).await
+        CompanionView::new(self.pipeline_id.clone(), table.table_id, name)
+            .park(&self.sql_client)
+            .await
     }
 
     /// Checks whether a table exists in the configured Snowflake namespace.
@@ -501,7 +517,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         // Obtain table channel.
         let mut handle = ChannelHandle::new(
             Arc::clone(&self.stream_client),
-            self.pipeline_id,
+            self.pipeline_id.clone(),
             self.database.clone(),
             self.schema.clone(),
             table_name.to_owned(),
@@ -721,7 +737,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
                 )
             })?;
             let request_id = TruncateAttemptIdentity {
-                pipeline_id: self.pipeline_id,
+                pipeline_id: &self.pipeline_id,
                 table_id,
                 database: &self.database,
                 schema: &self.schema,
@@ -785,7 +801,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
                 self.park_view(&table, &table_name).await?;
             } else {
                 self.invalidate_view(&table).await;
-                CompanionView::new(self.pipeline_id, table.table_id, &table_name)
+                CompanionView::new(self.pipeline_id.clone(), table.table_id, &table_name)
                     .remove(&self.sql_client)
                     .await?;
             }
@@ -797,7 +813,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         } else {
             let mut handle = ChannelHandle::new(
                 Arc::clone(&self.stream_client),
-                self.pipeline_id,
+                self.pipeline_id.clone(),
                 self.database.clone(),
                 self.schema.clone(),
                 table_name.clone(),
@@ -1033,7 +1049,7 @@ mod tests {
             stream_client,
             config.database().to_owned(),
             config.schema().to_owned(),
-            PipelineId::from(1_u64),
+            "1".into(),
         )
     }
 
@@ -1174,7 +1190,7 @@ mod tests {
             Arc::clone(&stream),
             "test-db".to_owned(),
             "test-schema".to_owned(),
-            1_u64,
+            "1".into(),
         );
         let store = NotifyingStore::new();
         let mut schemas = Vec::new();
@@ -1202,7 +1218,7 @@ mod tests {
             store.store_destination_table_metadata(schema.id(), metadata).await.unwrap();
             let mut channel = ChannelHandle::new(
                 Arc::clone(&stream),
-                client.pipeline_id,
+                client.pipeline_id.clone(),
                 client.database.clone(),
                 client.schema.clone(),
                 name,
@@ -1483,7 +1499,7 @@ mod tests {
     fn truncate_attempt_request_id_has_stable_encoding() {
         let truncate_offset = OffsetToken::new(0x1234_5678_9abc_def0_u64.into(), 42);
         let identity = TruncateAttemptIdentity {
-            pipeline_id: 17,
+            pipeline_id: &"17".into(),
             table_id: TableId::new(23),
             database: "TEST_DB",
             schema: "PUBLIC",
@@ -1501,7 +1517,7 @@ mod tests {
         let truncate_offset = OffsetToken::new(100_u64.into(), 3);
         let other_truncate_offset = OffsetToken::new(100_u64.into(), 4);
         let identity = TruncateAttemptIdentity {
-            pipeline_id: 17,
+            pipeline_id: &"17".into(),
             table_id: TableId::new(23),
             database: "TEST_DB",
             schema: "PUBLIC",
@@ -1512,7 +1528,7 @@ mod tests {
         };
         let expected = identity.request_id();
         let variants = [
-            TruncateAttemptIdentity { pipeline_id: 18, ..identity },
+            TruncateAttemptIdentity { pipeline_id: &"18".into(), ..identity },
             TruncateAttemptIdentity { table_id: TableId::new(24), ..identity },
             TruncateAttemptIdentity { database: "OTHER_DB", ..identity },
             TruncateAttemptIdentity { schema: "PRIVATE", ..identity },
@@ -1531,7 +1547,7 @@ mod tests {
     fn truncate_attempt_target_components_are_length_delimited() {
         let truncate_offset = OffsetToken::new(100_u64.into(), 3);
         let first = TruncateAttemptIdentity {
-            pipeline_id: 17,
+            pipeline_id: &"17".into(),
             table_id: TableId::new(23),
             database: "AB",
             schema: "C",
@@ -1564,7 +1580,7 @@ mod tests {
         let ready_id = TableId::new(2);
         let channel = Arc::new(Mutex::new(ChannelHandle::new(
             Arc::clone(&client.stream_client),
-            client.pipeline_id,
+            client.pipeline_id.clone(),
             client.database.clone(),
             client.schema.clone(),
             "READY".to_owned(),
@@ -1620,7 +1636,7 @@ mod tests {
         // gate.
         let channel = Arc::new(Mutex::new(ChannelHandle::new(
             Arc::clone(&client.stream_client),
-            client.pipeline_id,
+            client.pipeline_id.clone(),
             client.database.clone(),
             client.schema.clone(),
             "TABLE".to_owned(),
@@ -1663,7 +1679,7 @@ mod tests {
         let client = test_client(Arc::new(UnusedTokenProvider));
         let channel = Arc::new(Mutex::new(ChannelHandle::new(
             Arc::clone(&client.stream_client),
-            client.pipeline_id,
+            client.pipeline_id.clone(),
             client.database.clone(),
             client.schema.clone(),
             table_name.to_owned(),

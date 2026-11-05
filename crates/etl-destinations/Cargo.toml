@@ -25,6 +25,7 @@ tls-rustls-aws-lc-rs = [
     "sqlx?/tls-rustls-aws-lc-rs",
 ]
 ducklake = [
+    "dep:thiserror",
     "dep:duckdb",
     "dep:etl-maintenance",
     "etl-maintenance/ducklake",
@@ -56,6 +57,7 @@ bigquery = [
     "dep:metrics",
 ]
 clickhouse = [
+    "dep:thiserror",
     "dep:clickhouse",
     "dep:metrics",
     "dep:hyper-rustls",

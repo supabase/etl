@@ -38,7 +38,7 @@ pub(crate) fn init(
         api_url.clone(),
         api_key.clone(),
         supabase_config.project_ref.clone(),
-        replicator_config.pipeline.id.to_string(),
+        replicator_config.pipeline.id.clone(),
     )
     .map_err(ReplicatorError::config)?;
 
@@ -66,7 +66,7 @@ mod tests {
                 "maintenance_mode": "kubernetes"
             }},
             "pipeline": {
-                "id": 1,
+                "id": "1",
                 "publication_name": "example_publication",
                 "pg_connection": {
                     "host": "example.com",

@@ -3,6 +3,7 @@
 use std::{io::Cursor, str::FromStr};
 
 use byteorder::{BigEndian, ReadBytesExt};
+use thiserror::Error;
 use tokio_postgres::types::{FromSql, IsNull, ToSql, Type};
 
 /// Postgres positive numeric sign marker.
@@ -217,24 +218,15 @@ impl ToSql for PgNumeric {
 ///
 /// [`ParseNumericError`] provides specific error categories for numeric parsing
 /// failures, enabling appropriate error handling and user feedback.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Error)]
 pub enum ParseNumericError {
     /// The input string has invalid numeric syntax.
+    #[error("Invalid syntax")]
     InvalidSyntax,
     /// The numeric value is outside the representable range.
+    #[error("Value out of range")]
     ValueOutOfRange,
 }
-
-impl std::fmt::Display for ParseNumericError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ParseNumericError::InvalidSyntax => write!(f, "Invalid syntax"),
-            ParseNumericError::ValueOutOfRange => write!(f, "Value out of range"),
-        }
-    }
-}
-
-impl std::error::Error for ParseNumericError {}
 
 /// Parses special numeric values like NaN, Infinity, and -Infinity.
 ///
