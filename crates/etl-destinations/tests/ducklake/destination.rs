@@ -481,6 +481,148 @@ async fn new_unbuffered_test_destination(
     .unwrap()
 }
 
+/// Verifies that deferred layout failures leave copy and CDC writes usable,
+/// and that a later write retries a partition change after catalog repair.
+async fn assert_pending_layout_failure_does_not_block_writes(sorting: bool) {
+    use etl::event::InsertEvent;
+
+    let lake = create_test_lake("pending_layout_failure_keeps_writes").await;
+    let schema = make_schema(1, "public", "events");
+    let replicated = make_replicated_table_schema(&schema);
+    let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
+    let store = MemoryStore::new();
+    store.store_table_schema(schema).await.unwrap();
+    let initial = new_test_destination(&lake.catalog_url, &lake.data_url, store.clone()).await;
+    initial
+        .write_table_rows_for_tests(
+            &replicated,
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("before".to_owned())])],
+        )
+        .await
+        .unwrap();
+    initial.shutdown().await.unwrap();
+    drop(initial);
+
+    let catalog = sqlx::PgPool::connect(lake.catalog_url.as_str()).await.unwrap();
+    let metadata_schema: String = sqlx::query_scalar(
+        "select table_schema from information_schema.tables where table_name = \
+         'ducklake_partition_info'",
+    )
+    .fetch_one(&catalog)
+    .await
+    .unwrap();
+    let prefix = quote_identifier(&metadata_schema);
+    let mut builder = DuckLakeDestination::builder(
+        lake.catalog_url.clone(),
+        lake.data_url.clone(),
+        1,
+        store.clone(),
+    )
+    .copy_buffer(DuckLakeCopyBufferConfig { enabled: false, ..Default::default() });
+    if sorting {
+        builder = builder
+            .external_maintenance(DuckLakeExternalMaintenanceConfig::postgres("layout-test"))
+            .table_sorting(DuckLakeTableSortingConfig {
+                tables: vec![DuckLakeTableSortConfig {
+                    schema: "public".to_owned(),
+                    table: "events".to_owned(),
+                    sort_by: DuckLakeSortBy::Columns {
+                        columns: vec![DuckLakeSortColumn {
+                            name: "missing".to_owned(),
+                            direction: DuckLakeSortDirection::Asc,
+                            nulls: None,
+                        }],
+                    },
+                }],
+            });
+    } else {
+        // Reject only partition DDL; the physical table and ordinary catalog
+        // writes remain valid, so layout failure cannot mask a row-write error.
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "alter table {prefix}.ducklake_partition_info add constraint \
+             test_reject_partition_changes check (false) not valid"
+        )))
+        .execute(&catalog)
+        .await
+        .unwrap();
+        builder = builder.table_partitioning(DuckLakeTablePartitioningConfig::new(vec![
+            DuckLakeTablePartitionConfig::new(
+                "public".to_owned(),
+                "events".to_owned(),
+                vec![DuckLakePartitionColumn::new(
+                    "id".to_owned(),
+                    DuckLakePartitionTransform::Bucket { count: 8 },
+                )],
+            ),
+        ]));
+    }
+    let destination = builder.build().await.unwrap();
+    destination.startup().await.unwrap();
+
+    // Both paths must continue across repeated failures, without requiring a
+    // successful layout change before acknowledging the batch.
+    for id in [2, 3] {
+        destination
+            .write_table_rows_for_tests(
+                &replicated,
+                vec![TableRow::new(vec![Cell::I32(id), Cell::String("copy".to_owned())])],
+            )
+            .await
+            .unwrap();
+    }
+    for id in [4, 5] {
+        destination
+            .write_events(vec![Event::Insert(InsertEvent {
+                commit_lsn: PgLsn::from(u64::try_from(id).unwrap()),
+                tx_ordinal: 0,
+                replicated_table_schema: replicated.clone(),
+                table_row: TableRow::new(vec![Cell::I32(id), Cell::String("cdc".to_owned())]),
+            })])
+            .await
+            .unwrap();
+    }
+    if !sorting {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "alter table {prefix}.ducklake_partition_info drop constraint \
+             test_reject_partition_changes"
+        )))
+        .execute(&catalog)
+        .await
+        .unwrap();
+        // No restart or hourly pass intervenes: this write must retry the
+        // still-pending partition layout and apply it successfully.
+        destination
+            .write_table_rows_for_tests(
+                &replicated,
+                vec![TableRow::new(vec![Cell::I32(6), Cell::String("repaired".to_owned())])],
+            )
+            .await
+            .unwrap();
+    }
+    destination.shutdown().await.unwrap();
+    drop(destination);
+
+    let active_partitions: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "select c.transform from {prefix}.ducklake_partition_column c join \
+         {prefix}.ducklake_partition_info i using (partition_id, table_id) where i.end_snapshot \
+         is null"
+    )))
+    .fetch_all(&catalog)
+    .await
+    .unwrap();
+    if sorting {
+        assert!(active_partitions.is_empty());
+    } else {
+        assert_eq!(active_partitions, vec!["bucket(8)"]);
+    }
+    let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
+    assert_eq!(count_rows(&conn, &table_name), if sorting { 5 } else { 6 });
+    assert!(
+        store.get_destination_table_metadata(replicated.id()).await.unwrap().unwrap().is_applied()
+    );
+    catalog.close().await;
+}
+
 /// Waits for concurrent destination work without allowing a regression to
 /// occupy a CI shard indefinitely.
 async fn wait_for_concurrent_destination_tasks(tasks: Vec<tokio::task::JoinHandle<EtlResult<()>>>) {
@@ -6056,8 +6198,20 @@ async fn partition_layout_handles_source_schema_changes() {
     }
 }
 
-/// Failed startup layouts block only their own table and are retried before
-/// writes can be acknowledged after the physical schema is repaired.
+/// Invalid sort configuration on an applied table does not block its writes.
+#[tokio::test(flavor = "multi_thread")]
+async fn pending_sorting_failure_does_not_block_writes() {
+    assert_pending_layout_failure_does_not_block_writes(true).await;
+}
+
+/// Native partition DDL failures stay retryable without blocking row writes.
+#[tokio::test(flavor = "multi_thread")]
+async fn pending_partition_failure_does_not_block_writes() {
+    assert_pending_layout_failure_does_not_block_writes(false).await;
+}
+
+/// Physical schema errors still fail writes to the affected table, and its
+/// pending layout is retried once that physical schema is repaired.
 #[tokio::test(flavor = "multi_thread")]
 async fn startup_layout_failure_is_isolated_and_retried() {
     for sorting in [false, true] {

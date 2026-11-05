@@ -7,6 +7,8 @@
 //! instance. Layout reconciliation preserves historical files; flush and
 //! compaction apply the active sort order according to the configured
 //! maintenance policy.
+//! Failed layout updates on applied tables remain pending for retry without
+//! failing otherwise valid writes. Creation and schema recovery remain strict.
 
 mod batches;
 mod client;
