@@ -13,7 +13,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Days, NaiveDate, TimeDelta, Utc};
-use reqwest::StatusCode;
+use reqwest::{StatusCode, Url};
 use serde_json::json;
 use sqlx::{Connection, PgConnection};
 use tokio::{io::AsyncReadExt, process::Command};
@@ -25,8 +25,8 @@ use crate::{
             MAX_ENTRY_BYTES, Rejection,
         },
         model::{
-            ArtifactPage, CodeScanningAlert, CodeScanningAnalysis, Job, JobPage, Run, RunPage,
-            WorkflowPage,
+            ArtifactPage, CodeScanningAlert, CodeScanningAnalysis, DependabotAlert, Job, JobPage,
+            Run, RunPage, WorkflowPage,
         },
         plan::{self, DayTask},
         store::{self, ManifestRow, RejectionRow},
@@ -43,8 +43,8 @@ const LISTING_CAP: u64 = 1000;
 /// other workflows on the same `GITHUB_TOKEN` (1,000 per hour per repository).
 const RATE_LIMIT_RESERVE: u64 = 300;
 /// Requests held back from day syncing so a long backfill never starves the
-/// code-scanning refresh.
-const CODE_SCANNING_RESERVE: u64 = 20;
+/// code-scanning and Dependabot refresh.
+const SECURITY_RESERVE: u64 = 20;
 /// Attempts per request for transient failures.
 const MAX_TRIES: u32 = 3;
 /// Longest `retry-after` the sync waits for instead of stopping.
@@ -53,6 +53,8 @@ const MAX_RETRY_WAIT: Duration = Duration::from_secs(60);
 const BENCHMARK_WORKFLOW: &str = ".github/workflows/benchmark.yml";
 /// Workflow whose runs upload test manifests, from its reusable test jobs.
 const TEST_WORKFLOW: &str = ".github/workflows/ci.yml";
+/// Workflow whose runs upload dependency audit manifests.
+const AUDIT_WORKFLOW: &str = ".github/workflows/dependency-audit.yml";
 /// Code-scanning alert states listed separately, which does not rely on the
 /// unfiltered listing's default. The `fixed` filter also returns dismissed
 /// alerts; upserting by alert number makes the overlap harmless.
@@ -65,7 +67,7 @@ enum SyncError {
     /// The day failed and will back off; other days continue.
     Day { kind: &'static str, source: anyhow::Error },
     /// GitHub refused the token (401 or 403). Fatal for Actions data; code
-    /// scanning treats a 403 as unavailable and continues.
+    /// scanning and Dependabot treat a 403 as unavailable and continue.
     Denied { status: StatusCode },
     /// The sync cannot continue: database or schema errors.
     Fatal(anyhow::Error),
@@ -98,11 +100,13 @@ struct Totals {
     jobs: u64,
     manifests: u64,
     test_results: u64,
+    audit_findings: u64,
     skipped_manifests: u64,
     rejections: u64,
     deleted_runs: u64,
     stale_runs: u64,
-    alerts: u64,
+    code_scanning_alerts: u64,
+    dependabot_alerts: u64,
     new_analyses: u64,
 }
 
@@ -161,8 +165,8 @@ pub(super) async fn run(
     result
 }
 
-/// Runs the sync phases while holding the lock: workflows, planned days, then
-/// code scanning.
+/// Runs the sync phases while holding the lock: workflows, planned days,
+/// Dependabot, then code scanning.
 async fn run_locked(
     conn: &mut PgConnection,
     client: &GitHubClient,
@@ -173,7 +177,7 @@ async fn run_locked(
         store::load_settings(conn, config.history_since, config.default_history_since).await?;
     let mut syncer = Syncer {
         client,
-        request_limit: config.max_requests.saturating_sub(CODE_SCANNING_RESERVE),
+        request_limit: config.max_requests.saturating_sub(SECURITY_RESERVE),
         low_rate_limit: false,
         now: Utc::now(),
         totals: Totals::default(),
@@ -213,9 +217,27 @@ async fn run_locked(
         }
     }
 
-    // Code scanning runs even when days spent their budget: it gets the
-    // reserve, unless GitHub's own rate limit is low.
+    // Security alerts run even when days spent their budget: they get the
+    // reserve, unless GitHub's own rate limit is low. Dependabot goes first: a
+    // full listing costs one request per 100 alerts, while a code-scanning
+    // analyses backfill can spend the whole reserve.
     syncer.request_limit = config.max_requests;
+    if !syncer.low_rate_limit {
+        match syncer.sync_dependabot(conn).await {
+            Ok(()) | Err(SyncError::Exhausted) => {}
+            Err(SyncError::Fatal(error)) => return Err(error),
+            // A token without the `vulnerability-alerts` permission, or a
+            // repository with Dependabot alerts disabled, should not stop the
+            // sync.
+            Err(SyncError::Denied { status: StatusCode::FORBIDDEN }) => {
+                eprintln!("ci-metrics: Dependabot alerts unavailable (HTTP 403); skipped");
+            }
+            Err(SyncError::Denied { status }) => return Err(denied_error(status)),
+            Err(SyncError::Day { source, .. }) => {
+                eprintln!("ci-metrics: Dependabot sync failed: {source:#}");
+            }
+        }
+    }
     if !syncer.low_rate_limit {
         match syncer
             .sync_code_scanning(conn, settings.history_since, settings.analyses_backfilled)
@@ -238,8 +260,8 @@ async fn run_locked(
     let totals = &syncer.totals;
     eprintln!(
         "ci-metrics: synced {} days ({} failed), {} runs ({} detailed), {} jobs, {} manifests ({} \
-         skipped, {} test results), {} rejections, {} deleted, {} stale, {} alerts, {} new \
-         analyses using {} requests{}",
+         skipped, {} test results, {} audit findings), {} rejections, {} deleted, {} stale, {} \
+         code-scanning alerts, {} Dependabot alerts, {} new analyses using {} requests{}",
         totals.days,
         totals.failed_days,
         totals.runs,
@@ -248,10 +270,12 @@ async fn run_locked(
         totals.manifests,
         totals.skipped_manifests,
         totals.test_results,
+        totals.audit_findings,
         totals.rejections,
         totals.deleted_runs,
         totals.stale_runs,
-        totals.alerts,
+        totals.code_scanning_alerts,
+        totals.dependabot_alerts,
         totals.new_analyses,
         client.requests_sent(),
         if exhausted { "; budget spent, resuming next sync" } else { "" },
@@ -470,7 +494,9 @@ impl Syncer<'_> {
                     self.totals.skipped_manifests += 1;
                     continue;
                 }
-                self.totals.test_results += store::insert_manifest(&mut tx, manifest).await?;
+                let stored = store::insert_manifest(&mut tx, manifest).await?;
+                self.totals.test_results += stored.test_results;
+                self.totals.audit_findings += stored.audit_findings;
                 inserted += 1;
             }
             for rejection in &details.rejections {
@@ -725,7 +751,7 @@ impl Syncer<'_> {
                 page += 1;
             }
         }
-        self.totals.alerts = alert_numbers.len() as u64;
+        self.totals.code_scanning_alerts = alert_numbers.len() as u64;
 
         let history_start = history_since.and_hms_opt(0, 0, 0).map(|start| start.and_utc());
         // Whether stored analyses had no gaps before this pass. Only then does
@@ -780,6 +806,49 @@ impl Syncer<'_> {
             page += 1;
         }
     }
+
+    /// Refreshes every Dependabot alert. The endpoint pages by cursor and
+    /// rejects `page`, so each request carries the `after` cursor from the
+    /// previous response's `link` header.
+    async fn sync_dependabot(&mut self, conn: &mut PgConnection) -> Result<(), SyncError> {
+        let mut after: Option<String> = None;
+        loop {
+            let mut query = vec![("per_page", PER_PAGE.to_string())];
+            if let Some(cursor) = &after {
+                query.push(("after", cursor.clone()));
+            }
+            let response = self.request("dependabot/alerts", &query).await?;
+            if !response.status().is_success() {
+                return Err(SyncError::Day {
+                    kind: "github_status",
+                    source: anyhow!("GitHub returned HTTP status {}", response.status()),
+                });
+            }
+            let alerts: Vec<DependabotAlert> = response
+                .json()
+                .map_err(|source| SyncError::Day { kind: "github_payload", source })?;
+            for alert in &alerts {
+                store::upsert_dependabot_alert(conn, alert).await?;
+            }
+            self.totals.dependabot_alerts += alerts.len() as u64;
+
+            let Some(next) = response.next_link() else {
+                return Ok(());
+            };
+            let cursor = next_cursor(next).ok_or_else(|| SyncError::Day {
+                kind: "github_payload",
+                source: anyhow!("GitHub's next Dependabot alert page has no cursor"),
+            })?;
+            // A repeated cursor would page forever within the budget.
+            if alerts.is_empty() || after.as_ref() == Some(&cursor) {
+                return Err(SyncError::Day {
+                    kind: "github_payload",
+                    source: anyhow!("GitHub's Dependabot alert pages made no progress"),
+                });
+            }
+            after = Some(cursor);
+        }
+    }
 }
 
 /// Destination of a budgeted GitHub request.
@@ -813,22 +882,25 @@ impl TestScope {
 /// A branch can edit any workflow and upload any manifest it likes, so trust
 /// depends on what a forged manifest could distort. Benchmark manifests
 /// set comparison baselines and come only from the benchmark workflow as
-/// committed to `main` (scheduled, or dispatched or pushed on `main`). Test
-/// manifests come from CI runs on `main` and from same-repository pull
-/// requests and merge queue runs, where re-run flakes happen; a forged one
-/// can only distort flaky-test statistics, and only its failures are stored.
-/// Forks are never trusted, and runs are read once completed.
+/// committed to `main` (scheduled, or dispatched or pushed on `main`). Audit
+/// manifests report the state of `main`'s dependencies and come only from the
+/// dependency audit workflow on `main`, the same way. Test manifests come from
+/// CI runs on `main` and from same-repository pull requests and merge queue
+/// runs, where re-run flakes happen; a forged one can only distort flaky-test
+/// statistics, and only its failures are stored. Forks are never trusted, and
+/// runs are read once completed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ManifestTrust {
     benchmarks: bool,
     tests: Option<TestScope>,
+    audits: bool,
 }
 
 impl ManifestTrust {
     /// Returns the trust for `run`.
     fn for_run(run: &Run) -> Self {
         if run.status != "completed" || run.is_fork() {
-            return Self { benchmarks: false, tests: None };
+            return Self { benchmarks: false, tests: None, audits: false };
         }
         let from_main = match run.event.as_str() {
             "schedule" => true,
@@ -844,12 +916,16 @@ impl ManifestTrust {
         } else {
             None
         };
-        Self { benchmarks: from_main && run.workflow_path() == BENCHMARK_WORKFLOW, tests }
+        Self {
+            benchmarks: from_main && run.workflow_path() == BENCHMARK_WORKFLOW,
+            tests,
+            audits: from_main && run.workflow_path() == AUDIT_WORKFLOW,
+        }
     }
 
     /// Returns whether any manifest of the run is ingested.
     fn any(self) -> bool {
-        self.benchmarks || self.tests.is_some()
+        self.benchmarks || self.tests.is_some() || self.audits
     }
 
     /// Returns how to ingest an artifact of `kind`, or `None` to skip it. A
@@ -865,6 +941,7 @@ impl ManifestTrust {
                     .any(|job| job.id == job_id && job.conclusion.as_deref() == Some("success"));
                 (scope == TestScope::All || !passed).then_some(Ingest::Test { job_id, scope })
             }
+            ArtifactKind::Audit { job_id } => self.audits.then_some(Ingest::Audit { job_id }),
         }
     }
 }
@@ -877,6 +954,10 @@ enum Ingest {
     Test {
         job_id: i64,
         scope: TestScope,
+    },
+    /// The dependency audit manifest of job `job_id`.
+    Audit {
+        job_id: i64,
     },
 }
 
@@ -918,6 +999,7 @@ async fn read_archive(
     match ingest {
         Ingest::Benchmark => benchmark_row(path, &entries, &manifest_bytes, run, jobs).await,
         Ingest::Test { job_id, scope } => Ok(test_row(&manifest_bytes, run, jobs, job_id, scope)),
+        Ingest::Audit { job_id } => Ok(audit_row(&manifest_bytes, run, jobs, job_id)),
     }
 }
 
@@ -966,6 +1048,7 @@ async fn benchmark_row(
         commit_sha: parsed.commit_sha().to_owned(),
         payload,
         tests: Vec::new(),
+        findings: Vec::new(),
     }))
 }
 
@@ -1009,6 +1092,35 @@ fn test_row(
             "stored": scope.as_str(),
         }),
         tests,
+        findings: Vec::new(),
+    })
+}
+
+/// Validates the dependency audit manifest of job `job_id`.
+fn audit_row(
+    manifest_bytes: &[u8],
+    run: &Run,
+    jobs: &[Job],
+    job_id: i64,
+) -> Result<ManifestRow, (Rejection, Option<i32>)> {
+    let parsed =
+        manifest::parse_audit_manifest(manifest_bytes, &run.repository.full_name, run.id, job_id)
+            .map_err(|reason| (reason, None))?;
+    let run_attempt = parsed.run_attempt();
+    if resolve_job(jobs, run_attempt, Some(job_id), "").is_none() {
+        return Err((Rejection::UnmatchedJob, Some(run_attempt)));
+    }
+    Ok(ManifestRow {
+        artifact_id: 0,
+        run_id: run.id,
+        run_attempt,
+        job_id,
+        kind: manifest::AUDIT_KIND,
+        schema_version: manifest::AUDIT_SCHEMA_VERSION,
+        commit_sha: run.head_sha.clone(),
+        payload: parsed.payload(),
+        tests: Vec::new(),
+        findings: parsed.into_findings(),
     })
 }
 
@@ -1077,6 +1189,16 @@ fn detail_status(now: DateTime<Utc>, job: &Job) -> &'static str {
 /// Returns the paging query for `page`.
 fn page_query(page: usize) -> Vec<(&'static str, String)> {
     vec![("per_page", PER_PAGE.to_string()), ("page", page.to_string())]
+}
+
+/// Returns the `after` cursor of a cursor-paged listing's next-page URL.
+fn next_cursor(url: &str) -> Option<String> {
+    Url::parse(url)
+        .ok()?
+        .query_pairs()
+        .find(|(name, _)| name == "after")
+        .map(|(_, value)| value.into_owned())
+        .filter(|cursor| !cursor.is_empty())
 }
 
 /// Returns the UTC bounds `[start, end)` of `day`.
@@ -1154,43 +1276,54 @@ mod tests {
         assert_eq!(resolve_job(&jobs, 2, None, "Benchmark (bigquery)"), None);
     }
 
-    /// Benchmarks are trusted only from `main`; test failures also from
-    /// same-repository pull requests; nothing from forks or unfinished runs.
+    /// Benchmarks and audits are trusted only from `main`; test failures also
+    /// from same-repository pull requests; nothing from forks or unfinished
+    /// runs.
     #[test]
     fn manifest_trust_depends_on_kind() {
         let same = Some("supabase/etl");
         let trust = |run: &Run| {
             let trust = ManifestTrust::for_run(run);
-            (trust.benchmarks, trust.tests)
+            (trust.benchmarks, trust.tests, trust.audits)
         };
         let ci = TEST_WORKFLOW;
         let bench = BENCHMARK_WORKFLOW;
+        let audit = AUDIT_WORKFLOW;
 
-        assert_eq!(trust(&run(ci, "push", "main", same)), (false, Some(TestScope::All)));
+        assert_eq!(trust(&run(ci, "push", "main", same)), (false, Some(TestScope::All), false));
         assert_eq!(
             trust(&run(ci, "workflow_dispatch", "main", same)),
-            (false, Some(TestScope::All))
+            (false, Some(TestScope::All), false)
         );
         assert_eq!(
             trust(&run(ci, "pull_request", "feature", same)),
-            (false, Some(TestScope::Failures))
+            (false, Some(TestScope::Failures), false)
         );
         assert_eq!(
             trust(&run(ci, "merge_group", "gh-readonly-queue/main/pr-1", same)),
-            (false, Some(TestScope::Failures))
+            (false, Some(TestScope::Failures), false)
         );
-        assert_eq!(trust(&run(ci, "workflow_dispatch", "feature", same)), (false, None));
-        assert_eq!(trust(&run(ci, "pull_request", "feature", Some("someone/etl"))), (false, None));
-        assert_eq!(trust(&run(ci, "pull_request", "feature", None)), (false, None));
+        assert_eq!(trust(&run(ci, "workflow_dispatch", "feature", same)), (false, None, false));
+        assert_eq!(
+            trust(&run(ci, "pull_request", "feature", Some("someone/etl"))),
+            (false, None, false)
+        );
+        assert_eq!(trust(&run(ci, "pull_request", "feature", None)), (false, None, false));
         assert_eq!(
             trust(&run(&format!("{ci}@refs/heads/main"), "push", "main", same)).1,
             Some(TestScope::All)
         );
 
-        assert_eq!(trust(&run(bench, "schedule", "main", same)), (true, None));
-        assert_eq!(trust(&run(bench, "push", "main", same)), (true, None));
-        assert_eq!(trust(&run(bench, "pull_request", "feature", same)), (false, None));
-        assert_eq!(trust(&run(bench, "workflow_dispatch", "feature", same)), (false, None));
+        assert_eq!(trust(&run(bench, "schedule", "main", same)), (true, None, false));
+        assert_eq!(trust(&run(bench, "push", "main", same)), (true, None, false));
+        assert_eq!(trust(&run(bench, "pull_request", "feature", same)), (false, None, false));
+        assert_eq!(trust(&run(bench, "workflow_dispatch", "feature", same)), (false, None, false));
+
+        assert_eq!(trust(&run(audit, "schedule", "main", same)), (false, None, true));
+        assert_eq!(trust(&run(audit, "push", "main", same)), (false, None, true));
+        assert_eq!(trust(&run(audit, "workflow_dispatch", "main", same)), (false, None, true));
+        assert_eq!(trust(&run(audit, "pull_request", "feature", same)), (false, None, false));
+        assert_eq!(trust(&run(audit, "workflow_dispatch", "feature", same)), (false, None, false));
 
         let mut running = run(ci, "push", "main", same);
         running.status = "in_progress".to_owned();
@@ -1205,8 +1338,9 @@ mod tests {
         failed.conclusion = Some("failure".to_owned());
         let jobs = [job(1, 1, "Run tests"), failed];
         let test = |job_id| Some(ArtifactKind::Test { job_id });
-        let pr = ManifestTrust { benchmarks: false, tests: Some(TestScope::Failures) };
-        let main = ManifestTrust { benchmarks: false, tests: Some(TestScope::All) };
+        let pr =
+            ManifestTrust { benchmarks: false, tests: Some(TestScope::Failures), audits: false };
+        let main = ManifestTrust { benchmarks: false, tests: Some(TestScope::All), audits: false };
 
         assert_eq!(pr.ingest(test(1), &jobs), None);
         assert_eq!(
@@ -1223,6 +1357,30 @@ mod tests {
             Some(Ingest::Test { job_id: 1, scope: TestScope::All })
         );
         assert_eq!(main.ingest(Some(ArtifactKind::Benchmark), &jobs), None);
+        assert_eq!(main.ingest(Some(ArtifactKind::Audit { job_id: 1 }), &jobs), None);
+        let audit = ManifestTrust { benchmarks: false, tests: None, audits: true };
+        assert_eq!(
+            audit.ingest(Some(ArtifactKind::Audit { job_id: 1 }), &jobs),
+            Some(Ingest::Audit { job_id: 1 })
+        );
+        assert_eq!(audit.ingest(test(1), &jobs), None);
         assert_eq!(main.ingest(None, &jobs), None);
+    }
+
+    #[test]
+    fn next_cursor_reads_the_after_parameter() {
+        assert_eq!(
+            next_cursor(
+                "https://api.github.com/repositories/1/dependabot/alerts?per_page=100&after=Y3Vy%3D"
+            ),
+            Some("Y3Vy=".to_owned())
+        );
+        for url in [
+            "https://api.github.com/repositories/1/dependabot/alerts?per_page=100",
+            "https://api.github.com/repositories/1/dependabot/alerts?after=",
+            "not a url",
+        ] {
+            assert_eq!(next_cursor(url), None, "{url}");
+        }
     }
 }
