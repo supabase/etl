@@ -10,12 +10,14 @@ on:
       - "**/Cargo.lock"
       - "deny.toml"
       - ".github/workflows/dependency-audit.yml"
+      - ".github/ci-metrics/audit-manifest.jq"
   pull_request:
     paths:
       - "**/Cargo.toml"
       - "**/Cargo.lock"
       - "deny.toml"
       - ".github/workflows/dependency-audit.yml"
+      - ".github/ci-metrics/audit-manifest.jq"
   workflow_dispatch:
 
 concurrency:
@@ -45,17 +47,16 @@ jobs:
         id: check
         run: cargo deny --locked --workspace --all-features check advisories
 
-      # Findings for the CI metrics collector, which reads them only from runs
-      # on `main`, so pull requests skip this. They are written and kept when
-      # the check fails. The second pass reuses the advisory database the check
-      # fetched, so both see the same advisories. A broken manifest must not
-      # fail the audit itself.
+      # Findings for the CI metrics collector, written and kept when the check
+      # fails. The second pass reuses the advisory database the check fetched,
+      # so both see the same advisories. Pull requests build the manifest so a
+      # broken producer fails there, but upload nothing: the collector reads
+      # audits from `main` only. On other runs, metrics plumbing must not fail
+      # the audit itself.
       - name: Write audit results
         id: results
-        if: >-
-          always() && github.event_name != 'pull_request'
-          && (steps.check.outcome == 'success' || steps.check.outcome == 'failure')
-        continue-on-error: true
+        if: always() && (steps.check.outcome == 'success' || steps.check.outcome == 'failure')
+        continue-on-error: ${{ github.event_name != 'pull_request' }}
         env:
           # Equals the jobs API `id`, so the audit manifest joins to this job.
           JOB_CHECK_RUN_ID: ${{ job.check_run_id }}
@@ -67,7 +68,8 @@ jobs:
             jq -n -f .github/ci-metrics/audit-manifest.jq \
             < target/audit-results/cargo-deny.jsonl > target/audit-results/manifest.json
       - name: Upload audit results
-        if: always() && steps.results.outcome == 'success'
+        if: always() && steps.results.outcome == 'success' && github.event_name != 'pull_request'
+        continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: audit-results-${{ job.check_run_id }}
