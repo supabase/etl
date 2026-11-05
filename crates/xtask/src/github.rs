@@ -37,7 +37,7 @@ pub(crate) struct GitHubResponse {
     status: StatusCode,
     rate_limit_remaining: Option<u64>,
     retry_after: Option<Duration>,
-    has_next_page: bool,
+    next_link: Option<String>,
     body: Vec<u8>,
     truncated: bool,
 }
@@ -104,10 +104,11 @@ impl GitHubClient {
         let headers = response.headers();
         let rate_limit_remaining = header_u64(headers, "x-ratelimit-remaining");
         let retry_after = header_u64(headers, "retry-after").map(Duration::from_secs);
-        let has_next_page = headers
+        let next_link = headers
             .get("link")
             .and_then(|value| value.to_str().ok())
-            .is_some_and(|link| link.contains("rel=\"next\""));
+            .and_then(parse_next_link)
+            .map(str::to_owned);
 
         let mut body = Vec::new();
         let mut truncated = false;
@@ -126,14 +127,7 @@ impl GitHubClient {
             body.extend_from_slice(&chunk);
         }
 
-        Ok(GitHubResponse {
-            status,
-            rate_limit_remaining,
-            retry_after,
-            has_next_page,
-            body,
-            truncated,
-        })
+        Ok(GitHubResponse { status, rate_limit_remaining, retry_after, next_link, body, truncated })
     }
 }
 
@@ -155,7 +149,12 @@ impl GitHubResponse {
 
     /// Returns whether the `link` header names a next page.
     pub(crate) fn has_next_page(&self) -> bool {
-        self.has_next_page
+        self.next_link.is_some()
+    }
+
+    /// Returns the URL of the next page named by the `link` header.
+    pub(crate) fn next_link(&self) -> Option<&str> {
+        self.next_link.as_deref()
     }
 
     /// Returns whether the body exceeded the requested limit.
@@ -194,6 +193,19 @@ fn header_u64(headers: &HeaderMap, name: &str) -> Option<u64> {
     headers.get(name)?.to_str().ok()?.trim().parse().ok()
 }
 
+/// Returns the `rel="next"` target of a `link` header value, which lists
+/// entries of the form `<url>; rel="next"` separated by commas.
+fn parse_next_link(link: &str) -> Option<&str> {
+    link.split(',').find_map(|entry| {
+        let (target, params) = entry.trim().split_once(';')?;
+        params
+            .split(';')
+            .any(|param| param.trim() == "rel=\"next\"")
+            .then(|| target.trim().strip_prefix('<')?.strip_suffix('>'))
+            .flatten()
+    })
+}
+
 /// Returns whether `url` targets the GitHub REST API over HTTPS on the default
 /// port, the only destination allowed to receive the token.
 fn is_github_api_url(url: &str) -> bool {
@@ -225,6 +237,28 @@ mod tests {
             "not a url",
         ] {
             assert!(!is_github_api_url(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn next_link_is_read_from_the_link_header() {
+        assert_eq!(
+            parse_next_link(
+                "<https://api.github.com/repositories/1/dependabot/alerts?per_page=2&after=Y3Vy>; \
+                 rel=\"next\""
+            ),
+            Some("https://api.github.com/repositories/1/dependabot/alerts?per_page=2&after=Y3Vy")
+        );
+        assert_eq!(
+            parse_next_link(
+                "<https://api.github.com/x?page=1>; rel=\"prev\", <https://api.github.com/x?page=3>; \
+                 rel=\"next\", <https://api.github.com/x?page=9>; rel=\"last\""
+            ),
+            Some("https://api.github.com/x?page=3")
+        );
+        for link in ["", "<https://api.github.com/x?page=1>; rel=\"prev\"", "garbage; rel=\"next\""]
+        {
+            assert_eq!(parse_next_link(link), None, "{link}");
         }
     }
 }

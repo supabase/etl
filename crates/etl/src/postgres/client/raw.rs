@@ -33,7 +33,8 @@ use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
     pipeline::PipelineId,
-    postgres::{FeedbackHandle, ReplicationMessageStream},
+    postgres::{FeedbackHandle, ReplicationMessageStream, client::SlotCreationMonitor},
+    replication::WorkerType,
     schema::{TableId, TableName},
 };
 
@@ -230,6 +231,8 @@ pub struct PgReplicationClient {
     connection_config: PgReplicationConnectionConfig,
     server_version: Option<NonZeroI32>,
     connection_updates_rx: watch::Receiver<PostgresConnectionUpdate>,
+    /// Optional pipeline-owned observations for slot creation commands.
+    slot_creation_monitor: Option<SlotCreationMonitor>,
 }
 
 impl fmt::Debug for PgReplicationClient {
@@ -287,6 +290,11 @@ impl PgReplicationClient {
         .await
     }
 
+    /// Attaches pipeline-owned observations to this worker connection.
+    pub(crate) fn set_slot_creation_monitor(&mut self, monitor: SlotCreationMonitor) {
+        self.slot_creation_monitor = Some(monitor);
+    }
+
     /// Establishes a replication connection with the supplied
     /// `application_name`.
     async fn connect_with_application_name(
@@ -328,7 +336,13 @@ impl PgReplicationClient {
 
         info!("connected to postgres without tls");
 
-        Ok(PgReplicationClient { client, connection_config, server_version, connection_updates_rx })
+        Ok(PgReplicationClient {
+            client,
+            connection_config,
+            server_version,
+            connection_updates_rx,
+            slot_creation_monitor: None,
+        })
     }
 
     /// Establishes a TLS-encrypted connection to Postgres.
@@ -353,7 +367,13 @@ impl PgReplicationClient {
 
         info!("connected to postgres with tls");
 
-        Ok(PgReplicationClient { client, connection_config, server_version, connection_updates_rx })
+        Ok(PgReplicationClient {
+            client,
+            connection_config,
+            server_version,
+            connection_updates_rx,
+            slot_creation_monitor: None,
+        })
     }
 
     /// Creates a non-replication child connection from connection settings.
@@ -482,6 +502,7 @@ impl PgReplicationClient {
         let connection_config = self.connection_config.clone();
         let server_version = self.server_version;
         let connection_updates_rx = self.connection_updates_rx();
+        let slot_creation_monitor = self.slot_creation_monitor.clone();
         let transaction = self.begin_tx().await?;
 
         // LOCK is a snapshot-free utility statement. Lock descendants too,
@@ -494,7 +515,13 @@ impl PgReplicationClient {
             .await
             .map_err(classify_table_copy_error)?;
         let slot = PgReplicationQueryTarget::new(&transaction)
-            .create_slot(slot_name, SnapshotAction::Use, config)
+            .create_slot(
+                slot_name,
+                SnapshotAction::Use,
+                config,
+                slot_creation_monitor.as_ref(),
+                WorkerType::TableSync { table_id },
+            )
             .await
             .map_err(classify_table_copy_error)?;
 
@@ -524,9 +551,16 @@ impl PgReplicationClient {
     ) -> EtlResult<CreateSlotResult> {
         self.validate_replication_slot_config(config)?;
 
+        let slot_creation_monitor = self.slot_creation_monitor.clone();
         let transaction = self.begin_slot_creation_transaction().await?;
         let slot = PgReplicationQueryTarget::new(&transaction)
-            .create_slot(slot_name, SnapshotAction::NoExport, config)
+            .create_slot(
+                slot_name,
+                SnapshotAction::NoExport,
+                config,
+                slot_creation_monitor.as_ref(),
+                WorkerType::Apply,
+            )
             .await?;
         transaction.commit().await?;
 

@@ -6,7 +6,8 @@ self-hosted-runner:
     - blacksmith-8vcpu-ubuntu-2404-arm
     - blacksmith-16vcpu-ubuntu-2404
     - blacksmith-32vcpu-ubuntu-2404
-# actionlint 1.7.12 does not yet support GitHub's queued concurrency.
+# actionlint 1.7.12 does not yet support GitHub's queued concurrency or the
+# `vulnerability-alerts` permission that reads Dependabot alerts.
 paths:
   .github/workflows/reusable-publish-image.yml:
     ignore:
@@ -14,3 +15,6 @@ paths:
   .github/workflows/benchmark.yml:
     ignore:
       - '^unexpected key "queue" for "concurrency" section\.'
+  .github/workflows/ci-metrics.yml:
+    ignore:
+      - '^unknown permission scope "vulnerability-alerts"\.'

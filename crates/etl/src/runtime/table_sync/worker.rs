@@ -21,7 +21,7 @@ use crate::{
     etl_error,
     observability::{ERROR_TYPE_LABEL, ETL_WORKER_ERRORS_TOTAL, WORKER_TYPE_LABEL},
     pipeline::PipelineId,
-    postgres::client::PgReplicationClient,
+    postgres::client::{PgReplicationClient, SlotCreationMonitor},
     replication::{
         ApplyLoop, ApplyLoopResult, ReplicationLagMonitor, TableSyncResult, TableSyncWorkerContext,
         WorkerContext, WorkerType, start_table_sync,
@@ -332,6 +332,8 @@ pub(crate) struct TableSyncWorker<S, D> {
     store: S,
     destination: D,
     replication_lag_monitor: ReplicationLagMonitor,
+    /// Shared observations aggregate concurrent slot creation attempts.
+    slot_creation_monitor: SlotCreationMonitor,
     shutdown_token: CancellationToken,
     run_permit: Arc<Semaphore>,
     memory_monitor: MemoryMonitor,
@@ -354,6 +356,7 @@ impl<S, D> TableSyncWorker<S, D> {
         store: S,
         destination: D,
         replication_lag_monitor: ReplicationLagMonitor,
+        slot_creation_monitor: SlotCreationMonitor,
         shutdown_token: CancellationToken,
         run_permit: Arc<Semaphore>,
         memory_monitor: MemoryMonitor,
@@ -366,6 +369,7 @@ impl<S, D> TableSyncWorker<S, D> {
             store,
             destination,
             replication_lag_monitor,
+            slot_creation_monitor,
             shutdown_token,
             run_permit,
             memory_monitor,
@@ -706,6 +710,7 @@ where
             return Ok(TableSyncWorkerResult::Shutdown);
         };
         let mut replication_client = replication_client?;
+        replication_client.set_slot_creation_monitor(self.slot_creation_monitor.clone());
 
         let table_sync_result = start_table_sync(
             self.pipeline_id.clone(),

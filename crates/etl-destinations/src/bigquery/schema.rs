@@ -356,12 +356,17 @@ mod tests {
             ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, TableId, TableName,
             TableSchema, Type,
         },
+        test_utils::property::run_property,
     };
     use gcp_bigquery_client::storage::{ColumnMode, ColumnType};
+    use proptest::prop_assert_eq;
     use prost::Message;
 
     use super::*;
-    use crate::bigquery::encoding::BigQueryTableRow;
+    use crate::{
+        bigquery::encoding::BigQueryTableRow,
+        default_literals::{default_string_value, postgres_text_default},
+    };
 
     /// Creates a test column schema with common defaults.
     fn test_column(
@@ -849,5 +854,57 @@ mod tests {
             decode_integers_as(&descriptor.field_descriptors[1].typ, &array_row.encode_to_vec()),
             vec![3_000_000_000, 7]
         );
+    }
+
+    /// Decodes a GoogleSQL single-quoted string literal, or returns `None` when
+    /// GoogleSQL would reject it: an unescaped quote, a raw newline or carriage
+    /// return, or an unknown escape.
+    fn decode_googlesql_string(literal: &str) -> Option<String> {
+        let mut chars = literal.strip_prefix('\'')?.strip_suffix('\'')?.chars();
+        let mut value = String::new();
+        while let Some(ch) = chars.next() {
+            match ch {
+                '\'' | '\n' | '\r' => return None,
+                '\\' => value.push(match chars.next()? {
+                    'a' => '\u{7}',
+                    'b' => '\u{8}',
+                    'f' => '\u{c}',
+                    'n' => '\n',
+                    'r' => '\r',
+                    't' => '\t',
+                    'v' => '\u{b}',
+                    escaped @ ('\\' | '?' | '"' | '\'' | '`') => escaped,
+                    // GoogleSQL accepts `\uXXXX` and `\UXXXXXXXX`; production
+                    // writes the 8-digit form outside the Basic Multilingual
+                    // Plane.
+                    marker @ ('u' | 'U') => {
+                        let digits = if marker == 'u' { 4 } else { 8 };
+                        let hex: String = chars.by_ref().take(digits).collect();
+                        if hex.len() != digits || !hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+                        {
+                            return None;
+                        }
+                        char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?
+                    }
+                    _ => return None,
+                }),
+                ch => value.push(ch),
+            }
+        }
+        Some(value)
+    }
+
+    /// Any text default, as Postgres stores it, renders as a GoogleSQL literal
+    /// that decodes back to the same text.
+    #[test]
+    fn string_defaults_roundtrip_through_googlesql() {
+        run_property("bigquery string defaults roundtrip", &default_string_value(), |value| {
+            let rendered = default_expression_sql(&postgres_text_default(value), &Type::TEXT, -1);
+            prop_assert_eq!(
+                rendered.as_deref().and_then(decode_googlesql_string),
+                Some(value.clone())
+            );
+            Ok(())
+        });
     }
 }
