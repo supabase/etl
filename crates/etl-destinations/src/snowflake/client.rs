@@ -884,6 +884,28 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         Ok(self.get_channel(table_id).await?.lock().await.is_offset_committed(offset))
     }
 
+    /// Reconciles overlapping CDC replay before checking whether to encode it.
+    ///
+    /// The channel lock serializes recovery with append and target recording.
+    /// Other channels may continue writing; no network operation holds the
+    /// shared pending-state lock. Only this channel's proven target is retired.
+    pub(super) async fn reconcile_replay_offset(
+        &self,
+        table_id: TableId,
+        offset: &OffsetToken,
+    ) -> etl::error::EtlResult<bool> {
+        let channel = self.get_channel(table_id).await?;
+        let mut channel = channel.lock().await;
+        if channel.needs_replay_recovery(offset) {
+            let target = self.pending_durability.lock().await.targets.get(&table_id).cloned();
+            channel.recover_streaming_replay(target.as_ref()).await?;
+            let mut pending = self.pending_durability.lock().await;
+            pending.discard(table_id)?;
+            pending.observe_metrics();
+        }
+        Ok(channel.is_offset_committed(offset))
+    }
+
     /// Returns whether pending streaming work has reached the durability wait
     /// threshold.
     pub async fn pending_durability_limits_reached(&self) -> bool {
@@ -971,7 +993,7 @@ mod tests {
     use std::{
         future::{Future, pending},
         pin::Pin,
-        sync::atomic::{AtomicUsize, Ordering},
+        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
         task::{Context, Poll, Waker},
     };
 
@@ -1072,12 +1094,58 @@ mod tests {
         requests: std::sync::Mutex<Vec<RecordedRequest>>,
         /// Committed progress for each destination table.
         statuses: std::sync::Mutex<HashMap<String, ChannelStatusResponse>>,
+        /// Current server continuation, changed by both Open and append.
+        continuations: std::sync::Mutex<HashMap<String, String>>,
+        /// Holds one Open response after its remote continuation changes.
+        hold_next_open_response: AtomicBool,
+        /// Signals that Open applied remotely but its response is still
+        /// pending.
+        open_response_ready: tokio::sync::Notify,
         /// Rejects every append before recording any accepted rows.
         fail_append: bool,
         /// Counts attempted appends, including failures.
         append_attempts: AtomicUsize,
         /// Counts durability polls independently of accepted appends.
         status_reads: AtomicUsize,
+        /// Fails one status request after the rows have committed remotely.
+        fail_next_status: AtomicBool,
+        /// Remaining status failures after the transport's own retries.
+        status_failures_remaining: AtomicUsize,
+        /// Remaining Open failures after the transport's own retries.
+        open_failures_remaining: AtomicUsize,
+        /// Signals a returned transient error before recovery enters backoff.
+        recovery_failed: tokio::sync::Notify,
+        /// Loses one append response after committing its rows.
+        lose_next_append_response: AtomicBool,
+        /// Counts opens, including recovery before replay encoding.
+        open_reads: AtomicUsize,
+        /// Table whose status is held at an observable recovery boundary.
+        blocked_status_table: std::sync::Mutex<Option<String>>,
+        /// Holds one status response before applying its injected outcome.
+        hold_next_status: AtomicBool,
+        /// Signals that the held status request started.
+        status_entered: tokio::sync::Notify,
+        /// Releases the held status response.
+        release_status: tokio::sync::Notify,
+        /// Signals that another append has committed in the transport model.
+        appended: tokio::sync::Notify,
+    }
+
+    impl RecordingStreamClient {
+        /// Consumes and signals one synthetic exhausted HTTP retry burst.
+        fn fail_recovery_request(&self, failures: &AtomicUsize) -> bool {
+            if failures
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                self.recovery_failed.notify_one();
+                true
+            } else {
+                false
+            }
+        }
     }
 
     impl StreamClient for RecordingStreamClient {
@@ -1093,26 +1161,42 @@ mod tests {
             channel: &str,
             offset_token: Option<&OffsetToken>,
         ) -> Result<OpenChannelResponse> {
-            let mut statuses = self.statuses.lock().unwrap();
-            let status =
-                statuses.entry(table.to_owned()).or_insert_with(|| ChannelStatusResponse {
-                    channel: channel.to_owned(),
-                    status_code: "SUCCESS".to_owned(),
-                    offset_token: None,
-                    created_on_ms: Some(1),
-                    rows_inserted: 0,
-                    rows_parsed: 0,
-                    rows_error_count: 0,
-                    last_error_offset_upper_bound: None,
-                    last_error_message: None,
+            let open_id = self.open_reads.fetch_add(1, Ordering::SeqCst);
+            if self.fail_recovery_request(&self.open_failures_remaining) {
+                return Err(Error::HttpStatus {
+                    status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                    body: String::new(),
                 });
-            if let Some(offset) = offset_token {
-                status.offset_token = Some(offset.clone());
+            }
+            let status = {
+                let mut statuses = self.statuses.lock().unwrap();
+                let status =
+                    statuses.entry(table.to_owned()).or_insert_with(|| ChannelStatusResponse {
+                        channel: channel.to_owned(),
+                        status_code: "SUCCESS".to_owned(),
+                        offset_token: None,
+                        created_on_ms: Some(1),
+                        rows_inserted: 0,
+                        rows_parsed: 0,
+                        rows_error_count: 0,
+                        last_error_offset_upper_bound: None,
+                        last_error_message: None,
+                    });
+                if let Some(offset) = offset_token {
+                    status.offset_token = Some(offset.clone());
+                }
+                status.clone()
+            };
+            let continuation_token = format!("open-{open_id}");
+            self.continuations.lock().unwrap().insert(table.to_owned(), continuation_token.clone());
+            if self.hold_next_open_response.swap(false, Ordering::SeqCst) {
+                self.open_response_ready.notify_one();
+                pending::<()>().await;
             }
             Ok(OpenChannelResponse {
-                continuation_token: status.rows_inserted.to_string(),
+                continuation_token,
                 offset_token: status.offset_token.clone(),
-                status: status.clone(),
+                status,
             })
         }
 
@@ -1135,7 +1219,7 @@ mod tests {
             batch: &RowBatch,
             continuation_token: &str,
         ) -> Result<InsertRowsResponse> {
-            self.append_attempts.fetch_add(1, Ordering::SeqCst);
+            let append_id = self.append_attempts.fetch_add(1, Ordering::SeqCst);
             if self.fail_append {
                 return Err(Error::Channel("Synthetic append failure.".to_owned()));
             }
@@ -1153,11 +1237,21 @@ mod tests {
             });
             let mut statuses = self.statuses.lock().unwrap();
             let status = statuses.get_mut(table).unwrap();
-            assert_eq!(continuation_token, status.rows_inserted.to_string());
+            let mut continuations = self.continuations.lock().unwrap();
+            assert_eq!(Some(continuation_token), continuations.get(table).map(String::as_str));
+            let continuation_token = format!("append-{append_id}");
+            continuations.insert(table.to_owned(), continuation_token.clone());
             status.rows_inserted += u64::try_from(batch.row_count()).unwrap();
             status.rows_parsed = status.rows_inserted;
             status.offset_token = Some(batch.end_offset().clone());
-            Ok(InsertRowsResponse { continuation_token: status.rows_inserted.to_string() })
+            self.appended.notify_one();
+            if self.lose_next_append_response.swap(false, Ordering::SeqCst) {
+                return Err(Error::HttpStatus {
+                    status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                    body: String::new(),
+                });
+            }
+            Ok(InsertRowsResponse { continuation_token })
         }
 
         async fn channel_status(
@@ -1168,8 +1262,61 @@ mod tests {
             _channel: &str,
         ) -> Result<ChannelStatusResponse> {
             self.status_reads.fetch_add(1, Ordering::SeqCst);
+            let blocked = self.blocked_status_table.lock().unwrap().as_deref() == Some(table);
+            if self.hold_next_status.swap(false, Ordering::SeqCst) || blocked {
+                self.status_entered.notify_one();
+                self.release_status.notified().await;
+            }
+            if self.fail_next_status.swap(false, Ordering::SeqCst)
+                || self.fail_recovery_request(&self.status_failures_remaining)
+            {
+                return Err(Error::HttpStatus {
+                    status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                    body: String::new(),
+                });
+            }
             Ok(self.statuses.lock().unwrap().get(table).unwrap().clone())
         }
+    }
+
+    /// Creates a destination client whose streaming operations use the model.
+    fn recording_client(
+        stream: Arc<RecordingStreamClient>,
+    ) -> Client<UnusedTokenProvider, RecordingStreamClient> {
+        let config = Config::new("example-account", "test-user", "test-db", "test-schema").unwrap();
+        let sql = SqlClient::new(config, Arc::new(UnusedTokenProvider), reqwest::Client::new());
+        Client::with_clients(
+            sql,
+            stream,
+            "test-db".to_owned(),
+            "test-schema".to_owned(),
+            "1".into(),
+        )
+    }
+
+    /// Replaces only SQL setup with applied metadata and an empty open channel.
+    async fn prepare_recording_table(
+        client: &Client<UnusedTokenProvider, RecordingStreamClient>,
+        store: &NotifyingStore,
+        schema: &ReplicatedTableSchema,
+        name: String,
+    ) {
+        let metadata = DestinationTableMetadata::new_applied(
+            name.clone(),
+            schema.inner().snapshot_id,
+            schema.replication_mask().clone(),
+        );
+        store.store_destination_table_metadata(schema.id(), metadata).await.unwrap();
+        let mut channel = ChannelHandle::new(
+            Arc::clone(&client.stream_client),
+            client.pipeline_id.clone(),
+            client.database.clone(),
+            client.schema.clone(),
+            name,
+        );
+        channel.open().await.unwrap();
+        client.channels.write().await.insert(schema.id(), Arc::new(Mutex::new(channel)));
+        client.prepared_views.write().await.insert(schema.id());
     }
 
     /// Builds applied table metadata and warmed channels without SQL or
@@ -1181,17 +1328,10 @@ mod tests {
         Destination<NotifyingStore, UnusedTokenProvider, RecordingStreamClient>,
         Arc<RecordingStreamClient>,
         Vec<ReplicatedTableSchema>,
+        Client<UnusedTokenProvider, RecordingStreamClient>,
     ) {
-        let config = Config::new("example-account", "test-user", "test-db", "test-schema").unwrap();
         let stream = Arc::new(RecordingStreamClient { fail_append, ..Default::default() });
-        let sql = SqlClient::new(config, Arc::new(UnusedTokenProvider), reqwest::Client::new());
-        let client = Client::with_clients(
-            sql,
-            Arc::clone(&stream),
-            "test-db".to_owned(),
-            "test-schema".to_owned(),
-            "1".into(),
-        );
+        let client = recording_client(Arc::clone(&stream));
         let store = NotifyingStore::new();
         let mut schemas = Vec::new();
         for id in 1..=tables {
@@ -1210,26 +1350,10 @@ mod tests {
                 ReplicationMask::all(&table),
                 IdentityMask::from_bytes(vec![1, 0]),
             );
-            let metadata = DestinationTableMetadata::new_applied(
-                name.clone(),
-                schema.inner().snapshot_id,
-                schema.replication_mask().clone(),
-            );
-            store.store_destination_table_metadata(schema.id(), metadata).await.unwrap();
-            let mut channel = ChannelHandle::new(
-                Arc::clone(&stream),
-                client.pipeline_id.clone(),
-                client.database.clone(),
-                client.schema.clone(),
-                name,
-            );
-            channel.open().await.unwrap();
-            client.channels.write().await.insert(schema.id(), Arc::new(Mutex::new(channel)));
-            // This transport-only fixture starts after remote setup completed.
-            client.prepared_views.write().await.insert(schema.id());
+            prepare_recording_table(&client, &store, &schema, name).await;
             schemas.push(schema);
         }
-        (Destination::new(client, store), stream, schemas)
+        (Destination::new(client.clone(), store), stream, schemas, client)
     }
 
     /// Creates a small row that leaves its table's compressor open until
@@ -1243,12 +1367,569 @@ mod tests {
         })
     }
 
+    /// Replaying accepted rows must refresh remote progress before building a
+    /// differently sized batch, for every CDC encoder and every retry cause.
+    #[tokio::test]
+    async fn cdc_replay_reconciles_before_encoding() {
+        for fail_status in [false, true] {
+            for operation in ["insert", "update", "delete"] {
+                let (destination, stream, schemas, _) = recording_destination(1, false).await;
+                let schema = &schemas[0];
+                let events: Vec<_> = (1..=3)
+                    .map(|ordinal| match operation {
+                        "insert" => insert_event(schema, ordinal),
+                        "update" => Event::Update(UpdateEvent {
+                            commit_lsn: 10.into(),
+                            tx_ordinal: ordinal,
+                            replicated_table_schema: schema.clone(),
+                            old_table_row: None,
+                            updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
+                                Cell::I32(1),
+                                Cell::String("updated".to_owned()),
+                            ])),
+                        }),
+                        _ => Event::Delete(DeleteEvent {
+                            commit_lsn: 10.into(),
+                            tx_ordinal: ordinal,
+                            replicated_table_schema: schema.clone(),
+                            old_table_row: Some(OldTableRow::Key(TableRow::new(vec![Cell::I32(
+                                1,
+                            )]))),
+                        }),
+                    })
+                    .collect();
+                for event in &events[..2] {
+                    assert_eq!(
+                        write_events(
+                            &destination,
+                            WriteEventsDurability::MayDefer,
+                            vec![event.clone()]
+                        )
+                        .await
+                        .unwrap(),
+                        DestinationWriteStatus::Accepted,
+                    );
+                }
+                assert_eq!(stream.open_reads.load(Ordering::SeqCst), 1);
+                if fail_status {
+                    stream.fail_next_status.store(true, Ordering::SeqCst);
+                    write_events(&destination, WriteEventsDurability::RequireDurable, vec![])
+                        .await
+                        .unwrap_err();
+                }
+
+                let status =
+                    write_events(&destination, WriteEventsDurability::RequireDurable, events)
+                        .await
+                        .unwrap();
+                assert_eq!(status, DestinationWriteStatus::Durable);
+                destination.shutdown().await.unwrap();
+
+                let requests = stream.requests.lock().unwrap();
+                let offsets: Vec<_> = requests
+                    .iter()
+                    .flat_map(|request| &request.rows)
+                    .map(|row| row["_cdc_sequence_number"].as_str().unwrap().to_owned())
+                    .collect();
+                let expected: Vec<_> = (1..=3)
+                    .map(|ordinal| OffsetToken::new(10.into(), ordinal).to_string())
+                    .collect();
+                assert_eq!(offsets, expected);
+                assert_eq!(stream.open_reads.load(Ordering::SeqCst), 1);
+            }
+        }
+    }
+
+    /// Recovery clears only its proven channel and does not lock unrelated
+    /// writers while another channel's status request is blocked or fails.
+    #[tokio::test]
+    async fn replay_recovery_is_per_channel() {
+        let (destination, stream, schemas, client) = recording_destination(2, false).await;
+        for schema in &schemas {
+            write_events(
+                &destination,
+                WriteEventsDurability::MayDefer,
+                vec![insert_event(schema, 1)],
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(client.pending_durability.lock().await.row_batches, 2);
+        assert!(
+            client
+                .reconcile_replay_offset(schemas[0].id(), &OffsetToken::new(10.into(), 1))
+                .await
+                .unwrap()
+        );
+        assert_eq!(client.pending_durability.lock().await.row_batches, 1);
+
+        *stream.blocked_status_table.lock().unwrap() = Some("table_2".to_owned());
+        let entered = stream.status_entered.notified();
+        let mut replay = std::pin::pin!(write_events(
+            &destination,
+            WriteEventsDurability::MayDefer,
+            vec![insert_event(&schemas[1], 1)]
+        ));
+
+        assert!(poll_once(replay.as_mut()).is_pending());
+        entered.await;
+
+        let status = write_events(
+            &destination,
+            WriteEventsDurability::MayDefer,
+            vec![insert_event(&schemas[0], 2)],
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, DestinationWriteStatus::Accepted);
+        assert_eq!(client.pending_durability.lock().await.row_batches, 2);
+        stream.fail_next_status.store(true, Ordering::SeqCst);
+        let retry_entered = stream.status_entered.notified();
+
+        stream.release_status.notify_one();
+
+        retry_entered.await;
+        assert_eq!(client.pending_durability.lock().await.row_batches, 2);
+        assert!(poll_once(replay.as_mut()).is_pending());
+        *stream.blocked_status_table.lock().unwrap() = None;
+
+        stream.release_status.notify_one();
+
+        assert_eq!(replay.await.unwrap(), DestinationWriteStatus::Accepted);
+        let pending = client.pending_durability.lock().await;
+        assert_eq!(pending.row_batches, 1);
+        assert!(pending.has_target(schemas[0].id()));
+        assert!(!pending.has_target(schemas[1].id()));
+        drop(pending);
+        assert_eq!(
+            write_events(&destination, WriteEventsDurability::RequireDurable, vec![])
+                .await
+                .unwrap(),
+            DestinationWriteStatus::Durable
+        );
+        destination.shutdown().await.unwrap();
+        assert_eq!(stream.requests.lock().unwrap().len(), 3);
+    }
+
+    /// Shutdown joins a blocked status or an Open whose remote side effect
+    /// already happened. A fresh client then replays without duplicates.
+    #[tokio::test]
+    async fn shutdown_joins_replay_recovery() {
+        for opening in [false, true] {
+            let (destination, stream, schemas, client) = recording_destination(1, false).await;
+            let schema = &schemas[0];
+            write_events(
+                &destination,
+                WriteEventsDurability::MayDefer,
+                vec![insert_event(schema, 1)],
+            )
+            .await
+            .unwrap();
+            if opening {
+                stream.lose_next_append_response.store(true, Ordering::SeqCst);
+                write_events(
+                    &destination,
+                    WriteEventsDurability::MayDefer,
+                    vec![insert_event(schema, 2)],
+                )
+                .await
+                .unwrap_err();
+                stream.hold_next_open_response.store(true, Ordering::SeqCst);
+            } else {
+                *stream.blocked_status_table.lock().unwrap() = Some("table_1".to_owned());
+            }
+            let continuation = stream.continuations.lock().unwrap()["table_1"].clone();
+            let entered = if opening {
+                stream.open_response_ready.notified()
+            } else {
+                stream.status_entered.notified()
+            };
+            let mut replay = std::pin::pin!(write_events(
+                &destination,
+                WriteEventsDurability::RequireDurable,
+                vec![insert_event(schema, 1)],
+            ));
+
+            assert!(poll_once(replay.as_mut()).is_pending());
+            entered.await;
+
+            assert_eq!(stream.continuations.lock().unwrap()["table_1"] != continuation, opening);
+            tokio::time::timeout(std::time::Duration::from_secs(5), destination.shutdown())
+                .await
+                .unwrap()
+                .unwrap();
+            replay.await.unwrap_err();
+            assert_eq!(client.pending_durability.lock().await.row_batches, 1);
+            assert!(client.get_channel(schema.id()).await.unwrap().try_lock().is_ok());
+            assert_eq!(stream.requests.lock().unwrap().len(), if opening { 2 } else { 1 });
+
+            // Keep only remote state. No cached channel or pending target is
+            // copied into the restarted destination.
+            *stream.blocked_status_table.lock().unwrap() = None;
+            let restarted_client = recording_client(Arc::clone(&stream));
+            let store = NotifyingStore::new();
+            prepare_recording_table(&restarted_client, &store, schema, "table_1".to_owned()).await;
+            let restarted = Destination::new(restarted_client.clone(), store);
+            assert_eq!(
+                write_events(
+                    &restarted,
+                    WriteEventsDurability::RequireDurable,
+                    (1..=3).map(|ordinal| insert_event(schema, ordinal)).collect(),
+                )
+                .await
+                .unwrap(),
+                DestinationWriteStatus::Durable,
+            );
+            restarted.shutdown().await.unwrap();
+            assert!(restarted_client.pending_durability_is_empty().await);
+            assert_eq!(stream.open_reads.load(Ordering::SeqCst), if opening { 3 } else { 2 });
+            let requests = stream.requests.lock().unwrap();
+            let offsets: Vec<_> = requests
+                .iter()
+                .flat_map(|request| &request.rows)
+                .map(|row| row["_cdc_sequence_number"].as_str().unwrap().to_owned())
+                .collect();
+            assert_eq!(
+                offsets,
+                (1..=3)
+                    .map(|ordinal| OffsetToken::new(10.into(), ordinal).to_string())
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// Shutdown aborts and joins recovery during status or Open backoff,
+    /// preserving accepted debt and admitting no replayed append.
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_joins_replay_backoff() {
+        for opening in [false, true] {
+            let (destination, stream, schemas, client) = recording_destination(1, false).await;
+            let schema = &schemas[0];
+            write_events(
+                &destination,
+                WriteEventsDurability::MayDefer,
+                vec![insert_event(schema, 1)],
+            )
+            .await
+            .unwrap();
+            if opening {
+                stream.lose_next_append_response.store(true, Ordering::SeqCst);
+                write_events(
+                    &destination,
+                    WriteEventsDurability::MayDefer,
+                    vec![insert_event(schema, 2)],
+                )
+                .await
+                .unwrap_err();
+                stream.open_failures_remaining.store(10, Ordering::SeqCst);
+            } else {
+                stream.status_failures_remaining.store(10, Ordering::SeqCst);
+            }
+            let failed = stream.recovery_failed.notified();
+            let mut replay = std::pin::pin!(write_events(
+                &destination,
+                WriteEventsDurability::RequireDurable,
+                vec![insert_event(schema, 1)]
+            ));
+
+            assert!(poll_once(replay.as_mut()).is_pending());
+
+            failed.await;
+            assert!(poll_once(replay.as_mut()).is_pending());
+            let failures = if opening {
+                &stream.open_failures_remaining
+            } else {
+                &stream.status_failures_remaining
+            };
+            assert_eq!(failures.load(Ordering::SeqCst), 9);
+
+            tokio::time::timeout(std::time::Duration::from_secs(1), destination.shutdown())
+                .await
+                .unwrap()
+                .unwrap();
+
+            replay.await.unwrap_err();
+            assert_eq!(failures.load(Ordering::SeqCst), 9);
+            assert_eq!(client.pending_durability.lock().await.row_batches, 1);
+            assert!(client.get_channel(schema.id()).await.unwrap().try_lock().is_ok());
+            assert_eq!(stream.requests.lock().unwrap().len(), if opening { 2 } else { 1 });
+        }
+    }
+
+    /// Real apply workers use this adapter only to bypass empty-copy SQL setup.
+    /// All CDC dispatch, encoding, channel recovery, and shutdown remain real.
+    #[derive(Clone)]
+    struct ReplayPipelineDestination {
+        /// Production Snowflake destination using the controlled transport.
+        destination: Destination<NotifyingStore, UnusedTokenProvider, RecordingStreamClient>,
+        /// Shared channel state for empty-copy setup.
+        client: Client<UnusedTokenProvider, RecordingStreamClient>,
+        /// Pipeline metadata store.
+        store: NotifyingStore,
+    }
+
+    impl etl::destination::Destination for ReplayPipelineDestination {
+        fn name() -> &'static str {
+            "snowflake-replay-test"
+        }
+
+        async fn shutdown(&self) -> etl::error::EtlResult<()> {
+            self.destination.shutdown().await
+        }
+
+        async fn drop_table_for_copy(
+            &self,
+            _: &ReplicatedTableSchema,
+            result: etl::destination::DropTableForCopyResult,
+        ) -> etl::error::EtlResult<()> {
+            result.send(Ok(()));
+            Ok(())
+        }
+
+        async fn write_table_rows(
+            &self,
+            schema: &ReplicatedTableSchema,
+            _: Option<etl::destination::TableCopyBatchId>,
+            rows: Vec<TableRow>,
+            result: etl::destination::WriteTableRowsResult,
+        ) -> etl::error::EtlResult<()> {
+            assert!(rows.is_empty());
+            prepare_recording_table(
+                &self.client,
+                &self.store,
+                schema,
+                format!("table_{}", schema.id()),
+            )
+            .await;
+            result.send(Ok(DestinationWriteStatus::Durable));
+            Ok(())
+        }
+
+        async fn write_events(
+            &self,
+            events: Vec<Event>,
+            durability: WriteEventsDurability,
+            result: etl::destination::WriteEventsResult,
+        ) -> etl::error::EtlResult<()> {
+            self.destination.write_events(events, durability, result).await
+        }
+    }
+
+    /// Runs real apply-worker replay or shutdown after 63 accepted requests.
+    async fn assert_postgres_replay(
+        source_failure: bool,
+        shutdown_drain: Option<bool>,
+        recovery_failures: usize,
+    ) {
+        use std::time::Duration;
+
+        use etl::{
+            config::BatchConfig,
+            store::WorkerType,
+            test_utils::{
+                database::{
+                    replication_slot_state, spawn_source_database, terminate_walsender,
+                    test_table_name, wait_for_new_walsender, wait_for_replication_slot_flush_lsn,
+                },
+                pipeline::{PipelineBuilder, random_pipeline_id},
+            },
+        };
+        use etl_postgres::slots::EtlReplicationSlot;
+
+        let database = spawn_source_database().await;
+        let table_name = test_table_name("replay_recovery");
+        let table_id = database
+            .create_table(table_name.clone(), true, &[("value", "int4 not null")])
+            .await
+            .unwrap();
+        let publication = "replay_recovery_publication";
+        database.create_publication(publication, std::slice::from_ref(&table_name)).await.unwrap();
+        let store = NotifyingStore::new();
+        let stream = Arc::new(RecordingStreamClient::default());
+        let client = recording_client(Arc::clone(&stream));
+        let raw = Destination::new(client.clone(), store.clone());
+        let destination = ReplayPipelineDestination {
+            destination: raw,
+            client: client.clone(),
+            store: store.clone(),
+        };
+        let pipeline_id = random_pipeline_id();
+        let slot: String = EtlReplicationSlot::for_apply_worker(&pipeline_id).try_into().unwrap();
+        let mut pipeline = PipelineBuilder::new(
+            database.config.clone(),
+            pipeline_id,
+            publication.to_owned(),
+            store.clone(),
+            destination.clone(),
+        )
+        .with_batch_config(BatchConfig { max_bytes: 1, max_fill_ms: 100, memory_budget_ratio: 0.2 })
+        .with_settle_durable_interval_ms(Some(if source_failure { 600_000 } else { 1 }))
+        .with_drain_on_shutdown(shutdown_drain.unwrap_or(true))
+        .with_shutdown_drain_timeout_ms(if shutdown_drain.is_some() { 100 } else { 5_000 })
+        .build();
+        let synced = store.notify_on_table_sync_complete(table_id).await;
+
+        pipeline.start().await.unwrap();
+
+        synced.notified().await;
+        database.run_sql("analyze").await.unwrap();
+        let (_, old_pid) = replication_slot_state(database.client.as_ref().unwrap(), &slot).await;
+        let old_pid = old_pid.unwrap();
+        if !source_failure {
+            stream.hold_next_status.store(true, Ordering::SeqCst);
+            stream.fail_next_status.store(true, Ordering::SeqCst);
+        }
+        let outcome = tokio::time::timeout(Duration::from_secs(45), async {
+            database
+                .run_sql(&format!(
+                    "insert into {} (value) select generate_series(1, 63)",
+                    table_name.as_quoted_identifier()
+                ))
+                .await
+                .unwrap();
+            loop {
+                let appended = stream.appended.notified();
+                if stream.requests.lock().unwrap().len() == 63 {
+                    break;
+                }
+                appended.await;
+            }
+            let first_lsn = stream.requests.lock().unwrap()[0].start.decode().unwrap().0;
+            let checkpoint = store.get_replication_checkpoint(WorkerType::Apply).await.unwrap();
+            assert!(checkpoint.is_none_or(|lsn| lsn < first_lsn));
+            assert!(
+                replication_slot_state(database.client.as_ref().unwrap(), &slot).await.0
+                    < first_lsn
+            );
+            stream.status_failures_remaining.store(
+                if shutdown_drain.is_some() { usize::MAX } else { recovery_failures },
+                Ordering::SeqCst,
+            );
+            let recovery_failed = stream.recovery_failed.notified();
+
+            if source_failure {
+                assert!(
+                    terminate_walsender(database.client.as_ref().unwrap(), old_pid).await.unwrap()
+                );
+            } else {
+                stream.status_entered.notified().await;
+                stream.release_status.notify_one();
+            }
+            let retry_pid = wait_for_new_walsender(
+                database.client.as_ref().unwrap(),
+                &slot,
+                old_pid,
+                Duration::from_secs(15),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            if shutdown_drain.is_some() {
+                recovery_failed.await;
+                assert!(
+                    store
+                        .get_replication_checkpoint(WorkerType::Apply)
+                        .await
+                        .unwrap()
+                        .is_none_or(|lsn| lsn < first_lsn)
+                );
+                return first_lsn;
+            }
+            // Recovery must skip the accepted prefix before the existing
+            // 64-request window could admit a duplicate and poll it.
+            loop {
+                if store
+                    .get_replication_checkpoint(WorkerType::Apply)
+                    .await
+                    .unwrap()
+                    .is_some_and(|lsn| lsn >= first_lsn)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            wait_for_replication_slot_flush_lsn(
+                database.client.as_ref().unwrap(),
+                &slot,
+                first_lsn,
+            )
+            .await;
+            assert_eq!(stream.status_failures_remaining.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                replication_slot_state(database.client.as_ref().unwrap(), &slot).await.1,
+                Some(retry_pid),
+            );
+            first_lsn
+        })
+        .await;
+        // Allow scheduler and PostgreSQL teardown overhead, but fail well
+        // before recovery's 180-second budget if shutdown stops cancelling it.
+        let shutdown =
+            tokio::time::timeout(Duration::from_secs(5), pipeline.shutdown_and_wait()).await;
+        let first_lsn = outcome.unwrap();
+        shutdown.unwrap().unwrap();
+        let checkpoint = store.get_replication_checkpoint(WorkerType::Apply).await.unwrap();
+        if shutdown_drain.is_some() {
+            assert!(checkpoint.is_none_or(|lsn| lsn < first_lsn));
+            assert!(!client.pending_durability_is_empty().await);
+            assert!(
+                replication_slot_state(database.client.as_ref().unwrap(), &slot).await.0
+                    < first_lsn
+            );
+        } else {
+            assert!(checkpoint.unwrap() >= first_lsn);
+            assert!(client.pending_durability_is_empty().await);
+        }
+        let requests = stream.requests.lock().unwrap();
+        assert_eq!(requests.len(), 63);
+        assert_eq!(requests.iter().map(|request| request.rows.len()).sum::<usize>(), 63);
+        let offsets: HashSet<_> = requests.iter().map(|request| request.end.to_string()).collect();
+        assert_eq!(offsets.len(), 63);
+        assert_eq!(stream.open_reads.load(Ordering::SeqCst), 1);
+    }
+
+    /// A status failure must recover without resending committed rows.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires local PostgreSQL"]
+    async fn postgres_status_retry_reconciles_snowflake_replay() {
+        assert_postgres_replay(false, None, 0).await;
+    }
+
+    /// A source disconnect after Accepted must take the same recovery path.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires local PostgreSQL"]
+    async fn postgres_source_retry_reconciles_snowflake_replay() {
+        assert_postgres_replay(true, None, 0).await;
+    }
+
+    /// Several exhausted status retry bursts recover in the same apply
+    /// attempt, without reconnecting to PostgreSQL or duplicating CDC rows.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires local PostgreSQL"]
+    async fn postgres_transient_recovery_keeps_apply_worker() {
+        assert_postgres_replay(true, None, 3).await;
+    }
+
+    /// Expiring apply drain cancels recovery without acknowledging its rows.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires local PostgreSQL"]
+    async fn postgres_shutdown_during_replay_drain_deadline() {
+        assert_postgres_replay(true, Some(true), 0).await;
+    }
+
+    /// Disabling apply drain still joins the destination's recovery task.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires local PostgreSQL"]
+    async fn postgres_shutdown_during_replay_without_drain() {
+        assert_postgres_replay(true, Some(false), 0).await;
+    }
+
     /// Internal window drains can repeatedly leave an accepted tail even
     /// though the transport has committed every request. The apply loop needs
     /// a later cumulative confirmation to checkpoint these calls.
     #[tokio::test]
     async fn cdc_window_drains_can_keep_returning_accepted() {
-        let (destination, stream, schemas) = recording_destination(65, false).await;
+        let (destination, stream, schemas, _) = recording_destination(65, false).await;
         let mut ordinal = 0;
         for (iteration, count) in [65, 64, 64].into_iter().enumerate() {
             let events = schemas[..count]
@@ -1282,7 +1963,7 @@ mod tests {
 
     #[tokio::test]
     async fn cdc_many_interleaved_tables_preserve_packing_order_and_replay() {
-        let (destination, stream, schemas) = recording_destination(512, false).await;
+        let (destination, stream, schemas, _) = recording_destination(512, false).await;
         let mut events = Vec::new();
         for phase in 0..3 {
             for (index, schema) in schemas.iter().enumerate() {
@@ -1355,7 +2036,7 @@ mod tests {
     #[tokio::test]
     async fn cdc_finishes_first_table_before_encoding_later_tables() {
         for fail_append in [false, true] {
-            let (destination, stream, schemas) = recording_destination(2, fail_append).await;
+            let (destination, stream, schemas, _) = recording_destination(2, fail_append).await;
             // The later table must not be encoded until the first request was
             // sent.
             let invalid_delete = Event::Delete(DeleteEvent {
@@ -1388,7 +2069,7 @@ mod tests {
     #[tokio::test]
     async fn cdc_relation_and_truncate_remain_write_barriers() {
         for truncate in [false, true] {
-            let (destination, stream, schemas) = recording_destination(1, false).await;
+            let (destination, stream, schemas, _) = recording_destination(1, false).await;
             let schema = &schemas[0];
             let barrier = if truncate {
                 Event::Truncate(TruncateEvent {
