@@ -29,7 +29,10 @@ use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
     observability::register_metrics,
-    postgres::{client::PgReplicationClient, migrations},
+    postgres::{
+        client::{PgReplicationClient, SlotCreationMonitor},
+        migrations,
+    },
     replication::{DurabilityMonitor, ReplicationLagMonitor, state::TableState},
     runtime::{ApplyWorker, ApplyWorkerHandle, MemoryMonitor, TableSyncWorkerPool},
     schema::TableId,
@@ -56,6 +59,8 @@ struct PipelineTasks {
     replication_lag_sampler_task: AbortOnDropHandle<()>,
     /// Independent observer of pending main apply-worker destination work.
     durability_metrics_task: AbortOnDropHandle<()>,
+    /// Independent observer of pending main and table-sync slot creation.
+    slot_creation_metrics_task: AbortOnDropHandle<()>,
 }
 
 /// Internal state tracking for pipeline lifecycle.
@@ -251,6 +256,8 @@ where
 
         let durability_monitor = DurabilityMonitor::new(self.pipeline_id.clone());
         let durability_metrics_task = durability_monitor.spawn_durability_metrics_task();
+        let slot_creation_monitor = SlotCreationMonitor::new(self.pipeline_id.clone());
+        let slot_creation_metrics_task = slot_creation_monitor.spawn_slot_creation_metrics_task();
 
         // We create and start the apply worker.
         let apply_worker = ApplyWorker::new(
@@ -261,6 +268,7 @@ where
             self.destination.clone(),
             replication_lag_monitor,
             durability_monitor,
+            slot_creation_monitor,
             self.shutdown_token.clone(),
             table_sync_worker_permits,
             memory_monitor,
@@ -274,6 +282,7 @@ where
                 memory_monitor_task,
                 replication_lag_sampler_task,
                 durability_metrics_task,
+                slot_creation_metrics_task,
             })),
         };
 
@@ -314,6 +323,7 @@ where
             memory_monitor_task,
             replication_lag_sampler_task,
             durability_metrics_task,
+            slot_creation_metrics_task,
         }) = tasks.lock().await.take()
         else {
             bail!(ErrorKind::InvalidState, "Pipeline wait has already been called");
@@ -367,6 +377,7 @@ where
         for (task_name, task) in [
             ("replication lag sampler", replication_lag_sampler_task),
             ("durability monitor", durability_metrics_task),
+            ("slot creation monitor", slot_creation_metrics_task),
             ("memory monitor", memory_monitor_task),
         ] {
             debug!(task_name, "stopping optional background task");
