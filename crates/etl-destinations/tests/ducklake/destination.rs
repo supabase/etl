@@ -6168,3 +6168,190 @@ async fn startup_layout_failure_is_isolated_and_retried() {
         assert_eq!(active_layouts, 1);
     }
 }
+
+/// The hourly task repairs both layouts without writes or resets, isolates a
+/// broken table, preserves unmanaged layouts, and leaves matching catalogs
+/// alone.
+#[cfg(feature = "test-utils")]
+#[tokio::test]
+async fn periodic_layout_reconciliation_repairs_drift_without_resetting_tables() {
+    let lake = create_test_lake("periodic_layout_reconciliation").await;
+    let store = MemoryStore::new();
+    let mut schemas = Vec::new();
+    for (id, name) in [(1, "events"), (2, "broken"), (3, "unmanaged")] {
+        let schema = make_schema(id, "public", name);
+        schemas.push(make_replicated_table_schema(&schema));
+        store.store_table_schema(schema).await.unwrap();
+    }
+    let initial = new_test_destination(&lake.catalog_url, &lake.data_url, store.clone()).await;
+    for schema in &schemas {
+        initial
+            .write_table_rows_for_tests(
+                schema,
+                vec![TableRow::new(vec![Cell::I32(1), Cell::String("example".to_owned())])],
+            )
+            .await
+            .unwrap();
+    }
+    initial.shutdown().await.unwrap();
+    drop(initial);
+    {
+        let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
+        conn.execute_batch(
+            "alter table lake.public.broken rename id to other; alter table lake.public.unmanaged \
+             set partitioned by (id)",
+        )
+        .unwrap();
+    }
+    let destination = DuckLakeDestination::builder(
+        lake.catalog_url.clone(),
+        lake.data_url.clone(),
+        1,
+        store.clone(),
+    )
+    .external_maintenance(DuckLakeExternalMaintenanceConfig::postgres("layout-test"))
+    .table_sorting(DuckLakeTableSortingConfig {
+        tables: vec![DuckLakeTableSortConfig {
+            schema: "public".to_owned(),
+            table: "events".to_owned(),
+            sort_by: DuckLakeSortBy::PrimaryKey,
+        }],
+    })
+    .table_partitioning(DuckLakeTablePartitioningConfig::new(
+        ["events", "broken", "pending"]
+            .into_iter()
+            .map(|table| {
+                DuckLakeTablePartitionConfig::new(
+                    "public".to_owned(),
+                    table.to_owned(),
+                    vec![DuckLakePartitionColumn::new(
+                        "id".to_owned(),
+                        DuckLakePartitionTransform::Bucket { count: 8 },
+                    )],
+                )
+            })
+            .collect(),
+    ))
+    .build()
+    .await
+    .unwrap();
+    destination.startup().await.unwrap();
+    let pending_schema = make_schema(4, "public", "pending");
+    let pending_replicated = make_replicated_table_schema(&pending_schema);
+    let pending_table = table_name_to_ducklake_table_name(&pending_schema.name).unwrap();
+    store.store_table_schema(pending_schema.clone()).await.unwrap();
+    store
+        .store_destination_table_metadata(
+            pending_schema.id,
+            DestinationTableMetadata::new_creating(
+                pending_table.to_metadata_id().unwrap(),
+                pending_schema.snapshot_id,
+                pending_replicated.replication_mask().clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    {
+        let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
+        conn.execute_batch(
+            "alter table lake.public.events reset partitioned by; alter table lake.public.events \
+             reset sorted by",
+        )
+        .unwrap();
+    }
+    // Advance only the timer boundary; database I/O below uses normal time.
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(60 * 60 + 61)).await;
+    tokio::time::resume();
+
+    let metadata = sqlx::PgPool::connect(lake.catalog_url.as_str()).await.unwrap();
+    let metadata_schema: String = sqlx::query_scalar(
+        "select table_schema from information_schema.tables where table_name = \
+         'ducklake_partition_info'",
+    )
+    .fetch_one(&metadata)
+    .await
+    .unwrap();
+    let prefix = quote_identifier(&metadata_schema);
+    // Wait on the catalog effect of the real background task; no foreground
+    // write or explicit reconciliation call can repair the drift in this phase.
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let matched: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "select exists(select 1 from {prefix}.ducklake_table t join \
+                 {prefix}.ducklake_partition_info p using(table_id) join \
+                 {prefix}.ducklake_sort_info s using(table_id) where t.table_name = 'events' and \
+                 t.end_snapshot is null and p.end_snapshot is null and s.end_snapshot is null)"
+            )))
+            .fetch_one(&metadata)
+            .await
+            .unwrap();
+            if matched {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    {
+        let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
+        conn.execute_batch("alter table lake.public.broken rename other to id").unwrap();
+    }
+    destination.reconcile_table_layouts_for_tests().await.unwrap();
+    let snapshot_sql = format!("select max(snapshot_id) from {prefix}.ducklake_snapshot");
+    let before: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(snapshot_sql.clone()))
+        .fetch_one(&metadata)
+        .await
+        .unwrap();
+    destination.reconcile_table_layouts_for_tests().await.unwrap();
+    let after: i64 =
+        sqlx::query_scalar(sqlx::AssertSqlSafe(snapshot_sql)).fetch_one(&metadata).await.unwrap();
+    assert_eq!(before, after);
+    destination.shutdown().await.unwrap();
+    drop(destination);
+
+    let partitions: Vec<(String, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "select t.table_name, c.transform from {prefix}.ducklake_table t join \
+         {prefix}.ducklake_partition_info p using(table_id) join \
+         {prefix}.ducklake_partition_column c using(partition_id, table_id) where t.end_snapshot \
+         is null and p.end_snapshot is null order by t.table_name"
+    )))
+    .fetch_all(&metadata)
+    .await
+    .unwrap();
+    assert_eq!(
+        partitions,
+        vec![
+            ("broken".to_owned(), "bucket(8)".to_owned()),
+            ("events".to_owned(), "bucket(8)".to_owned()),
+            ("unmanaged".to_owned(), "identity".to_owned()),
+        ]
+    );
+    let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
+    assert!(
+        store
+            .get_destination_table_metadata(pending_schema.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_pending()
+    );
+    let pending_exists: bool = conn
+        .query_row(
+            "select exists(select 1 from duckdb_tables() where database_name = 'lake' and \
+             table_name = 'pending')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!pending_exists);
+    for schema in schemas {
+        let table = table_name_to_ducklake_table_name(schema.name()).unwrap();
+        assert_eq!(count_rows(&conn, &table), 1);
+        assert!(
+            store.get_destination_table_metadata(schema.id()).await.unwrap().unwrap().is_applied()
+        );
+    }
+    metadata.close().await;
+}

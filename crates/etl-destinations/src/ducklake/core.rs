@@ -40,12 +40,16 @@ use etl_maintenance::{
 use metrics::gauge;
 use parking_lot::{Mutex, RwLock as ParkingLotRwLock};
 use pg_escape::{quote_identifier as quote_postgres_identifier, quote_literal};
+use rand::Rng;
 use sqlx::{AssertSqlSafe, PgPool, postgres::PgPoolOptions};
 #[cfg(feature = "test-utils")]
 use tokio::sync::oneshot;
-use tokio::sync::{
-    OwnedRwLockReadGuard, OwnedRwLockWriteGuard, OwnedSemaphorePermit, RwLock, Semaphore,
-    TryAcquireError,
+use tokio::{
+    sync::{
+        OwnedRwLockReadGuard, OwnedRwLockWriteGuard, OwnedSemaphorePermit, RwLock, Semaphore,
+        TryAcquireError,
+    },
+    time::{Instant, MissedTickBehavior},
 };
 use tracing::{debug, info, warn};
 use url::Url;
@@ -111,6 +115,30 @@ const DUCKLAKE_METADATA_PG_POOL_SIZE: u32 = 1;
 /// Prefix for ETL-owned tombstone columns that keep same-name replacement DDL
 /// replay-safe.
 pub(super) const DUCKLAKE_DROPPED_COLUMN_PREFIX: &str = "supabase_etl_ducklake_dropped_";
+
+/// Period between catalog layout reconciliation passes.
+const DUCKLAKE_LAYOUT_RECONCILIATION_INTERVAL: Duration = Duration::from_secs(60 * 60);
+/// Maximum initial offset to spread catalog checks across replicators.
+const DUCKLAKE_LAYOUT_RECONCILIATION_JITTER_SECS: u64 = 60;
+
+/// Leaves an existing partition specification intact when source DDL makes the
+/// configured names or transforms stale. Native catalog failures still escape.
+fn preserve_stale_partitioning(
+    table_name: &DuckLakeTableName,
+    result: EtlResult<()>,
+) -> EtlResult<()> {
+    match result {
+        Err(error) if error.kind() == ErrorKind::ConfigError => {
+            warn!(
+                error = %error,
+                table = %table_name,
+                "ducklake partition rule no longer matches source schema, preserving active partition specification"
+            );
+            Ok(())
+        }
+        result => result,
+    }
+}
 
 /// Returns whether a name has an ETL-generated DuckLake tombstone shape.
 fn is_ducklake_tombstone_column_name(column_name: &str) -> bool {
@@ -568,9 +596,11 @@ pub struct DuckLakeDestination<S> {
     table_sorting: Arc<HashMap<DuckLakeTableName, DuckLakeSortBy>>,
     /// Explicit desired partition specifications, including clear operations.
     table_partitioning: Arc<HashMap<DuckLakeTableName, Vec<DuckLakePartitionColumn>>>,
-    /// Applied tables whose startup layout reconciliation must succeed before
+    /// Applied tables whose layout reconciliation must succeed before
     /// their next write. This never authorizes physical schema repair.
     pending_table_layouts: Arc<Mutex<HashSet<DuckLakeTableName>>>,
+    /// Ensures repeated startup calls share one destination-owned layout task.
+    layout_reconciliation_started: Arc<AtomicBool>,
     table_creation_slots: Arc<Semaphore>,
     table_write_slots: Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
     /// Experimental initial-copy buffering policy.
@@ -897,7 +927,9 @@ where
     }
 
     async fn startup(&self) -> EtlResult<()> {
-        self.prepare_tables_after_restart().await
+        self.prepare_tables_after_restart().await?;
+        self.spawn_layout_reconciliation_task().await;
+        Ok(())
     }
 
     async fn drop_table_for_copy(
@@ -2107,6 +2139,7 @@ where
             table_sorting,
             table_partitioning,
             pending_table_layouts: Arc::default(),
+            layout_reconciliation_started: Arc::default(),
             table_creation_slots,
             table_write_slots: Arc::default(),
             copy_buffer_config,
@@ -2990,12 +3023,25 @@ where
         if !self.table_sorting.contains_key(table_name) {
             return Ok(());
         }
-        let desired =
-            resolve_table_sort_columns(self.table_sorting.as_ref(), table_name, table_schema)?;
         let table_write_permit = self.acquire_table_write_slot(table_name).await?;
         let checkpoint_guard = self.acquire_mutation_guard().await;
         let write_guard = DuckLakeWriteGuard::new(&table_write_permit, &checkpoint_guard);
 
+        self.reconcile_table_sorting_with_guard(table_name, table_schema, write_guard).await
+    }
+
+    /// Reconciles sorting while the caller owns table and maintenance guards.
+    async fn reconcile_table_sorting_with_guard(
+        &self,
+        table_name: &DuckLakeTableName,
+        table_schema: &ReplicatedTableSchema,
+        write_guard: DuckLakeWriteGuard,
+    ) -> EtlResult<()> {
+        if !self.table_sorting.contains_key(table_name) {
+            return Ok(());
+        }
+        let desired =
+            resolve_table_sort_columns(self.table_sorting.as_ref(), table_name, table_schema)?;
         let sql = format!(
             "select e.expression, e.sort_direction, e.null_order from {}.{} as e join {}.{} as i \
              on i.sort_id = e.sort_id and i.table_id = e.table_id join {}.{} as t on t.table_id = \
@@ -3041,7 +3087,32 @@ where
                 }
                 // Keep foreground insert latency unchanged. Flush and
                 // compaction still use the table's active sort order.
-                statements.push(build_disable_sort_on_insert_sql_ducklake(table_name));
+                let schema = quote_postgres_identifier(self.metadata_schema.as_ref());
+                let sort_on_insert_disabled: bool = sqlx::query_scalar(AssertSqlSafe(format!(
+                    "select exists(select 1 from {schema}.ducklake_metadata m join \
+                     {schema}.ducklake_table t on t.table_id = m.scope_id join \
+                     {schema}.ducklake_schema s on s.schema_id = t.schema_id where m.scope = \
+                     'table' and m.key = 'sort_on_insert' and m.value = 'false' and s.schema_name \
+                     = $1 and t.table_name = $2 and s.end_snapshot is null and t.end_snapshot is \
+                     null)"
+                )))
+                .bind(table_name.schema())
+                .bind(table_name.table())
+                .fetch_one(&self.metadata_pg_pool)
+                .await
+                .map_err(|source| {
+                    classified_error(
+                        ErrorKind::DestinationQueryFailed,
+                        "DuckLake sort-on-insert option query failed",
+                        source,
+                    )
+                })?;
+                if !sort_on_insert_disabled {
+                    statements.push(build_disable_sort_on_insert_sql_ducklake(table_name));
+                }
+                if statements.is_empty() {
+                    return Ok(());
+                }
                 statements.join(";\n")
             }
             None if !active.is_empty() => build_reset_sorted_by_sql_ducklake(table_name),
@@ -3072,6 +3143,23 @@ where
         &self,
         table_name: &DuckLakeTableName,
         table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        if !self.table_partitioning.contains_key(table_name) {
+            return Ok(());
+        }
+        let table_write_permit = self.acquire_table_write_slot(table_name).await?;
+        let checkpoint_guard = self.acquire_mutation_guard().await;
+        let write_guard = DuckLakeWriteGuard::new(&table_write_permit, &checkpoint_guard);
+        self.reconcile_table_partitioning_with_guard(table_name, table_schema, write_guard).await
+    }
+
+    /// Reconciles partitioning while the caller owns table and maintenance
+    /// guards.
+    async fn reconcile_table_partitioning_with_guard(
+        &self,
+        table_name: &DuckLakeTableName,
+        table_schema: &ReplicatedTableSchema,
+        write_guard: DuckLakeWriteGuard,
     ) -> EtlResult<()> {
         let Some(keys) = self.table_partitioning.get(table_name) else {
             // Older configurations must not clear externally configured
@@ -3108,9 +3196,6 @@ where
                 key.transform(),
             ));
         }
-        let table_write_permit = self.acquire_table_write_slot(table_name).await?;
-        let checkpoint_guard = self.acquire_mutation_guard().await;
-        let write_guard = DuckLakeWriteGuard::new(&table_write_permit, &checkpoint_guard);
         let schema = quote_postgres_identifier(self.metadata_schema.as_ref());
         let sql = format!(
             "select c.column_name, p.transform from {schema}.ducklake_partition_column p join \
@@ -3165,17 +3250,10 @@ where
         table_name: &DuckLakeTableName,
         table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
-        match self.reconcile_table_partitioning(table_name, table_schema).await {
-            Err(error) if error.kind() == ErrorKind::ConfigError => {
-                warn!(
-                    error = %error,
-                    table = %table_name,
-                    "ducklake partition rule no longer matches source schema, preserving active partition specification"
-                );
-                Ok(())
-            }
-            result => result,
-        }
+        preserve_stale_partitioning(
+            table_name,
+            self.reconcile_table_partitioning(table_name, table_schema).await,
+        )
     }
 
     /// Retries an applied table's deferred layout before acknowledging writes.
@@ -3382,6 +3460,107 @@ where
         }
 
         Ok(())
+    }
+
+    /// Starts one hourly task after startup recovery has completed. The task
+    /// shares the destination registry and is aborted and joined by shutdown;
+    /// its destination clone requires that explicit teardown to break
+    /// ownership.
+    async fn spawn_layout_reconciliation_task(&self) {
+        if self.table_sorting.is_empty() && self.table_partitioning.is_empty() {
+            return;
+        }
+        if self.layout_reconciliation_started.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let jitter = Duration::from_secs(
+            rand::rng().random_range(0..=DUCKLAKE_LAYOUT_RECONCILIATION_JITTER_SECS),
+        );
+        let mut interval = tokio::time::interval_at(
+            Instant::now() + DUCKLAKE_LAYOUT_RECONCILIATION_INTERVAL + jitter,
+            DUCKLAKE_LAYOUT_RECONCILIATION_INTERVAL,
+        );
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let destination = self.clone();
+        self.tasks
+            .spawn_with(move || async move {
+                loop {
+                    interval.tick().await;
+                    if let Err(error) = destination.reconcile_applied_table_layouts().await {
+                        warn!(error = %error, "ducklake periodic layout reconciliation failed");
+                    }
+                }
+            })
+            .await;
+    }
+
+    /// Runs one periodic layout pass for integration tests without advancing
+    /// unrelated runtime timers.
+    #[cfg(feature = "test-utils")]
+    pub async fn reconcile_table_layouts_for_tests(&self) -> EtlResult<()> {
+        self.reconcile_applied_table_layouts().await
+    }
+
+    /// Rechecks existing managed tables without creating, resetting, or
+    /// recovering them. A bad table never prevents the remaining checks.
+    async fn reconcile_applied_table_layouts(&self) -> EtlResult<()> {
+        let schemas = self.store.get_table_schemas().await?;
+        let table_ids: HashSet<_> = schemas.iter().map(|schema| schema.id).collect();
+        for table_id in table_ids {
+            if let Err(error) = self.reconcile_applied_table_layout(table_id).await {
+                warn!(
+                    error = %error,
+                    table_id = %table_id,
+                    "ducklake table layout reconciliation failed, will retry"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Holds mutation exclusion while resolving the current applied schema and
+    /// both layouts, so a concurrent source DDL or reset cannot overtake them.
+    async fn reconcile_applied_table_layout(&self, table_id: TableId) -> EtlResult<()> {
+        let Some(metadata) = self.store.get_destination_table_metadata(table_id).await? else {
+            return Ok(());
+        };
+        let table_name = DuckLakeTableName::from_metadata_id(metadata.table_id())?;
+        if !self.table_sorting.contains_key(&table_name)
+            && !self.table_partitioning.contains_key(&table_name)
+        {
+            return Ok(());
+        }
+        let table_write_permit = self.acquire_table_write_slot(&table_name).await?;
+        let checkpoint_guard = self.acquire_mutation_guard().await;
+        let write_guard = DuckLakeWriteGuard::new(&table_write_permit, &checkpoint_guard);
+        // Re-read after taking the lock: initial copy or source DDL may have
+        // changed the table since the scan. Foreground paths own their
+        // recovery.
+        let Some(metadata) = self.store.get_destination_table_metadata(table_id).await? else {
+            return Ok(());
+        };
+        if !metadata.is_applied()
+            || DuckLakeTableName::from_metadata_id(metadata.table_id())? != table_name
+        {
+            return Ok(());
+        }
+        let result = async {
+            let schema = self.target_schema_for_recovery(table_id, &metadata, None).await?;
+            self.reconcile_table_sorting_with_guard(&table_name, &schema, write_guard.clone())
+                .await?;
+            preserve_stale_partitioning(
+                &table_name,
+                self.reconcile_table_partitioning_with_guard(&table_name, &schema, write_guard)
+                    .await,
+            )
+        }
+        .await;
+        if result.is_ok() {
+            self.pending_table_layouts.lock().remove(&table_name);
+        } else {
+            self.pending_table_layouts.lock().insert(table_name);
+        }
+        result
     }
 
     /// Writes streaming CDC events to the destination.
