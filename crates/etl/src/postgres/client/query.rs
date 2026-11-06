@@ -10,6 +10,8 @@ use crate::{
     bail,
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
+    postgres::client::SlotCreationMonitor,
+    replication::WorkerType,
     schema::TableId,
 };
 
@@ -89,13 +91,20 @@ impl<'a, 'tx> PgReplicationQueryTarget<'a, 'tx> {
         slot_name: &str,
         snapshot_action: SnapshotAction,
         config: &ReplicationSlotConfig,
+        monitor: Option<&SlotCreationMonitor>,
+        worker_type: WorkerType,
     ) -> EtlResult<CreateSlotResult> {
         // Do not convert the query or the options to lowercase, since the lexer
         // for replication commands (repl_scanner.l) in Postgres code expects
         // the commands in uppercase. This probably should be fixed in upstream,
         // but for now we will keep the commands in uppercase.
         let query = create_slot_query(slot_name, snapshot_action, config);
-        match self.transaction.simple_query(&query).await {
+        let attempt = monitor.map(|monitor| monitor.start(worker_type));
+        let response = self.transaction.simple_query(&query).await;
+        if let Some(attempt) = attempt {
+            attempt.finish(response.is_ok());
+        }
+        match response {
             Ok(results) => {
                 for result in results {
                     if let SimpleQueryMessage::Row(row) = result {

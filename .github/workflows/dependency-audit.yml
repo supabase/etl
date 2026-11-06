@@ -10,12 +10,14 @@ on:
       - "**/Cargo.lock"
       - "deny.toml"
       - ".github/workflows/dependency-audit.yml"
+      - ".github/ci-metrics/audit-manifest.jq"
   pull_request:
     paths:
       - "**/Cargo.toml"
       - "**/Cargo.lock"
       - "deny.toml"
       - ".github/workflows/dependency-audit.yml"
+      - ".github/ci-metrics/audit-manifest.jq"
   workflow_dispatch:
 
 concurrency:
@@ -42,4 +44,34 @@ jobs:
           tool: cargo-deny@0.19.0
 
       - name: Check dependency advisories
+        id: check
         run: cargo deny --locked --workspace --all-features check advisories
+
+      # Findings for the CI metrics collector, written and kept when the check
+      # fails. The second pass reuses the advisory database the check fetched,
+      # so both see the same advisories. Pull requests build the manifest so a
+      # broken producer fails there, but upload nothing: the collector reads
+      # audits from `main` only. On other runs, metrics plumbing must not fail
+      # the audit itself.
+      - name: Write audit results
+        id: results
+        if: always() && (steps.check.outcome == 'success' || steps.check.outcome == 'failure')
+        continue-on-error: ${{ github.event_name != 'pull_request' }}
+        env:
+          # Equals the jobs API `id`, so the audit manifest joins to this job.
+          JOB_CHECK_RUN_ID: ${{ job.check_run_id }}
+        run: |
+          mkdir -p target/audit-results
+          cargo deny --locked --workspace --all-features --format json check --disable-fetch advisories \
+            2> target/audit-results/cargo-deny.jsonl || true
+          CARGO_DENY_VERSION="$(cargo deny --version | cut -d' ' -f2)" \
+            jq -n -f .github/ci-metrics/audit-manifest.jq \
+            < target/audit-results/cargo-deny.jsonl > target/audit-results/manifest.json
+      - name: Upload audit results
+        if: always() && steps.results.outcome == 'success' && github.event_name != 'pull_request'
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: audit-results-${{ job.check_run_id }}
+          path: target/audit-results/manifest.json
+          if-no-files-found: error

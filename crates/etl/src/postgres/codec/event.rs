@@ -1660,6 +1660,29 @@ mod tests {
     }
 
     #[test]
+    fn build_identity_for_default_without_primary_key_is_empty() {
+        let table_schema = TableSchema::new(
+            TableId::new(42),
+            TableName::new("public".to_owned(), "test".to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false),
+                ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 2, false),
+            ],
+        );
+        let replication_mask = ReplicationMask::from_bytes(vec![1, 1]);
+        let identity = IdentityMessage {
+            primary_key_attnums: Vec::new(),
+            primary_key_condeferrable: false,
+            relreplident: "d".to_owned(),
+            replica_identity_index_attnums: Vec::new(),
+        };
+
+        let identity_mask = identity.build_identity_mask(&table_schema, &replication_mask).unwrap();
+
+        assert_eq!(identity_mask.as_slice(), &[0, 0]);
+    }
+
+    #[test]
     fn convert_tuple_to_row_rejects_missing_non_nullable_columns_for_full_rows() {
         let column_schemas = [
             ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
@@ -1746,6 +1769,34 @@ mod tests {
                 Cell::String("toast".to_owned())
             ]))
         );
+    }
+
+    #[test]
+    fn normalize_key_tuple_to_row_rejects_a_schema_without_identity_columns() {
+        // This is the failure behind #1118. A keyless partitioned root
+        // published with `publish_via_partition_root` yields an empty identity
+        // mask, while PostgreSQL enforces the leaf's replica identity, accepts
+        // the update, and emits a key image against the root. There is no
+        // column to map that image onto.
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "part_root".to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false),
+                ColumnSchema::new("value".to_owned(), Type::TEXT, -1, 2, false),
+            ],
+        ));
+        let replicated_table_schema = ReplicatedTableSchema::from_masks(
+            Arc::clone(&table_schema),
+            ReplicatedTableSchema::all(Arc::clone(&table_schema)).replication_mask().clone(),
+            crate::schema::IdentityMask::from_bytes(vec![0, 0]),
+        );
+        let tuple_data =
+            [TupleData::Text(b"1".to_vec().into()), TupleData::Text(b"after".to_vec().into())];
+
+        let error = normalize_key_tuple_to_row(&replicated_table_schema, &tuple_data).unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::ConversionError);
     }
 
     #[test]

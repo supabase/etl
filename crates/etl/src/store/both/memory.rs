@@ -19,7 +19,7 @@ use crate::{
 };
 
 /// Inner state of [`MemoryStore`].
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct Inner {
     /// Current table state for each table - this is the authoritative source of
     /// truth for table states. Every table being replicated must have an entry
@@ -48,7 +48,7 @@ struct Inner {
 /// All state information, including table states, schema definitions, and
 /// destination table metadata are stored in memory and will be lost on process
 /// restart.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct MemoryStore {
     inner: Arc<Mutex<Inner>>,
 }
@@ -60,21 +60,7 @@ impl MemoryStore {
     /// data. As the pipeline runs, it will populate these collections with
     /// table state and schema information.
     pub fn new() -> Self {
-        let inner = Inner {
-            table_states: Arc::new(BTreeMap::new()),
-            table_state_history: HashMap::new(),
-            table_schemas: Arc::new(TableSchemaSnapshots::default()),
-            destination_tables_metadata: Arc::new(BTreeMap::new()),
-            replication_checkpoints: HashMap::new(),
-        };
-
-        Self { inner: Arc::new(Mutex::new(inner)) }
-    }
-}
-
-impl Default for MemoryStore {
-    fn default() -> Self {
-        Self::new()
+        Self::default()
     }
 }
 

@@ -61,7 +61,7 @@ pub(crate) struct CiMetricsArgs {
 enum CiMetricsCommand {
     /// Apply schema migrations. Run by hand as the database owner.
     Migrate,
-    /// Sync runs, jobs, manifests and code-scanning data.
+    /// Sync runs, jobs, manifests, code-scanning data and Dependabot alerts.
     Sync(SyncArgs),
 }
 
