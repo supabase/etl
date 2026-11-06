@@ -468,7 +468,7 @@ where
         let table_id = e.replicated_table_schema.id();
         let cols = self.prepare_columns(columns, &e.replicated_table_schema).await?;
         let offset = OffsetToken::new(e.commit_lsn, e.tx_ordinal);
-        if self.client.is_offset_committed(table_id, &offset).await.map_err(EtlError::from)? {
+        if self.client.reconcile_replay_offset(table_id, &offset).await? {
             return Ok(Completed::default());
         }
 
@@ -496,7 +496,7 @@ where
         let table_id = e.replicated_table_schema.id();
         let cols = self.prepare_columns(columns, &e.replicated_table_schema).await?;
         let offset = OffsetToken::new(e.commit_lsn, e.tx_ordinal);
-        if self.client.is_offset_committed(table_id, &offset).await.map_err(EtlError::from)? {
+        if self.client.reconcile_replay_offset(table_id, &offset).await? {
             return Ok(Completed::default());
         }
 
@@ -520,7 +520,7 @@ where
         let table_id = e.replicated_table_schema.id();
         let offset = OffsetToken::new(e.commit_lsn, e.tx_ordinal);
         let cols = self.prepare_columns(columns, &e.replicated_table_schema).await?;
-        if self.client.is_offset_committed(table_id, &offset).await.map_err(EtlError::from)? {
+        if self.client.reconcile_replay_offset(table_id, &offset).await? {
             return Ok(Completed::default());
         }
 

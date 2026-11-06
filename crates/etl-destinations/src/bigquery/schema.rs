@@ -873,10 +873,14 @@ mod tests {
                     't' => '\t',
                     'v' => '\u{b}',
                     escaped @ ('\\' | '?' | '"' | '\'' | '`') => escaped,
-                    escaped @ ('u' | 'U') => {
-                        let digits = if escaped == 'u' { 4 } else { 8 };
+                    // GoogleSQL accepts `\uXXXX` and `\UXXXXXXXX`; production
+                    // writes the 8-digit form outside the Basic Multilingual
+                    // Plane.
+                    marker @ ('u' | 'U') => {
+                        let digits = if marker == 'u' { 4 } else { 8 };
                         let hex: String = chars.by_ref().take(digits).collect();
-                        if hex.len() != digits || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                        if hex.len() != digits || !hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+                        {
                             return None;
                         }
                         char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?

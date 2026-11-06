@@ -1,4 +1,4 @@
-use std::{string::String, sync::Arc, time::Duration};
+use std::{string::String, sync::Arc};
 
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::{Client, StatusCode};
@@ -8,21 +8,15 @@ use tokio::sync::OnceCell;
 use tracing::{debug, warn};
 
 use crate::{
-    retry::{RetryPolicy, retry_with_backoff},
+    retry::retry_with_backoff,
     snowflake::{
         Error, Result, SnowpipeError,
         auth::{TokenProvider, send_with_token_refresh},
         streaming::{
             ChannelStatusResponse, InsertRowsResponse, OffsetToken, OpenChannelResponse, RowBatch,
-            StreamClient,
+            SNOWPIPE_RETRY_POLICY, StreamClient,
         },
     },
-};
-
-const SNOWPIPE_RETRY_POLICY: RetryPolicy = RetryPolicy {
-    max_retries: 3,
-    initial_delay: Duration::from_millis(500),
-    max_delay: Duration::from_secs(10),
 };
 
 const USER_AGENT: &str = "supabase-etl/0.1.0";

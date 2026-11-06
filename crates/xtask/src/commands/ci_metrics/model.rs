@@ -158,3 +158,40 @@ pub(super) struct CodeScanningAnalysis {
     pub(super) warning: String,
     pub(super) tool: Tool,
 }
+
+/// One Dependabot alert, structural metadata only.
+#[derive(Debug, Deserialize)]
+pub(super) struct DependabotAlert {
+    pub(super) number: i32,
+    pub(super) state: String,
+    pub(super) created_at: DateTime<Utc>,
+    pub(super) updated_at: DateTime<Utc>,
+    pub(super) fixed_at: Option<DateTime<Utc>>,
+    pub(super) dismissed_at: Option<DateTime<Utc>>,
+    pub(super) auto_dismissed_at: Option<DateTime<Utc>>,
+    pub(super) dependency: AlertDependency,
+    pub(super) security_advisory: SecurityAdvisory,
+}
+
+/// The vulnerable dependency behind a Dependabot alert. GitHub's schema does
+/// not require the package or manifest, so a missing one must not fail the
+/// whole page.
+#[derive(Debug, Deserialize)]
+pub(super) struct AlertDependency {
+    pub(super) package: Option<AlertPackage>,
+    pub(super) manifest_path: Option<String>,
+}
+
+/// A package in a dependency manifest.
+#[derive(Debug, Deserialize)]
+pub(super) struct AlertPackage {
+    pub(super) ecosystem: String,
+    pub(super) name: String,
+}
+
+/// The advisory behind a Dependabot alert.
+#[derive(Debug, Deserialize)]
+pub(super) struct SecurityAdvisory {
+    pub(super) ghsa_id: String,
+    pub(super) severity: String,
+}
