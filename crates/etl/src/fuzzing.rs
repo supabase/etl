@@ -1,19 +1,20 @@
 //! Fuzz-only entrypoints for internal parsers.
 
-use std::sync::Arc;
+use std::{collections::HashSet, str::FromStr, sync::Arc};
 
 use bytes::Bytes;
-use etl_postgres::numeric::PgNumeric;
+use etl_postgres::{numeric::PgNumeric, type_utils::convert_type_oid_to_type};
 use postgres_replication::protocol::{LogicalReplicationMessage, TupleData};
+use serde_json::json;
 use tokio_postgres::types::{PgLsn, Type};
 
 use crate::{
     data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
     error::EtlResult,
-    postgres::codec,
+    postgres::codec::{self, RelationSchemaMismatchKind, SchemaChangeMessage},
     schema::{
-        ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, TableId, TableName,
-        TableSchema,
+        ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId,
+        TableName, TableSchema,
     },
 };
 
@@ -72,6 +73,35 @@ const PGOUTPUT_TUPLE_FUZZ_TYPES: &[Type] = &[Type::TEXT, Type::INT8, Type::BOOL,
 
 /// Relation id written into assembled pgoutput messages.
 const PGOUTPUT_TUPLE_FUZZ_REL_ID: u32 = 42;
+
+/// Column names the relation fuzz target draws from.
+///
+/// Stored schemas use each name at most once, as Postgres requires. Relations
+/// may repeat names, and a selector past the end sends a name that is not
+/// valid UTF-8.
+const RELATION_FUZZ_NAMES: [&str; 8] = ["id", "a", "b", "c", "d", "e", "f", "g"];
+
+/// Built-in column types the relation fuzz target draws from: an integer
+/// widening pair, the string types ETL decodes alike, a numeric type, and a
+/// timestamp pair.
+const RELATION_FUZZ_TYPES: [Type; 8] = [
+    Type::INT4,
+    Type::INT8,
+    Type::TEXT,
+    Type::VARCHAR,
+    Type::BPCHAR,
+    Type::NUMERIC,
+    Type::TIMESTAMP,
+    Type::TIMESTAMPTZ,
+];
+
+/// Type OID outside the built-in range, standing in for domains, enums, and
+/// extension types, which ETL maps to text.
+const RELATION_FUZZ_UNKNOWN_TYPE_OID: u32 = 16_500;
+
+/// Replica-identity modes a schema change message can report, plus one that
+/// Postgres never sends.
+const RELATION_FUZZ_RELREPLIDENTS: [&str; 5] = ["d", "f", "i", "n", "x"];
 
 /// Returns the fuzz type table entry for a selector byte.
 fn text_cell_fuzz_type(selector: u8) -> &'static Type {
@@ -213,6 +243,108 @@ fn check_old_table_row(
     match old_table_row {
         OldTableRow::Full(row) => assert_eq!(row.values().len(), replicated_count),
         OldTableRow::Key(row) => assert_eq!(row.values().len(), identity_count),
+    }
+}
+
+/// Returns the type OID for a relation fuzz type selector byte.
+fn relation_fuzz_type_oid(selector: u8) -> u32 {
+    RELATION_FUZZ_TYPES
+        .get(usize::from(selector) % (RELATION_FUZZ_TYPES.len() + 1))
+        .map_or(RELATION_FUZZ_UNKNOWN_TYPE_OID, Type::oid)
+}
+
+/// Builds a schema change message from fuzz input.
+///
+/// The first byte picks the column count (1 to 8). Each column then takes five
+/// bytes: name, type, attnum step, typmod, and flags (bit 0 `NOT NULL`, bit 1
+/// primary key, bit 2 replica-identity index). A final byte picks the
+/// replica-identity mode. The message is serialized to JSON and parsed by the
+/// same code that handles schema change messages from the replication stream.
+fn fuzz_schema_change_message(input: &mut FuzzBytes<'_>) -> SchemaChangeMessage {
+    let column_count = usize::from(input.byte()) % RELATION_FUZZ_NAMES.len() + 1;
+    let mut used_names = [false; RELATION_FUZZ_NAMES.len()];
+    let mut attnum = 0_i32;
+    let mut columns = Vec::with_capacity(column_count);
+    let mut primary_key_attnums = Vec::new();
+    let mut replica_identity_index_attnums = Vec::new();
+    for _ in 0..column_count {
+        // Postgres column names are unique, so a taken name moves on to the
+        // next free one.
+        let name_selector = usize::from(input.byte());
+        let name_index = (0..RELATION_FUZZ_NAMES.len())
+            .map(|offset| (name_selector + offset) % RELATION_FUZZ_NAMES.len())
+            .find(|&index| !used_names[index])
+            .expect("a stored schema has at most as many columns as names");
+        used_names[name_index] = true;
+        let type_oid = relation_fuzz_type_oid(input.byte());
+        // A zero step repeats the previous attnum, which Postgres never
+        // sends but the parser must survive.
+        let attnum_step = input.byte();
+        attnum += if attnum_step == 0 { 0 } else { i32::from(attnum_step % 3) + 1 };
+        let typmod = i32::from(input.byte()) - 1;
+        let flags = input.byte();
+        if flags & 2 != 0 {
+            primary_key_attnums.push(attnum);
+        }
+        if flags & 4 != 0 {
+            replica_identity_index_attnums.push(attnum);
+        }
+        columns.push(json!({
+            "attname": RELATION_FUZZ_NAMES[name_index],
+            "atttypid": type_oid,
+            "atttypmod": typmod,
+            "attnum": attnum,
+            "attnotnull": flags & 1 != 0,
+            "default_expression": null,
+        }));
+    }
+    let relreplident =
+        RELATION_FUZZ_RELREPLIDENTS[usize::from(input.byte()) % RELATION_FUZZ_RELREPLIDENTS.len()];
+
+    let message = json!({
+        "command_tag": "ALTER TABLE",
+        "nspname": "public",
+        "relname": "fuzz",
+        "oid": PGOUTPUT_TUPLE_FUZZ_REL_ID,
+        "identity": {
+            "primary_key_attnums": primary_key_attnums,
+            "relreplident": relreplident,
+            "replica_identity_index_attnums": replica_identity_index_attnums,
+        },
+        "columns": columns,
+    });
+    SchemaChangeMessage::from_str(&message.to_string())
+        .expect("assembled schema change message must parse")
+}
+
+/// Appends a pgoutput RELATION message built from fuzz input to `message`.
+///
+/// One byte picks the replica identity mode and one the column count (0 to
+/// 8). Each column then takes three bytes: name, type, and flags (bit 0 marks
+/// a replica-identity column).
+fn append_fuzz_relation(message: &mut Vec<u8>, input: &mut FuzzBytes<'_>) {
+    let replica_identity = [b'd', b'f', b'i', b'n'][usize::from(input.byte()) % 4];
+    let column_count = usize::from(input.byte()) % (RELATION_FUZZ_NAMES.len() + 1);
+
+    message.push(b'R');
+    message.extend_from_slice(&PGOUTPUT_TUPLE_FUZZ_REL_ID.to_be_bytes());
+    message.extend_from_slice(b"public\0fuzz\0");
+    message.push(replica_identity);
+    message.extend_from_slice(
+        &u16::try_from(column_count).expect("relation width is small").to_be_bytes(),
+    );
+    for _ in 0..column_count {
+        let name_selector = usize::from(input.byte()) % (RELATION_FUZZ_NAMES.len() + 1);
+        let type_oid = relation_fuzz_type_oid(input.byte());
+        let flags = input.byte();
+        message.push(flags & 1);
+        match RELATION_FUZZ_NAMES.get(name_selector) {
+            Some(name) => message.extend_from_slice(name.as_bytes()),
+            None => message.push(0xff),
+        }
+        message.push(0);
+        message.extend_from_slice(&type_oid.to_be_bytes());
+        message.extend_from_slice(&(-1_i32).to_be_bytes());
     }
 }
 
@@ -369,5 +501,154 @@ pub fn check_pgoutput_tuple_decoding(data: &[u8]) {
             check_old_table_row(&old_table_row, replicated_count, identity_count);
         }
         _ => unreachable!("assembled message is an insert, update, or delete"),
+    }
+}
+
+/// Applies a fuzzed RELATION message to a stored schema from a fuzzed schema
+/// change message, then decodes an insert with the resulting decoder.
+///
+/// The input encodes, in order, the schema change message (see
+/// `fuzz_schema_change_message`), the RELATION message (see
+/// `append_fuzz_relation`), and one insert tuple. The relation is applied
+/// with the same steps as `ApplyLoop::materialize_relation_schema`: name-based
+/// replication and identity masks, then mismatch detection.
+///
+/// # Panics
+///
+/// Panics when, after the masks build, any of these breaks: the decoder keeps
+/// exactly the stored columns the relation names, in stored order; identity
+/// columns are replicated; the schema change identity builds a mask for every
+/// mode Postgres sends, covering only replicated columns; mismatch detection
+/// reports nothing exactly when names and mapped types agree position by
+/// position, and reports `name_order` exactly when the first disagreement is a
+/// name; a decoded insert has one value per replicated column. That panic is
+/// the fuzz target's finding signal.
+pub fn check_pgoutput_relation_materialization(data: &[u8]) {
+    let mut input = FuzzBytes { data };
+
+    let schema_change = fuzz_schema_change_message(&mut input);
+    let column_count = schema_change.columns.len();
+    let primary_key_attnums: HashSet<i32> =
+        schema_change.identity.primary_key_attnums.iter().copied().collect();
+    let identity = schema_change.identity.clone();
+    let table_schema =
+        Arc::new(schema_change.into_table_schema(SnapshotId::new(PgLsn::from(1), PgLsn::from(1))));
+    assert_eq!(table_schema.column_schemas.len(), column_count);
+    assert!(
+        table_schema
+            .column_schemas
+            .windows(2)
+            .all(|pair| pair[0].ordinal_position <= pair[1].ordinal_position)
+    );
+    assert!(table_schema.column_schemas.iter().all(|column| {
+        column.primary_key_ordinal_position.is_some()
+            == primary_key_attnums.contains(&column.ordinal_position)
+    }));
+
+    let mut message = Vec::new();
+    append_fuzz_relation(&mut message, &mut input);
+    let LogicalReplicationMessage::Relation(relation) =
+        LogicalReplicationMessage::parse(&Bytes::from(message))
+            .expect("assembled relation message must parse")
+    else {
+        unreachable!("assembled message is a relation");
+    };
+
+    // Non-UTF-8 names and names missing from the stored schema are rejected
+    // here, as in production.
+    let Ok(replicated_names) = codec::parse_replicated_column_names(&relation) else {
+        return;
+    };
+    let Ok(replication_mask) = ReplicationMask::try_build(&table_schema, &replicated_names) else {
+        return;
+    };
+    let identity_names =
+        codec::parse_replica_identity_column_names(&relation).expect("relation names parsed above");
+    let identity_mask = IdentityMask::try_build(&table_schema, &identity_names)
+        .expect("relation identity columns are relation columns");
+
+    let valid_relreplident = ["d", "f", "i", "n"].contains(&identity.relreplident.as_str());
+    match identity.build_identity_mask(&table_schema, &replication_mask) {
+        Ok(mask) => {
+            assert!(valid_relreplident);
+            assert_eq!(mask.as_slice().len(), column_count);
+            assert!(
+                mask.as_slice()
+                    .iter()
+                    .zip(replication_mask.as_slice())
+                    .all(|(&identity, &replicated)| identity <= replicated)
+            );
+        }
+        Err(_) => assert!(!valid_relreplident),
+    }
+
+    let replicated_table_schema = ReplicatedTableSchema::from_masks(
+        Arc::clone(&table_schema),
+        replication_mask,
+        identity_mask,
+    );
+    let decoder_names: Vec<&str> =
+        replicated_table_schema.column_schemas().map(|column| column.name.as_str()).collect();
+    let stored_names: Vec<&str> = table_schema
+        .column_schemas
+        .iter()
+        .filter(|column| replicated_names.contains(&column.name))
+        .map(|column| column.name.as_str())
+        .collect();
+    assert_eq!(decoder_names, stored_names);
+    assert!(
+        replicated_table_schema
+            .identity_column_schemas()
+            .all(|column| replicated_names.contains(&column.name))
+    );
+
+    let decoder_columns: Vec<(&str, Option<Type>)> = replicated_table_schema
+        .column_schemas()
+        .map(|column| (column.name.as_str(), Some(column.typ.clone())))
+        .collect();
+    let relation_columns: Vec<(&str, Option<Type>)> = relation
+        .columns()
+        .iter()
+        .map(|column| {
+            let name = column.name().expect("relation names parsed above");
+            (name, u32::try_from(column.type_id()).ok().map(convert_type_oid_to_type))
+        })
+        .collect();
+    let mismatch = codec::detect_relation_schema_mismatch(&relation, &replicated_table_schema)
+        .expect("relation names parsed above");
+    match mismatch.map(|mismatch| mismatch.kind()) {
+        None => assert_eq!(decoder_columns, relation_columns),
+        Some(RelationSchemaMismatchKind::ColumnCount) => {
+            assert_ne!(decoder_columns.len(), relation_columns.len());
+        }
+        Some(kind) => {
+            assert_eq!(decoder_columns.len(), relation_columns.len());
+            let (decoder_column, relation_column) = decoder_columns
+                .iter()
+                .zip(&relation_columns)
+                .find(|(decoder_column, relation_column)| decoder_column != relation_column)
+                .expect("a reported mismatch has a disagreeing position");
+            assert_eq!(
+                kind == RelationSchemaMismatchKind::NameOrder,
+                decoder_column.0 != relation_column.0
+            );
+        }
+    }
+
+    let replicated_count = replicated_table_schema.column_schemas().len();
+    let mut message = vec![b'I'];
+    message.extend_from_slice(&PGOUTPUT_TUPLE_FUZZ_REL_ID.to_be_bytes());
+    message.push(b'N');
+    append_fuzz_tuple(&mut message, &mut input, replicated_count);
+    let LogicalReplicationMessage::Insert(insert) =
+        LogicalReplicationMessage::parse(&Bytes::from(message))
+            .expect("assembled insert message must parse")
+    else {
+        unreachable!("assembled message is an insert");
+    };
+    if let Ok(event) =
+        codec::parse_event_from_insert_message(replicated_table_schema, PgLsn::from(0), 0, &insert)
+    {
+        assert_eq!(event.table_row.values().len(), replicated_count);
     }
 }
