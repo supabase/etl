@@ -361,6 +361,7 @@ mod ducklake {
             maintenance_mode,
             copy_buffer,
             table_sorting,
+            table_partitioning,
         } = &replicator_config.destination
         else {
             unreachable!("Destination kind should match DuckLake config");
@@ -409,6 +410,7 @@ mod ducklake {
         .expire_snapshots_older_than(expire_snapshots_older_than.clone())
         .copy_buffer(*copy_buffer)
         .table_sorting(table_sorting.clone())
+        .table_partitioning(table_partitioning.clone())
         .external_maintenance(external_maintenance)
         .build()
         .await?;
