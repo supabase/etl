@@ -640,12 +640,15 @@ where
         let current_columns: Vec<_> =
             current_schema.destination_column_schemas(SNOWFLAKE_COLUMN_NAME_MAPPING).collect();
         let table_name = metadata.table_id().to_owned();
+        let plan = current_schema.plan_schema_change(new_schema, SNOWFLAKE_COLUMN_NAME_MAPPING)?;
+        // Refresh already requires scalar JSON columns to use VARIANT. Check
+        // before setup, view parking, or DDL can partially apply a doomed plan.
+        self.client.validate_json_type_changes(&table_name, &plan).await.map_err(EtlError::from)?;
         self.client
             .prepare_existing_table(table_id, &table_name, &current_columns)
             .await
             .map_err(EtlError::from)?;
 
-        let plan = current_schema.plan_schema_change(new_schema, SNOWFLAKE_COLUMN_NAME_MAPPING)?;
         self.client.wait_for_pending_durability().await.map_err(EtlError::from)?;
 
         let table = self.client.lock_table(table_id).await;
@@ -941,7 +944,10 @@ mod tests {
     };
 
     use super::*;
-    use crate::snowflake::{Config, Error, SqlClient};
+    use crate::snowflake::{
+        Config, Error, SqlClient,
+        test_server::{CountingTokenProvider, serve_sql_responses},
+    };
 
     /// Creates a synthetic composite snapshot ID for tests.
     fn test_snapshot_id(commit_lsn: u64, message_lsn: u64) -> SnapshotId {
@@ -982,6 +988,101 @@ mod tests {
         let destination = Destination::new(client, store.clone());
 
         (destination, store)
+    }
+
+    /// Creates a real destination client whose HTTP requests stay on localhost.
+    fn local_destination(
+        url: &str,
+        store: NotifyingStore,
+    ) -> Destination<NotifyingStore, CountingTokenProvider, RestStreamClient<CountingTokenProvider>>
+    {
+        let config = Config::new("example-account", "test-user", "test-db", "test-schema")
+            .unwrap()
+            .with_test_account_url(url.to_owned());
+        let auth = Arc::new(CountingTokenProvider::default());
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let sql =
+            SqlClient::new(config.clone_without_credentials(), Arc::clone(&auth), http.clone());
+        let streaming = Arc::new(RestStreamClient::new(url.to_owned(), auth, http));
+        let client = Client::with_clients(
+            sql,
+            streaming,
+            config.database().to_owned(),
+            config.schema().to_owned(),
+            "1".into(),
+        );
+        Destination::new(client, store)
+    }
+
+    /// Builds a type change together with a drop, an addition, and optional
+    /// rename.
+    fn json_transition_schemas(
+        before_type: Type,
+        after_type: Type,
+        rename: bool,
+    ) -> (ReplicatedTableSchema, ReplicatedTableSchema) {
+        let id = ColumnSchema::new("id".into(), Type::INT4, -1, 1, false).with_primary_key(1);
+        let before = TableSchema::with_snapshot_id(
+            TableId::new(1),
+            TableName::new("public".into(), "events".into()),
+            vec![
+                id.clone(),
+                ColumnSchema::new("payload".into(), before_type, -1, 2, true),
+                ColumnSchema::new("removed".into(), Type::TEXT, -1, 3, true),
+            ],
+            test_snapshot_id(10, 10),
+        );
+        let after = TableSchema::with_snapshot_id(
+            before.id,
+            before.name.clone(),
+            vec![
+                id,
+                ColumnSchema::new(
+                    if rename { "renamed_payload" } else { "payload" }.into(),
+                    after_type,
+                    -1,
+                    2,
+                    true,
+                ),
+                ColumnSchema::new("added".into(), Type::JSONB, -1, 4, true),
+            ],
+            test_snapshot_id(20, 20),
+        );
+        (ReplicatedTableSchema::all(Arc::new(before)), ReplicatedTableSchema::all(Arc::new(after)))
+    }
+
+    /// Returns the old raw-table metadata, including a default that must not
+    /// change.
+    fn json_transition_columns(physical_type: &str) -> String {
+        let columns = [
+            ("id", "FIXED", serde_json::Value::Null),
+            ("payload", physical_type, serde_json::json!("'{}'")),
+            ("removed", "TEXT", serde_json::Value::Null),
+            (schema::CDC_OPERATION_COLUMN, "TEXT", serde_json::Value::Null),
+            (schema::CDC_SEQUENCE_COLUMN, "TEXT", serde_json::Value::Null),
+            (schema::CDC_MISSING_COLUMNS_COLUMN, "ARRAY", serde_json::Value::Null),
+        ];
+        serde_json::json!({
+            "statementHandle": "test-statement",
+            "resultSetMetaData": {
+                "numRows": columns.len(),
+                "rowType": [
+                    {"name": "column_name"}, {"name": "data_type"}, {"name": "default"}
+                ]
+            },
+            "data": columns.into_iter().map(|(name, typ, default)| {
+                let nullable = !matches!(
+                    name,
+                    "id" | schema::CDC_OPERATION_COLUMN | schema::CDC_SEQUENCE_COLUMN
+                );
+                serde_json::json!([
+                    name,
+                    serde_json::json!({"type": typ, "nullable": nullable}).to_string(),
+                    default
+                ])
+            }).collect::<Vec<_>>()
+        })
+        .to_string()
     }
 
     fn replicated_schema() -> ReplicatedTableSchema {
@@ -1030,6 +1131,91 @@ mod tests {
         assert_eq!(operations[1].0.id(), schema.id());
         assert_eq!(operations[1].1, second_offset);
         assert!(matches!(iter.next(), Some(Event::Unsupported)));
+    }
+
+    /// Rejection and restart leave metadata applied and send no DDL or channel
+    /// requests.
+    #[tokio::test]
+    async fn json_type_change_rejects_before_schema_effects_and_on_restart() {
+        for after_type in [Type::JSON, Type::JSONB] {
+            for rename in [false, true] {
+                let (before, after) =
+                    json_transition_schemas(Type::TEXT, after_type.clone(), rename);
+                let response = json_transition_columns("TEXT");
+                let (url, server) = serve_sql_responses(vec![response.clone(), response]).await;
+                let store = NotifyingStore::new();
+                store.store_table_schema(before.inner().clone()).await.unwrap();
+                store.store_table_schema(after.inner().clone()).await.unwrap();
+                let metadata = DestinationTableMetadata::new_applied(
+                    "PUBLIC_EVENTS".into(),
+                    before.inner().snapshot_id,
+                    before.replication_mask().clone(),
+                );
+                store
+                    .store_destination_table_metadata(before.id(), metadata.clone())
+                    .await
+                    .unwrap();
+
+                // Rebuild process-local state to exercise restart against the
+                // same durable endpoint.
+                for _ in 0..2 {
+                    let destination = local_destination(&url, store.clone());
+                    let error = destination.writer.handle_relation_event(&after).await.unwrap_err();
+                    assert_eq!(error.kind(), ErrorKind::ConfigError);
+                    assert!(error.to_string().contains("must have physical type VARIANT"));
+                    assert!(error.to_string().contains("Resynchronize"));
+                    assert_eq!(
+                        store.get_destination_table_metadata(before.id()).await.unwrap(),
+                        Some(metadata.clone())
+                    );
+                    assert!(!destination.writer.client.has_channel(before.id()).await);
+                }
+
+                let requests = timeout(Duration::from_secs(5), server).await.unwrap().unwrap();
+                assert_eq!(
+                    requests,
+                    vec!["show columns in table \"test-db\".\"test-schema\".\"PUBLIC_EVENTS\""; 2]
+                );
+            }
+        }
+    }
+
+    /// Physical VARIANT is accepted even after legacy drift or a simultaneous
+    /// rename.
+    #[tokio::test]
+    async fn json_type_preflight_accepts_variant_without_changing_defaults() {
+        for (before_type, after_type) in
+            [(Type::TEXT, Type::JSONB), (Type::JSON, Type::JSONB), (Type::JSONB, Type::JSON)]
+        {
+            let (before, after) = json_transition_schemas(before_type, after_type, true);
+            let (url, server) = serve_sql_responses(vec![json_transition_columns("VARIANT")]).await;
+            let destination = local_destination(&url, NotifyingStore::new());
+            let plan = before.plan_schema_change(&after, SNOWFLAKE_COLUMN_NAME_MAPPING).unwrap();
+
+            destination
+                .writer
+                .client
+                .validate_json_type_changes("PUBLIC_EVENTS", &plan)
+                .await
+                .unwrap();
+
+            let requests = timeout(Duration::from_secs(5), server).await.unwrap().unwrap();
+            assert_eq!(
+                requests,
+                vec!["show columns in table \"test-db\".\"test-schema\".\"PUBLIC_EVENTS\""]
+            );
+        }
+    }
+
+    /// New JSON columns and unrelated type changes do not trigger a metadata
+    /// read.
+    #[tokio::test]
+    async fn json_type_preflight_ignores_additions_and_non_json_changes() {
+        let (before, after) = json_transition_schemas(Type::TEXT, Type::INT8, true);
+        let plan = before.plan_schema_change(&after, SNOWFLAKE_COLUMN_NAME_MAPPING).unwrap();
+        let (destination, _) = test_destination();
+
+        destination.writer.client.validate_json_type_changes("PUBLIC_EVENTS", &plan).await.unwrap();
     }
 
     /// Startup only prepares destinations whose initial synchronization

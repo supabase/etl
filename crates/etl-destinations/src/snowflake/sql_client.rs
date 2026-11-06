@@ -194,6 +194,28 @@ impl<T: TokenProvider> SqlClient<T> {
         Ok(())
     }
 
+    /// Checks existing JSON storage without changing defaults or table layout.
+    pub(super) async fn validate_json_columns(
+        &self,
+        table_name: &str,
+        column_names: &[&str],
+    ) -> Result<()> {
+        let fqn = self.fully_qualified_name(table_name);
+        let response = self.execute_statement(&format!("show columns in table {fqn}")).await?;
+        let names = parse_show_columns(&response)?;
+        for &column_name in column_names {
+            if !names.contains(&column_name) {
+                return Err(Error::MissingTableColumn {
+                    table_name: table_name.to_owned(),
+                    column_name: column_name.to_owned(),
+                });
+            }
+        }
+        let columns = parse_table_columns(&response, names)?;
+        json_columns_with_defaults(&response, &columns, column_names)?;
+        Ok(())
+    }
+
     /// Upgrades only the known legacy CDC format before opening a channel.
     ///
     /// Authoritative destination metadata must establish ownership first.
@@ -610,7 +632,8 @@ fn json_columns_with_defaults<'a>(
             })?;
         if typ != "VARIANT" {
             return Err(Error::Config(format!(
-                "Snowflake JSON column '{name}' must have physical type VARIANT"
+                "Snowflake JSON column '{name}' must have physical type VARIANT. Resynchronize \
+                 the table to restore its JSON storage layout."
             )));
         }
         match default {
@@ -695,6 +718,23 @@ fn validate_column_names(
     Ok(())
 }
 
+/// Reads physical types and defaults for names parsed from the same response.
+fn parse_table_columns<'a>(
+    response: &'a StatementResponse,
+    names: Vec<&'a str>,
+) -> Result<Vec<ShowColumn<'a>>> {
+    let types = parse_named_show_column(response, "SHOW COLUMNS", "data_type")?;
+    let defaults = parse_named_show_values(response, "SHOW COLUMNS", "default")?;
+
+    // Each parser reads every row of the same complete response in order.
+    Ok(names
+        .into_iter()
+        .zip(types)
+        .zip(defaults)
+        .map(|((name, data_type), default)| ShowColumn { name, data_type, default })
+        .collect())
+}
+
 /// Validates a table response and returns scalar JSON columns with defaults.
 fn validate_table_response<'a>(
     response: &'a StatementResponse,
@@ -706,16 +746,7 @@ fn validate_table_response<'a>(
     // Missing column errors must precede metadata validation so callers can
     // recognize the legacy layout and attempt its supported upgrade.
     validate_column_names(table_name, expected_column_names, &names)?;
-    let types = parse_named_show_column(response, "SHOW COLUMNS", "data_type")?;
-    let defaults = parse_named_show_values(response, "SHOW COLUMNS", "default")?;
-
-    // Each parser reads every row of the same complete response in order.
-    let columns = names
-        .into_iter()
-        .zip(types)
-        .zip(defaults)
-        .map(|((name, data_type), default)| ShowColumn { name, data_type, default })
-        .collect::<Vec<_>>();
+    let columns = parse_table_columns(response, names)?;
     validate_cdc_metadata(&columns)?;
     json_columns_with_defaults(response, &columns, json_column_names)
 }

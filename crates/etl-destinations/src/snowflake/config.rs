@@ -76,6 +76,13 @@ impl Config {
         })
     }
 
+    /// Routes unit-test requests to a local HTTP server.
+    #[cfg(test)]
+    pub(super) fn with_test_account_url(mut self, url: String) -> Self {
+        self.account_url = url;
+        self
+    }
+
     /// Attach key-pair authentication credentials.
     pub fn with_private_key(
         mut self,
