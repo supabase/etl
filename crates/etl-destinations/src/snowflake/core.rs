@@ -1021,33 +1021,24 @@ mod tests {
         after_type: Type,
         rename: bool,
     ) -> (ReplicatedTableSchema, ReplicatedTableSchema) {
-        let id = ColumnSchema::new("id".into(), Type::INT4, -1, 1, false).with_primary_key(1);
         let before = TableSchema::with_snapshot_id(
             TableId::new(1),
             TableName::new("public".into(), "events".into()),
             vec![
-                id.clone(),
+                ColumnSchema::new("id".into(), Type::INT4, -1, 1, false).with_primary_key(1),
                 ColumnSchema::new("payload".into(), before_type, -1, 2, true),
                 ColumnSchema::new("removed".into(), Type::TEXT, -1, 3, true),
             ],
             test_snapshot_id(10, 10),
         );
-        let after = TableSchema::with_snapshot_id(
-            before.id,
-            before.name.clone(),
-            vec![
-                id,
-                ColumnSchema::new(
-                    if rename { "renamed_payload" } else { "payload" }.into(),
-                    after_type,
-                    -1,
-                    2,
-                    true,
-                ),
-                ColumnSchema::new("added".into(), Type::JSONB, -1, 4, true),
-            ],
-            test_snapshot_id(20, 20),
-        );
+        let mut after = before.clone();
+        after.snapshot_id = test_snapshot_id(20, 20);
+        after.column_schemas[1].typ = after_type;
+        if rename {
+            after.column_schemas[1].name = "renamed_payload".into();
+        }
+        // A new ordinal makes this a drop and addition rather than a rename.
+        after.column_schemas[2] = ColumnSchema::new("added".into(), Type::JSONB, -1, 4, true);
         (ReplicatedTableSchema::all(Arc::new(before)), ReplicatedTableSchema::all(Arc::new(after)))
     }
 
