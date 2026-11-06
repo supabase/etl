@@ -21,7 +21,7 @@ use uuid::Uuid;
 use crate::{
     recovery::warn_unsupported_column_type_change,
     snowflake::{
-        Config, Error, Result, SnowpipeError,
+        Config, Error, Result, SNOWFLAKE_COLUMN_NAME_MAPPING, SnowpipeError,
         auth::{AuthManager, HttpExchanger, TokenProvider},
         config::{HTTP_CONNECT_TIMEOUT, HTTP_REQUEST_TIMEOUT},
         identity::{LegacyCompatiblePipelineId, legacy_compatible_pipeline_id},
@@ -578,6 +578,33 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         self.sql_client
             .prepare_table_schema(table_name, &expected_column_names, &json_column_names)
             .await
+    }
+
+    /// Checks existing columns becoming scalar JSON before transition effects.
+    pub(super) async fn validate_json_type_changes(
+        &self,
+        table_name: &str,
+        plan: &SchemaPlan,
+    ) -> Result<()> {
+        // The endpoint diff retains pre-DDL names, unlike ordered alterations
+        // whose names already reflect earlier renames in the same plan.
+        let column_names: Vec<_> = plan
+            .diff()
+            .altered_columns
+            .iter()
+            .filter(|change| {
+                change.data_type_changed()
+                    && schema::is_json_type(&change.after_column_schema().typ)
+            })
+            .map(|change| {
+                SNOWFLAKE_COLUMN_NAME_MAPPING.map_name(&change.before_column_schema().name)
+            })
+            .collect();
+        if column_names.is_empty() {
+            return Ok(());
+        }
+        let column_names: Vec<_> = column_names.iter().map(String::as_str).collect();
+        self.sql_client.validate_json_columns(table_name, &column_names).await
     }
 
     /// Translates a validated schema plan into Snowflake DDL in the supplied
