@@ -15,6 +15,14 @@ on:
         description: Compile instrumented tests instead of consuming the regular test archive.
         type: boolean
         default: false
+      coverage-profile-file:
+        description: Temporary profile filename override for the coverage comparison.
+        type: string
+        default: 'etl-%8m.profraw'
+      coverage-experiment:
+        description: Temporary comparison label for separate artifacts.
+        type: string
+        default: ''
       runner-vcpus:
         description: Blacksmith runner size in vCPUs; the Postgres shard count follows the provisioned machine.
         type: number
@@ -137,12 +145,18 @@ jobs:
       - name: Run tests
         env:
           COVERAGE: ${{ inputs.coverage }}
+          COVERAGE_PROFILE_FILE: ${{ inputs.coverage-profile-file }}
           # Equals the jobs API `id`, so the test manifest joins to this job.
           # `GITHUB_JOB` is only the YAML key and is shared by every leg.
           JOB_CHECK_RUN_ID: ${{ job.check_run_id }}
         run: |
           if [[ "$COVERAGE" == true ]]; then
-            cargo --locked xtask nextest llvm-cov --test-manifest target/test-results/manifest.json
+            if [[ -n "$COVERAGE_PROFILE_FILE" ]]; then
+              export LLVM_PROFILE_FILE_NAME="$COVERAGE_PROFILE_FILE"
+            fi
+            mkdir -p target/coverage-comparison
+            /usr/bin/time -f '%e' -o target/coverage-comparison/tests.seconds \
+              cargo --locked xtask nextest llvm-cov --test-manifest target/test-results/manifest.json
           else
             target/ci/xtask nextest run --archive-file target/ci/tests.tar.zst \
               --test-manifest target/test-results/manifest.json
@@ -158,17 +172,21 @@ jobs:
           retention-days: 14
       - name: Export coverage
         if: inputs.coverage
-        run: cargo llvm-cov report --locked --lcov --output-path lcov.info
+        env:
+          COVERAGE_EXPERIMENT: ${{ inputs.coverage-experiment }}
+        run: bash .github/scripts/time-coverage.sh
       - name: Upload coverage
         if: inputs.coverage
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: coverage
-          path: lcov.info
+          name: coverage${{ inputs.coverage-experiment && format('-{0}', inputs.coverage-experiment) || '' }}
+          path: |
+            lcov.info
+            target/coverage-comparison/result.json
           if-no-files-found: error
           retention-days: 14
       - name: Upload coverage to Coveralls
-        if: inputs.coverage
+        if: inputs.coverage && inputs.coverage-experiment == ''
         uses: coverallsapp/github-action@5cbfd81b66ca5d10c19b062c04de0199c215fb6e # v2.3.7
         with:
           fail-on-error: false
