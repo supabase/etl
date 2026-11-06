@@ -856,8 +856,9 @@ mod tests {
         );
     }
 
-    /// Decodes the GoogleSQL single-quoted literals emitted by the default renderer,
-    /// rejecting malformed quoting, unknown escapes, and invalid Unicode scalars.
+    /// Decodes the GoogleSQL single-quoted literals emitted by the default
+    /// renderer, rejecting malformed quoting, unknown escapes, and invalid
+    /// Unicode scalars.
     fn decode_googlesql_string(literal: &str) -> Option<String> {
         let mut chars = literal.strip_prefix('\'')?.strip_suffix('\'')?.chars();
         let mut value = String::new();
