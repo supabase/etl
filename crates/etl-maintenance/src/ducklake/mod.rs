@@ -12,5 +12,5 @@ pub use runner::{
     CleanupOldFilesMaintenanceConfig, DuckLakeMaintenanceConfig, DuckLakeMaintenanceOutcome,
     ExpireSnapshotsMaintenanceConfig, InlineFlushMaintenanceConfig,
     MergeAdjacentFilesMaintenanceConfig, RewriteDataFilesMaintenanceConfig, S3Config,
-    flush_table_inlined_data, run_maintenance_once,
+    flush_table_inlined_data, pending_inline_data_bytes_query, run_maintenance_once,
 };
