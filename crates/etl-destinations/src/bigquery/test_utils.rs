@@ -295,6 +295,28 @@ impl BigQueryDatabase {
         }
     }
 
+    /// Runs one uncached query of `columns` from the table's current view.
+    ///
+    /// Returns no rows while the table is missing, since a table read right
+    /// after it was created or replaced can report a stale NOT_FOUND. Unlike
+    /// [`BigQueryDatabase::query_table`], it neither waits for rows nor
+    /// retries failures, so callers that expect a particular state poll it.
+    pub async fn query_current_rows(
+        &self,
+        table_name: &TableName,
+        columns: &str,
+    ) -> Result<Vec<TableRow>, EtlError> {
+        let table_id = table_name_to_bigquery_table_id(table_name)?;
+        let query =
+            format!("select {columns} from `{}.{}.{}`", self.project_id, self.dataset_id, table_id);
+
+        match execute_query(&self.client, &self.project_id, uncached_query_request(query)).await {
+            Ok(response) => Ok(response.rows.unwrap_or_default()),
+            Err(error) if is_missing_table_query_error(&error) => Ok(Vec::new()),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Polls until a query against the table reports zero visible rows.
     ///
     /// Returns true once an empty result is observed and false if no empty

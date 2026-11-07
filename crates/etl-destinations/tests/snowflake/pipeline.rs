@@ -3,7 +3,6 @@ use std::sync::Arc;
 use etl::{
     event::{Event, EventType},
     failpoints::{APPLY_LOOP_EXPIRE_DURABILITY_FP, etl_fail_point_active_for_parameter},
-    schema::TableName,
     test_utils::{
         database::{spawn_source_database, test_table_name},
         event::EventCondition,
@@ -21,17 +20,12 @@ use fail::FailScenario;
 use tokio::time::Duration;
 
 use crate::snowflake::common::{
-    build_auth, poll_destination_offset, quote, wait_for_replication_checkpoint, with_table_cleanup,
+    build_auth, poll_destination_offset, quote, snowflake_table_name,
+    wait_for_replication_checkpoint, with_table_cleanup,
 };
 
 const DESTINATION_OFFSET_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const DESTINATION_OFFSET_MAX_ATTEMPTS: usize = 90;
-
-fn snowflake_table_name(src_table: &TableName) -> String {
-    let escaped_schema = src_table.schema.replace('_', "__");
-    let escaped_table = src_table.name.replace('_', "__");
-    format!("{escaped_schema}_{escaped_table}").to_uppercase()
-}
 
 async fn query_default_rows(
     sql: &SqlClient<AuthManager<HttpExchanger>>,
