@@ -52,6 +52,12 @@ store-failure-output = false
 filter = "binary_id(etl::main) & (test(=pipeline_with_faulty_destination::apply_disconnect_at_randomized_positions_converges_without_loss) | test(=pipeline_dirty_restart::postgres_store_dirty_restart_at_randomized_positions_converges_without_recopy) | test(=replication::apply_slot_creation_exempts_lock_timeout) | test(=replication_copy_locks::copy_slot_bounds_writer_ddl_deadlock) | test(=replication::slot_creation_restores_lock_timeout_after_errors))"
 priority = 50
 
+# Each crash-replay property runs at least one full pipeline case, about 30
+# to 60 seconds, so these start early for the same reason.
+[[profile.pg-sharded.overrides]]
+filter = "binary_id(etl-destinations::main) & test(/crash_replay::crash_replay_converges/)"
+priority = 50
+
 [[profile.pg-sharded.overrides]]
 filter = "all()"
 test-group = "@global"
