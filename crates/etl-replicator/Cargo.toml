@@ -14,13 +14,19 @@ path = "src/bin/etl-ducklake-maintenance.rs"
 required-features = ["ducklake"]
 
 [features]
-default = ["bigquery", "clickhouse", "ducklake", "iceberg", "snowflake"]
+default = ["bigquery", "clickhouse", "ducklake", "iceberg", "snowflake", "serde_json_arbitrary_precision"]
 any-destination = []
 bigquery = ["any-destination", "etl-destinations/bigquery"]
 clickhouse = ["any-destination", "etl-destinations/clickhouse"]
 ducklake = ["any-destination", "etl-destinations/ducklake", "etl-maintenance/ducklake"]
 iceberg = ["any-destination", "etl-destinations/iceberg"]
 snowflake = ["any-destination", "etl-destinations/snowflake"]
+serde_json_arbitrary_precision = [
+    "etl/serde_json_arbitrary_precision",
+    "etl-destinations/serde_json_arbitrary_precision",
+    "etl-maintenance/serde_json_arbitrary_precision",
+    "serde_json/arbitrary_precision",
+]
 egress = ["etl/egress"]
 
 [dependencies]

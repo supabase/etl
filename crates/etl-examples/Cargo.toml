@@ -41,9 +41,9 @@ snowflake = ["etl-destinations/snowflake"]
 [dependencies]
 
 clap = { workspace = true, features = ["default", "std", "derive", "env"] }
-etl = { workspace = true, features = ["tls-rustls-ring"] }
+etl = { workspace = true, features = ["tls-rustls-ring", "serde_json_arbitrary_precision"] }
 etl-config = { workspace = true }
-etl-destinations = { workspace = true, features = ["tls-rustls-ring"] }
+etl-destinations = { workspace = true, features = ["tls-rustls-ring", "serde_json_arbitrary_precision"] }
 k8s-openapi = { workspace = true, features = ["latest"] }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 tokio = { workspace = true, features = ["macros", "signal", "time"] }

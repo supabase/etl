@@ -32,9 +32,9 @@ snowflake = [
 anyhow = { workspace = true }
 clap = { workspace = true, features = ["default", "std", "derive"] }
 clickhouse = { workspace = true, optional = true }
-etl = { workspace = true, features = ["test-utils", "tls-rustls-ring"] }
+etl = { workspace = true, features = ["test-utils", "tls-rustls-ring", "serde_json_arbitrary_precision"] }
 etl-config = { workspace = true }
-etl-destinations = { workspace = true, optional = true, features = ["tls-rustls-ring"] }
+etl-destinations = { workspace = true, optional = true, features = ["tls-rustls-ring", "serde_json_arbitrary_precision"] }
 etl-postgres = { workspace = true, features = ["sqlx", "tls-rustls-ring"] }
 etl-telemetry = { workspace = true }
 k8s-openapi = { workspace = true, features = ["latest"] }

@@ -11,9 +11,10 @@ repository.workspace = true
 homepage.workspace = true
 
 [features]
-default = ["tls-rustls-ring"]
+default = ["tls-rustls-ring", "serde_json_arbitrary_precision"]
 tls-rustls-ring = ["sqlx/tls-rustls-ring", "etl-postgres/tls-rustls-ring"]
 tls-rustls-aws-lc-rs = ["sqlx/tls-rustls-aws-lc-rs", "etl-postgres/tls-rustls-aws-lc-rs"]
+serde_json_arbitrary_precision = ["serde_json/arbitrary_precision"]
 test-utils = ["etl-postgres/test-utils", "dep:proptest"]
 failpoints = ["fail/failpoints"]
 egress = []
@@ -36,7 +37,7 @@ proptest = { workspace = true, optional = true }
 rand = { workspace = true, features = ["thread_rng"] }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 serde = { workspace = true, features = ["derive", "alloc"] }
-serde_json = { workspace = true, features = ["arbitrary_precision", "std"] }
+serde_json = { workspace = true, features = ["std"] }
 simdutf8 = { workspace = true }
 sqlx = { workspace = true, features = ["runtime-tokio", "postgres", "migrate"] }
 sysinfo = { workspace = true, features = ["system"] }
