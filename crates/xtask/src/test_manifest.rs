@@ -9,7 +9,7 @@ use std::{collections::HashSet, env};
 
 use anyhow::{Context, Result, bail};
 use quick_xml::{
-    Reader,
+    Reader, XmlVersion,
     events::{BytesStart, Event},
 };
 use serde::{Deserialize, Serialize};
@@ -222,7 +222,10 @@ fn read_case(element: &BytesStart<'_>) -> Result<TestCase> {
             .try_get_attribute(name)
             .context("Malformed testcase attribute in JUnit report")?
             .with_context(|| format!("JUnit testcase has no {name} attribute"))?;
-        Ok(value.unescape_value().context("Malformed testcase attribute in JUnit report")?.into())
+        Ok(value
+            .normalized_value(XmlVersion::Implicit1_0)
+            .context("Malformed testcase attribute in JUnit report")?
+            .into())
     };
     let seconds: f64 = attribute("time")?.parse().context("Invalid JUnit testcase time")?;
     let millis = (seconds * 1000.0).round();

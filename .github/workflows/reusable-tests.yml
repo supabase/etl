@@ -107,8 +107,8 @@ jobs:
         # shard count. Size from the provisioned machine because Blacksmith may
         # upgrade a runner. One shard per vCPU keeps the measured 4 vCPU/4 shard
         # ratio. The memory budget covers a primary, a replica, and the lane's
-        # test process. The cap bounds load on the single ClickHouse, MinIO,
-        # Lakekeeper, and BigQuery backends that every shard shares.
+        # test process. The cap bounds load on the single ClickHouse and BigQuery
+        # backends that every shard shares.
         run: |
           max_shards=16
           shard_memory_kib=$((3 * 1024 * 1024))

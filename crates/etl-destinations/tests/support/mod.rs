@@ -8,7 +8,6 @@ pub(crate) mod clickhouse;
 pub(crate) mod crypto;
 #[cfg(feature = "ducklake")]
 pub mod ducklake;
-pub(crate) mod iceberg;
 #[cfg(all(
     feature = "test-utils",
     any(feature = "bigquery", feature = "clickhouse", feature = "snowflake")

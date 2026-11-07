@@ -22,7 +22,7 @@ use crate::{
 const SHARED_PG_FILTER: &str =
     "\
     test(exclusive_) | binary_id(etl::main) | (binary_id(etl-destinations::main) & \
-     test(/^(bigquery|ducklake|iceberg)::/) & not test(/^bigquery::destination::/)) | \
+     test(/^(bigquery|ducklake)::/) & not test(/^bigquery::destination::/)) | \
      (binary_id(etl-destinations::main) & test(/^clickhouse::pipeline/)) | \
      (binary_id(etl-destinations) & test(/ducklake::core::tests::postgres_backed::/))";
 
