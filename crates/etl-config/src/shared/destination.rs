@@ -568,8 +568,14 @@ pub enum DestinationConfig {
         config: IcebergConfig,
     },
     Ducklake {
-        /// DuckLake catalog URL.
+        /// Direct DuckLake catalog URL used by DuckDB writers.
         catalog_url: SecretString,
+        /// Optional transaction-pooler URL for background SQLx metadata
+        /// queries. Falls back to `catalog_url` when absent.
+        /// Destination replay bookkeeping and Postgres maintenance
+        /// coordination always use `catalog_url`.
+        #[serde(default)]
+        catalog_pooler_url: Option<SecretString>,
         /// DuckLake data path.
         data_path: String,
         /// Size of the DuckDB connection pool.
@@ -918,6 +924,7 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
             }
             DestinationConfig::Ducklake {
                 catalog_url: _,
+                catalog_pooler_url: _,
                 data_path,
                 pool_size,
                 s3_access_key_id: _,
@@ -990,10 +997,33 @@ mod tests {
         assert_eq!(configured.parquet_row_group_size(), "500000");
     }
 
+    /// Existing configs stay valid and pooler credentials remain
+    /// secret-bearing.
+    #[test]
+    fn ducklake_catalog_pooler_url_is_optional_and_redacted() {
+        let mut json = serde_json::json!({"ducklake": {
+            "catalog_url": "postgres://placeholder@direct.example.com/catalog",
+            "data_path": "s3://example-bucket/"
+        }});
+        for pooler in [None, Some("postgres://placeholder@pooler.example.com:6543/catalog")] {
+            json["ducklake"]["catalog_pooler_url"] = serde_json::json!(pooler);
+            let config: DestinationConfig = serde_json::from_value(json.clone()).unwrap();
+            assert!(!format!("{config:?}").contains("pooler.example.com"));
+            let DestinationConfig::Ducklake { catalog_pooler_url, .. } = config else {
+                unreachable!();
+            };
+            assert_eq!(catalog_pooler_url.is_some(), pooler.is_some());
+        }
+        json["ducklake"].as_object_mut().unwrap().remove("catalog_pooler_url");
+        let config: DestinationConfig = serde_json::from_value(json).unwrap();
+        assert!(matches!(config, DestinationConfig::Ducklake { catalog_pooler_url: None, .. }));
+    }
+
     #[test]
     fn ducklake_without_secrets_omits_catalog_url() {
         let config = DestinationConfig::Ducklake {
             catalog_url: "postgres://user:pass@localhost:5432/ducklake_catalog".to_owned().into(),
+            catalog_pooler_url: Some("postgres://placeholder@pooler.example.com/catalog".into()),
             data_path: "s3://bucket/path".to_owned(),
             pool_size: 4,
             s3_access_key_id: None,
@@ -1023,6 +1053,8 @@ mod tests {
         let serialized = json.to_string();
 
         assert!(!serialized.contains("catalog_url"));
+        assert!(!serialized.contains("catalog_pooler_url"));
+        assert!(!serialized.contains("pooler.example.com"));
         assert!(!serialized.contains("user:pass"));
         assert_eq!(
             json["ducklake"]["table_sorting"]["tables"][0]["sort_by"]["kind"],

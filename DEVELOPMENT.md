@@ -162,6 +162,61 @@ and set `ETL_DUCKDB_EXTENSION_ROOT` to the absolute path of
 `vendor/duckdb/extensions`. The stable release publishes extensions for
 `linux_amd64`, `linux_arm64`, `osx_amd64`, and `osx_arm64`.
 
+### Catalog connection pooling
+
+DuckLake destinations accept an optional secret `catalog_pooler_url`, also
+configurable as `APP_DESTINATION__DUCKLAKE__CATALOG_POOLER_URL`. The replicator
+and external maintenance runner use it for SQLx background catalog queries,
+including metrics and maintenance discovery. These queries use unnamed
+statements inside explicit transactions. SQLx prepares and executes in separate
+protocol exchanges; the transaction pins both to the same backend. Disabling
+statement persistence alone does not prevent backend reassignment. Pooler
+connections omit the `extra_float_digits` startup parameter for PgBouncer
+compatibility. A configured pooler failure does not silently fall back to the
+direct endpoint.
+
+Destination replay-epoch reads and transitions keep using `catalog_url`, with
+autocommit and normal prepared-statement caching. This avoids adding explicit
+transaction round trips to copy batches and streaming replay checks. Each
+transition remains atomic as a single SQL statement. Foreground sort-order
+reconciliation also uses the direct pool so table creation, schema changes, and
+DDL recovery do not depend on pooler availability. Postgres maintenance
+coordination shares this direct SQLx pool because its migrations and prepared
+queries rely on session state. The direct pool is capped at one connection per
+destination. Background metadata uses its own one-connection pool when a pooler
+is configured; otherwise it shares the direct pool and its connection limit.
+The maintenance runner's replay-state discovery remains pooled.
+
+DuckDB writes, initial-copy flushes, checkpoints, and file maintenance continue
+to use `catalog_url`. Source logical replication is also unchanged. Switching
+DuckDB writers requires separate validation of transaction, retry, and
+connection-limit behavior against the deployed DuckDB/Postgres extension and
+pooler versions.
+
+The regular
+`catalog_metadata_pins_backend_and_keeps_replay_and_coordination_direct` test
+uses a protocol guard that rejects named statements, preparation outside an
+explicit transaction, and the `extra_float_digits` startup parameter. It verifies
+that destination replay bookkeeping and sort-order reconciliation bypass the
+pooler while background reads and maintenance discovery reach it. It also
+exercises post-commit retries, replay reset, restart, checkpoints, and direct
+coordination migrations.
+
+The ignored `transaction_pooler_catalog_roundtrip` runs the same checks against
+a real transaction pooler. Point
+`TESTS_DUCKLAKE_DIRECT_URL` and `TESTS_DUCKLAKE_POOLER_URL` at the same disposable
+local catalog, then run:
+
+```bash
+cargo nextest run --locked -p etl-destinations --all-features --test main \
+  --run-ignored ignored-only -E 'test(transaction_pooler_catalog_roundtrip)'
+```
+
+The default test uses the direct writer and pooled SQLx metadata. To investigate
+writer compatibility separately, set `TESTS_DUCKLAKE_POOLED_WRITER=1`. Run with
+pooler capacity below the writer's connection demand as well as normal capacity;
+a passing unconstrained smoke test alone does not establish production safety.
+
 ## Migrations
 
 SQL is grouped by its owning subsystem:

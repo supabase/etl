@@ -1,3 +1,7 @@
+//! Replay bookkeeping uses a direct catalog connection. Each transition is a
+//! single atomic SQL statement, so autocommit and prepared-statement caching
+//! avoid explicit transaction round trips in copy and streaming replay checks.
+
 use etl::{
     error::{ErrorKind, EtlResult},
     etl_error,

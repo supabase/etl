@@ -55,7 +55,7 @@ use etl_destinations::ducklake::{
 };
 #[cfg(feature = "test-utils")]
 use etl_destinations::ducklake::{
-    arm_fail_after_atomic_batch_commit_once_for_tests,
+    DuckLakeExternalMaintenanceConfig, arm_fail_after_atomic_batch_commit_once_for_tests,
     arm_fail_after_copy_batch_commit_once_for_tests, arm_fail_drop_table_for_copy_once_for_tests,
     arm_fail_pool_refresh_once_for_tests, arm_pause_next_copy_append_for_tests,
     ducklake_staging_table_creations_for_tests, pool_refresh_failure_armed_for_tests,
@@ -91,6 +91,8 @@ use crate::support::ducklake::{
     catalog_attach_target, create_test_lake, ducklake_load_sql, open_verification_connection,
     path_to_file_url,
 };
+#[cfg(feature = "test-utils")]
+use crate::support::transaction_pooler::TransactionPoolerGuard;
 
 // ── helpers
 // ───────────────────────────────────────────────────────────────────
@@ -728,6 +730,7 @@ async fn maintenance_discovers_metadata_schema_and_flushes_rows() {
     let target_file_size = writer_config.target_file_size().to_owned();
     let outcome = run_maintenance_once(DuckLakeMaintenanceConfig {
         catalog_url: lake.catalog_url.clone(),
+        catalog_pooler_url: None,
         data_path: lake.data_url.clone(),
         s3: None,
         metadata_schema: None,
@@ -5595,4 +5598,200 @@ async fn full_identity_delete_matches_stored_value_on_every_write_path() {
     }
 
     assert!(surviving.is_empty(), "deletes left rows behind (path, case): {surviving:?}");
+}
+
+/// Exercises catalog metadata routing, replay, checkpointing, and maintenance
+/// against a real transaction pooler. Both URLs must name one disposable
+/// catalog.
+#[cfg(feature = "test-utils")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TESTS_DUCKLAKE_DIRECT_URL and TESTS_DUCKLAKE_POOLER_URL"]
+async fn transaction_pooler_catalog_roundtrip() {
+    let direct = Url::parse(&std::env::var("TESTS_DUCKLAKE_DIRECT_URL").unwrap()).unwrap();
+    let pooler = Url::parse(&std::env::var("TESTS_DUCKLAKE_POOLER_URL").unwrap()).unwrap();
+    let writer = if std::env::var_os("TESTS_DUCKLAKE_POOLED_WRITER").is_some() {
+        pooler.clone()
+    } else {
+        direct.clone()
+    };
+    catalog_pooler_roundtrip(direct, writer, pooler).await;
+}
+
+/// Covers transaction-pooler protocol safety in the regular Postgres suite.
+#[cfg(feature = "test-utils")]
+#[tokio::test(flavor = "multi_thread")]
+async fn catalog_metadata_pins_backend_and_keeps_replay_and_coordination_direct() {
+    let lake = create_test_lake("catalog_pooler_protocol").await;
+    catalog_pooler_roundtrip(
+        lake.catalog_url.clone(),
+        lake.catalog_url.clone(),
+        lake.catalog_url.clone(),
+    )
+    .await;
+}
+
+/// Exercises pooled metadata and direct replay/coordination routing through a
+/// strict protocol guard.
+#[cfg(feature = "test-utils")]
+async fn catalog_pooler_roundtrip(direct: Url, writer: Url, pooler: Url) {
+    let _permit = acquire_ducklake_test_hook_guard().await;
+    reset_ducklake_test_hooks();
+    // The optional pooled-writer experiment changes catalog_url itself. Its
+    // session-dependent coordination path is outside that experiment's scope.
+    let test_coordination = writer == direct;
+    let guard = TransactionPoolerGuard::start(&pooler).await;
+    let pooler = guard.url().clone();
+    let directory = tempfile::tempdir().unwrap();
+    let data = path_to_file_url(directory.path());
+    let metadata_schema = format!("pooler_{}", uuid::Uuid::new_v4().simple());
+    let pipeline_id = format!("pooler_{}", uuid::Uuid::new_v4().simple());
+    let coordination_pool =
+        PgPoolOptions::new().max_connections(1).connect(direct.as_str()).await.unwrap();
+    let coordination_store =
+        PostgresExternalMaintenanceStore::new(pipeline_id.clone(), coordination_pool.clone());
+    let schema = make_schema(1, "public", "pooler_rows");
+    let replicated = make_replicated_table_schema(&schema);
+    let table = table_name_to_ducklake_table_name(&schema.name).unwrap();
+    let store = MemoryStore::new();
+    store.store_table_schema(schema).await.unwrap();
+
+    let verify = || {
+        let conn = open_verification_connection();
+        conn.execute_batch(&format!(
+            "{} attach {} as lake (data_path {}, metadata_schema {}); checkpoint lake;",
+            ducklake_load_sql(),
+            quote_literal(&format!("ducklake:{}", catalog_attach_target(&direct))),
+            quote_literal(data.as_str()),
+            quote_literal(&metadata_schema),
+        ))
+        .map_err(RedactedDuckDbError::from)
+        .unwrap();
+        conn
+    };
+
+    let destination = DuckLakeDestination::builder(writer.clone(), data.clone(), 2, store.clone())
+        .catalog_pooler_url(Some(pooler.clone()))
+        .metadata_schema(Some(metadata_schema.clone()))
+        .external_maintenance(if test_coordination {
+            DuckLakeExternalMaintenanceConfig::postgres(pipeline_id)
+        } else {
+            DuckLakeExternalMaintenanceConfig::disabled()
+        })
+        .copy_buffer(DuckLakeCopyBufferConfig { enabled: false, ..Default::default() })
+        .build()
+        .await
+        .unwrap();
+
+    if test_coordination {
+        // Let the watcher create and migrate its own coordination schema. A
+        // pooled coordination connection would be rejected by the
+        // protocol guard.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if coordination_store.load_state().await.is_ok_and(|state| state.exists) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    // Retry an acknowledged-on-the-server commit without duplicating its rows.
+    arm_fail_after_copy_batch_commit_once_for_tests(&table.id());
+    destination
+        .write_table_rows_for_tests(
+            &replicated,
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("first".to_owned())])],
+        )
+        .await
+        .unwrap();
+    let conn = verify();
+    assert_eq!(count_rows(&conn, &table), 1);
+    assert_eq!(count_applied_batches(&conn, &table, "copy"), 1);
+    drop(conn);
+    destination.truncate_table(&replicated).await.unwrap();
+    destination
+        .write_table_rows_for_tests(
+            &replicated,
+            vec![TableRow::new(vec![Cell::I32(2), Cell::String("second".to_owned())])],
+        )
+        .await
+        .unwrap();
+    // Background catalog reads must actually use the pooler, while the copy
+    // retry and replay reset above must keep their epoch queries direct.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while guard.prepared_queries() == 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    destination.shutdown().await.unwrap();
+    drop(destination);
+    reset_ducklake_test_hooks();
+    assert_eq!(guard.replay_epoch_queries(), 0, "replay bookkeeping must bypass the pooler");
+    assert_eq!(guard.sort_order_queries(), 0, "foreground DDL must bypass the pooler");
+    let metadata_queries_before_maintenance = guard.prepared_queries();
+
+    let writer_config = DuckLakeWriterConfig::default();
+    let target_file_size = writer_config.target_file_size().to_owned();
+    run_maintenance_once(DuckLakeMaintenanceConfig {
+        catalog_url: writer.clone(),
+        catalog_pooler_url: Some(pooler.clone()),
+        data_path: data.clone(),
+        s3: None,
+        metadata_schema: Some(metadata_schema.clone()),
+        writer_config,
+        inline_flush: InlineFlushMaintenanceConfig { enabled: true, min_inlined_bytes: 0 },
+        merge_adjacent_files: MergeAdjacentFilesMaintenanceConfig {
+            enabled: true,
+            max_compacted_files: 40,
+            max_tables_per_run: 8,
+            target_file_size,
+        },
+        rewrite_data_files: RewriteDataFilesMaintenanceConfig {
+            enabled: false,
+            min_active_data_files: 40,
+            max_tables_per_run: 8,
+        },
+        expire_snapshots: ExpireSnapshotsMaintenanceConfig {
+            enabled: true,
+            older_than: "7 days".to_owned(),
+        },
+        cleanup_old_files: CleanupOldFilesMaintenanceConfig { enabled: false },
+    })
+    .await
+    .unwrap();
+
+    assert!(
+        guard.prepared_queries() > metadata_queries_before_maintenance,
+        "maintenance discovery must use the pooler"
+    );
+
+    let restarted = DuckLakeDestination::builder(writer, data.clone(), 1, store)
+        .catalog_pooler_url(Some(pooler))
+        .metadata_schema(Some(metadata_schema.clone()))
+        .build()
+        .await
+        .unwrap();
+    restarted.shutdown().await.unwrap();
+    drop(restarted);
+
+    let conn = verify();
+    let rows: Vec<(i32, String)> = conn
+        .prepare(&format!("select id, name from {} order by id", qualified_lake_table_name(&table)))
+        .map_err(RedactedDuckDbError::from)
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(RedactedDuckDbError::from)
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .map_err(RedactedDuckDbError::from)
+        .unwrap();
+    assert_eq!(rows, vec![(2, "second".to_owned())]);
+    drop(conn);
+    coordination_pool.close().await;
+    guard.shutdown().await;
 }
