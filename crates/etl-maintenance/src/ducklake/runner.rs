@@ -2211,11 +2211,15 @@ async fn run_replay_helper_cleanup(
     table_namespace: Option<&str>,
 ) -> EtlResult<ReplayHelperCleanupOutcome> {
     let mut replay_epoch_state = load_replay_epoch_state(metadata_pg_pool, metadata_schema).await?;
-    if let Some(namespace) = table_namespace {
-        let prefix = format!("v2:{}:{namespace}", namespace.len());
-        replay_epoch_state.current_epochs.retain(|epoch| epoch.table_name.starts_with(&prefix));
-        replay_epoch_state.pending_table_names.retain(|name| name.starts_with(&prefix));
-    }
+    replay_epoch_state.current_epochs.retain(|epoch| {
+        DuckLakeMaintenanceTableName::replay_key_matches_namespace(
+            &epoch.table_name,
+            table_namespace,
+        )
+    });
+    replay_epoch_state.pending_table_names.retain(|name| {
+        DuckLakeMaintenanceTableName::replay_key_matches_namespace(name, table_namespace)
+    });
     let current_epochs = replay_epoch_state.current_epochs;
     let pending_table_names: Vec<_> = replay_epoch_state.pending_table_names.into_iter().collect();
     let epoch_count = current_epochs.len();

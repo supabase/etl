@@ -37,8 +37,8 @@ pub fn namespaced_tables_query(metadata_schema: &str) -> String {
 pub fn namespace_version_check_sql(catalog: &str) -> String {
     let catalog = quote_identifier(catalog);
     format!(
-        "select case when value = '1.1' then true else error('DuckLake table_namespace requires \
-         catalog format 1.1; recreate or explicitly migrate the catalog') end from \
-         {catalog}.options() where option_name = 'version'"
+        "select case when coalesce((select value from {catalog}.options() where option_name = \
+         'version'), '') = '1.1' then true else error('DuckLake table_namespace requires catalog \
+         format 1.1; recreate or explicitly migrate the catalog') end"
     )
 }

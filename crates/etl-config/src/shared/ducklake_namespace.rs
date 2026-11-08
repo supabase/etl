@@ -49,20 +49,33 @@ impl DuckLakeTableName {
 
     /// Returns a stable replay key, preserving all pre-namespace keys.
     ///
-    /// Length-prefixed components prevent collisions between names containing
-    /// dots.
+    /// Hex-encoded components contain no dots, so new keys cannot collide with
+    /// any legacy `schema.table` key, even when identifiers contain
+    /// dots/colons.
     pub fn id(&self) -> String {
         match &self.namespace {
             None => format!("{}.{}", self.schema, self.table),
             Some(namespace) => format!(
-                "v2:{}:{}{}:{}{}:{}",
-                namespace.len(),
-                namespace,
-                self.schema.len(),
-                self.schema,
-                self.table.len(),
-                self.table,
+                "{}{}:{}",
+                Self::namespace_id_prefix(namespace),
+                encode_replay_component(&self.schema),
+                encode_replay_component(&self.table),
             ),
+        }
+    }
+
+    /// Prefix used to select replay state owned by one source namespace.
+    pub fn namespace_id_prefix(namespace: &str) -> String {
+        format!("v2:{}:", encode_replay_component(namespace))
+    }
+
+    /// Whether a replay key belongs to the selected layout and namespace.
+    pub fn replay_key_matches_namespace(key: &str, namespace: Option<&str>) -> bool {
+        match namespace {
+            Some(namespace) => {
+                !key.contains('.') && key.starts_with(&Self::namespace_id_prefix(namespace))
+            }
+            None => key.contains('.'),
         }
     }
 
@@ -88,6 +101,17 @@ impl std::fmt::Display for DuckLakeTableName {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "{}.{}", self.schema_path(), self.table)
     }
+}
+
+/// Encodes literal identifier bytes without the legacy replay-key separator.
+fn encode_replay_component(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(value.len() * 2);
+    for byte in value.bytes() {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 15)]));
+    }
+    encoded
 }
 
 /// Validates a namespace without treating its contents as a SQL path.
@@ -131,6 +155,17 @@ mod tests {
         let dotted = DuckLakeTableName::new("a.b", "c").with_namespace(Some("project_a".into()));
         let other = DuckLakeTableName::new("a", "b.c").with_namespace(Some("project_a".into()));
         assert_ne!(dotted.id(), other.id());
+        // This legacy name would collide with an unescaped length-prefixed key.
+        let legacy = DuckLakeTableName::new("v2:9:project_a3:a", "b1:c");
+        assert_ne!(dotted.id(), legacy.id());
+        for table in [&a, &b, &dotted, &other] {
+            assert!(!table.id().contains('.'));
+            assert!(!DuckLakeTableName::replay_key_matches_namespace(&table.id(), None));
+        }
+        assert!(DuckLakeTableName::replay_key_matches_namespace(&a.id(), Some("project_a")));
+        assert!(!DuckLakeTableName::replay_key_matches_namespace(&b.id(), Some("project_a")));
+        assert!(DuckLakeTableName::replay_key_matches_namespace(&legacy.id(), None));
+        assert!(!DuckLakeTableName::replay_key_matches_namespace(&legacy.id(), Some("project_a")));
         assert_eq!(
             serde_json::from_str::<DuckLakeTableName>(&serde_json::to_string(&a).unwrap()).unwrap(),
             a
