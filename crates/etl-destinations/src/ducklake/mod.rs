@@ -41,35 +41,48 @@ impl ClassifiedError for serde_json::Error {
 
 /// A table reference inside the DuckLake catalog.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
-pub struct DuckLakeTableName {
-    schema: String,
-    table: String,
-}
+#[serde(transparent)]
+pub struct DuckLakeTableName(etl_config::shared::DuckLakeTableName);
 
 impl DuckLakeTableName {
-    /// Creates a DuckLake table reference from explicit schema and table names.
+    /// Creates a legacy table reference from source schema and table names.
     pub fn new(schema: impl Into<String>, table: impl Into<String>) -> Self {
-        Self { schema: schema.into(), table: table.into() }
+        Self(etl_config::shared::DuckLakeTableName::new(schema, table))
     }
 
-    /// Creates a DuckLake table reference that mirrors a source Postgres table.
+    /// Creates a table reference that mirrors a source Postgres table.
     pub fn from_source(table_name: &TableName) -> Self {
         Self::new(table_name.schema.clone(), table_name.name.clone())
     }
 
-    /// Returns the DuckLake schema name.
+    /// Applies the destination's persisted namespace.
+    pub fn with_namespace(self, namespace: Option<String>) -> Self {
+        Self(self.0.with_namespace(namespace))
+    }
+
+    /// Returns the source namespace, absent for legacy destinations.
+    pub fn namespace(&self) -> Option<&str> {
+        self.0.namespace()
+    }
+
+    /// Returns the leaf source schema.
     pub fn schema(&self) -> &str {
-        &self.schema
+        self.0.schema()
     }
 
-    /// Returns the DuckLake table name.
+    /// Returns the source table name.
     pub fn table(&self) -> &str {
-        &self.table
+        self.0.table()
     }
 
-    /// Returns a stable ID for logs, metrics, and replay marker rows.
+    /// Returns the schema path used by DuckLake maintenance functions.
+    pub fn schema_path(&self) -> String {
+        self.0.schema_path()
+    }
+
+    /// Returns a stable replay key, preserving legacy identifiers.
     pub fn id(&self) -> String {
-        format!("{}.{}", self.schema, self.table)
+        self.0.id()
     }
 
     /// Serializes this reference for durable destination metadata.
@@ -97,13 +110,13 @@ impl DuckLakeTableName {
 
     /// Returns whether this is an internal ETL helper table.
     pub(super) fn is_internal_helper(&self) -> bool {
-        self.table.starts_with("__etl_")
+        self.0.is_internal_helper()
     }
 }
 
 impl fmt::Display for DuckLakeTableName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.id())
+        fmt::Display::fmt(&self.0, f)
     }
 }
 

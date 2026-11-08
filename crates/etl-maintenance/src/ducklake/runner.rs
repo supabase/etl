@@ -18,7 +18,8 @@ use etl::{
     etl_error,
 };
 use etl_config::{
-    ducklake_catalog_metadata_connect_options, libpq_tcp_host, shared::DuckLakeWriterConfig,
+    ducklake_catalog_metadata_connect_options, libpq_tcp_host,
+    shared::{DuckLakeTableName as DuckLakeMaintenanceTableName, DuckLakeWriterConfig},
 };
 use metrics::{gauge, histogram};
 use pg_escape::{quote_identifier, quote_literal};
@@ -35,7 +36,10 @@ use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, trace, warn};
 use url::Url;
 
-use crate::ducklake::{DataFileRewriteReason, RedactedDuckDbError, duckdb_version_check_sql};
+use crate::ducklake::{
+    DataFileRewriteReason, RedactedDuckDbError, duckdb_version_check_sql,
+    namespace_version_check_sql, namespaced_tables_query, table_namespace_filter,
+};
 
 const LAKE_CATALOG: &str = "lake";
 const APPLIED_BATCHES_TABLE: &str = "__etl_applied_table_batches";
@@ -83,32 +87,6 @@ const ETL_DUCKLAKE_TABLE_ACTIVE_INLINED_DATA_BYTES: &str =
 const RESULT_LABEL: &str = "result";
 const TABLE_LABEL: &str = "table";
 const SMALL_FILE_SIZE_BYTES: i64 = 5 * 1024 * 1024;
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct DuckLakeMaintenanceTableName {
-    schema_name: String,
-    table_name: String,
-}
-
-impl DuckLakeMaintenanceTableName {
-    fn new(schema_name: String, table_name: String) -> Self {
-        Self { schema_name, table_name }
-    }
-
-    fn id(&self) -> String {
-        format!("{}.{}", self.schema_name, self.table_name)
-    }
-
-    fn is_etl_internal_table(&self) -> bool {
-        self.table_name.starts_with("__etl_")
-    }
-}
-
-impl fmt::Display for DuckLakeMaintenanceTableName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.id())
-    }
-}
 
 /// Current replay epoch for one destination table.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1501,6 +1479,8 @@ pub struct DuckLakeMaintenanceConfig {
     pub s3: Option<S3Config>,
     /// Optional DuckLake metadata schema.
     pub metadata_schema: Option<String>,
+    /// Immutable source namespace; absent for existing flat destinations.
+    pub table_namespace: Option<String>,
     /// DuckLake writer options shared with the replicator.
     pub writer_config: DuckLakeWriterConfig,
     /// Inline flush operation config.
@@ -1649,6 +1629,10 @@ pub async fn run_maintenance_once(
     if config.expire_snapshots.enabled {
         validate_expire_snapshots_older_than(&duckdb, &config.expire_snapshots.older_than).await?;
     }
+    if config.table_namespace.is_some() {
+        duckdb.run(|conn| conn.execute_batch(&namespace_version_check_sql(LAKE_CATALOG)).map_err(|source| etl_error!(ErrorKind::ConfigError, "DuckLake namespace requires catalog format 1.1", source: RedactedDuckDbError::from(source)))).await?;
+    }
+
     let metadata_schema = match config.metadata_schema.clone() {
         Some(metadata_schema) => metadata_schema,
         None => resolve_metadata_schema(&duckdb).await?,
@@ -1666,7 +1650,12 @@ pub async fn run_maintenance_once(
             )
         })?,
     );
-    let table_names = list_ducklake_tables(&metadata_pg_pool, &metadata_schema).await?;
+    let table_names = list_ducklake_tables(
+        &metadata_pg_pool,
+        &metadata_schema,
+        config.table_namespace.as_deref(),
+    )
+    .await?;
     info!(
         table_count = table_names.len(),
         tables = ?table_names,
@@ -1680,6 +1669,7 @@ pub async fn run_maintenance_once(
         &metadata_schema,
         &table_names,
         config.merge_adjacent_files.max_compacted_files,
+        config.table_namespace.as_deref(),
     )
     .await?;
     outcome.replay_helper_rows_deleted = replay_helper_cleanup.total_rows();
@@ -1737,6 +1727,8 @@ pub async fn run_maintenance_once(
 
 /// Validates one maintenance runner config.
 fn validate_config(config: &DuckLakeMaintenanceConfig) -> EtlResult<()> {
+    etl_config::shared::validate_ducklake_table_namespace(config.table_namespace.as_deref())
+        .map_err(|source| etl_error!(ErrorKind::ConfigError, "Invalid DuckLake table namespace", source: source))?;
     if !matches!(config.catalog_url.scheme(), "postgres" | "postgresql") {
         return Err(etl_error!(
             ErrorKind::ConfigError,
@@ -1841,18 +1833,14 @@ async fn resolve_metadata_schema(duckdb: &DuckDbMaintenanceExecutor) -> EtlResul
 async fn list_ducklake_tables(
     metadata_pg_pool: &PgPool,
     metadata_schema: &str,
+    table_namespace: Option<&str>,
 ) -> EtlResult<Vec<DuckLakeMaintenanceTableName>> {
-    let sql = format!(
-        "SELECT s.schema_name, t.table_name FROM {}.{} AS t JOIN {}.{} AS s ON s.schema_id = \
-         t.schema_id WHERE t.end_snapshot IS NULL AND s.end_snapshot IS NULL ORDER BY \
-         s.schema_name, t.table_name",
-        quote_identifier(metadata_schema),
-        quote_identifier("ducklake_table"),
-        quote_identifier(metadata_schema),
-        quote_identifier("ducklake_schema")
-    );
-    let rows: Vec<(String, String)> =
-        sqlx::query_as(AssertSqlSafe(sql)).fetch_all(metadata_pg_pool).await.map_err(|source| {
+    let sql = namespaced_tables_query(metadata_schema);
+    let rows: Vec<(Option<String>, String, String)> = sqlx::query_as(AssertSqlSafe(sql))
+        .bind(table_namespace)
+        .fetch_all(metadata_pg_pool)
+        .await
+        .map_err(|source| {
             etl_error!(
                 ErrorKind::DestinationQueryFailed,
                 "DuckLake table list query failed",
@@ -1862,7 +1850,9 @@ async fn list_ducklake_tables(
         })?;
     Ok(rows
         .into_iter()
-        .map(|(schema_name, table_name)| DuckLakeMaintenanceTableName::new(schema_name, table_name))
+        .map(|(namespace, schema_name, table_name)| {
+            DuckLakeMaintenanceTableName::new(schema_name, table_name).with_namespace(namespace)
+        })
         .collect())
 }
 
@@ -2022,8 +2012,8 @@ async fn run_inline_flush(
             .run(move |conn| {
                 flush_table_inlined_data(
                     conn,
-                    &table_name_for_query.schema_name,
-                    &table_name_for_query.table_name,
+                    &table_name_for_query.schema_path(),
+                    table_name_for_query.table(),
                 )
             })
             .await?;
@@ -2218,20 +2208,23 @@ async fn run_replay_helper_cleanup(
     metadata_schema: &str,
     table_names: &[DuckLakeMaintenanceTableName],
     max_compacted_files: u32,
+    table_namespace: Option<&str>,
 ) -> EtlResult<ReplayHelperCleanupOutcome> {
-    let replay_epoch_state = load_replay_epoch_state(metadata_pg_pool, metadata_schema).await?;
+    let mut replay_epoch_state = load_replay_epoch_state(metadata_pg_pool, metadata_schema).await?;
+    if let Some(namespace) = table_namespace {
+        let prefix = format!("v2:{}:{namespace}", namespace.len());
+        replay_epoch_state.current_epochs.retain(|epoch| epoch.table_name.starts_with(&prefix));
+        replay_epoch_state.pending_table_names.retain(|name| name.starts_with(&prefix));
+    }
     let current_epochs = replay_epoch_state.current_epochs;
     let pending_table_names: Vec<_> = replay_epoch_state.pending_table_names.into_iter().collect();
     let epoch_count = current_epochs.len();
     let pending_epoch_count = pending_table_names.len();
-    let helper_tables: Vec<_> = table_names
-        .iter()
-        .filter(|table_name| table_name.is_etl_internal_table())
-        .cloned()
-        .collect();
+    let helper_tables: Vec<_> =
+        table_names.iter().filter(|table_name| table_name.is_internal_helper()).cloned().collect();
     let active_table_ids: Vec<_> = table_names
         .iter()
-        .filter(|table_name| !table_name.is_etl_internal_table())
+        .filter(|table_name| !table_name.is_internal_helper())
         .map(DuckLakeMaintenanceTableName::id)
         .collect();
     let helper_table_count = helper_tables.len();
@@ -2303,7 +2296,7 @@ async fn select_merge_tables(
 ) -> EtlResult<Vec<DuckLakeMaintenanceTableName>> {
     let mut selected = Vec::new();
     for table_name in table_names {
-        if table_name.is_etl_internal_table() {
+        if table_name.is_internal_helper() {
             info!(
                 table = %table_name,
                 "ducklake rewrite-data-files table skipped because it is internal etl metadata"
@@ -2367,7 +2360,7 @@ async fn select_rewrite_tables(
 ) -> EtlResult<Vec<DuckLakeMaintenanceTableName>> {
     let mut selected = Vec::new();
     for table_name in table_names {
-        if table_name.is_etl_internal_table() {
+        if table_name.is_internal_helper() {
             info!(
                 table = %table_name,
                 "ducklake rewrite-data-files table skipped because it is internal etl metadata"
@@ -2475,8 +2468,8 @@ fn merge_adjacent_files(
         "SELECT COALESCE(SUM(files_created), 0) FROM ducklake_merge_adjacent_files({}, {}, schema \
          => {}, max_compacted_files => {});",
         quote_literal(LAKE_CATALOG),
-        quote_literal(&table_name.table_name),
-        quote_literal(&table_name.schema_name),
+        quote_literal(table_name.table()),
+        quote_literal(&table_name.schema_path()),
         max_compacted_files
     );
     count_maintenance_files(conn, &sql, "DuckLake merge adjacent files failed")
@@ -2490,8 +2483,8 @@ fn rewrite_data_files(
     let sql = format!(
         "CALL ducklake_rewrite_data_files({}, {}, schema => {});",
         quote_literal(LAKE_CATALOG),
-        quote_literal(&table_name.table_name),
-        quote_literal(&table_name.schema_name)
+        quote_literal(table_name.table()),
+        quote_literal(&table_name.schema_path())
     );
     conn.execute_batch(&sql).map_err(|source| {
         etl_error!(
@@ -3087,8 +3080,9 @@ impl DuckLakePendingInlineSizeSampler {
     ) -> EtlResult<DuckLakePendingInlineDataSizes> {
         let sql = pending_inline_data_bytes_query(&self.metadata_schema);
         let inlined_bytes: i64 = sqlx::query_scalar(AssertSqlSafe(sql))
-            .bind(&table_name.schema_name)
-            .bind(&table_name.table_name)
+            .bind(table_name.schema())
+            .bind(table_name.table())
+            .bind(table_name.namespace())
             .fetch_one(&self.pool)
             .await
             .map_err(|source| {
@@ -3116,12 +3110,14 @@ fn record_pending_inline_data_sizes(
 ///
 /// `metadata_schema` is the unquoted name of the DuckLake catalog's PostgreSQL
 /// schema and is escaped as both an identifier and a literal. Bind the source
-/// schema name to `$1` and the source table name to `$2`. The query returns one
+/// schema name to `$1`, the source table name to `$2`, and the optional
+/// namespace to `$3`. The query returns one
 /// `BIGINT` containing the total relation size in bytes of the table's
 /// registered inline insert tables and its inline delete table, or zero when
 /// none exist.
 pub fn pending_inline_data_bytes_query(metadata_schema: &str) -> String {
     let metadata_schema_literal = quote_literal(metadata_schema);
+    let namespace_filter = table_namespace_filter(metadata_schema);
     let metadata_schema = quote_identifier(metadata_schema);
     let ducklake_schema = quote_identifier("ducklake_schema");
     let ducklake_table = quote_identifier("ducklake_table");
@@ -3140,6 +3136,7 @@ pub fn pending_inline_data_bytes_query(metadata_schema: &str) -> String {
                AND s.end_snapshot IS NULL
                AND s.schema_name = $1
                AND t.table_name = $2
+               AND {namespace_filter}
              LIMIT 1
          ),
          target_inline_tables AS (
@@ -3231,8 +3228,9 @@ async fn query_table_storage_metrics(
         _active_delete_bytes,
         deleted_rows,
     ): (i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(AssertSqlSafe(sql))
-        .bind(&table_name.schema_name)
-        .bind(&table_name.table_name)
+        .bind(table_name.schema())
+        .bind(table_name.table())
+        .bind(table_name.namespace())
         .fetch_one(metadata_pg_pool)
         .await
         .map_err(|source| {
@@ -3262,6 +3260,7 @@ fn parse_size_bytes(value: &str) -> Option<i64> {
 }
 
 fn table_storage_metrics_query(metadata_schema: &str) -> String {
+    let namespace_filter = table_namespace_filter(metadata_schema);
     let metadata_schema = quote_identifier(metadata_schema);
     let ducklake_schema = quote_identifier("ducklake_schema");
     let ducklake_table = quote_identifier("ducklake_table");
@@ -3277,6 +3276,7 @@ fn table_storage_metrics_query(metadata_schema: &str) -> String {
                AND s.end_snapshot IS NULL
                AND s.schema_name = $1
                AND t.table_name = $2
+               AND {namespace_filter}
              LIMIT 1
          ),
          data_stats AS (

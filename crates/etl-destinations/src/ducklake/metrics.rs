@@ -468,6 +468,7 @@ pub(super) async fn query_table_storage_metrics(
     ): (i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(AssertSqlSafe(sql))
         .bind(table_name.schema())
         .bind(table_name.table())
+        .bind(table_name.namespace())
         .fetch_one(metadata_pg_pool)
         .await
         .map_err(|source| {
@@ -530,6 +531,7 @@ pub(super) async fn query_catalog_maintenance_metrics(
 
 /// Returns the SQL query used to sample table-level storage health.
 fn table_storage_metrics_query(metadata_schema: &str) -> String {
+    let namespace_filter = etl_maintenance::ducklake::table_namespace_filter(metadata_schema);
     let metadata_schema = quote_identifier(metadata_schema);
     let ducklake_schema = quote_identifier("ducklake_schema");
     let ducklake_table = quote_identifier("ducklake_table");
@@ -545,6 +547,7 @@ fn table_storage_metrics_query(metadata_schema: &str) -> String {
                AND s.end_snapshot IS NULL
                AND s.schema_name = $1
                AND t.table_name = $2
+               AND {namespace_filter}
              LIMIT 1
          ),
          data_stats AS (

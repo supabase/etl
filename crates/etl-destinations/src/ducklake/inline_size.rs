@@ -39,6 +39,7 @@ impl DuckLakePendingInlineSizeSampler {
         let inlined_bytes: i64 = sqlx::query_scalar(AssertSqlSafe(sql))
             .bind(table_name.schema())
             .bind(table_name.table())
+            .bind(table_name.namespace())
             .fetch_one(&self.pool)
             .await
             .map_err(|source| {

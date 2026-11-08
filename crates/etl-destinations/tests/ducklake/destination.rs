@@ -313,18 +313,8 @@ fn open_lake_conn(catalog: &Url, data: &Url) -> Connection {
 }
 
 fn lake_table_exists(conn: &Connection, table_name: &DuckLakeTableName) -> bool {
-    conn.query_row(
-        &format!(
-            "SELECT COUNT(*) FROM information_schema.tables WHERE table_catalog = {} AND \
-             table_schema = {} AND table_name = {}",
-            quote_literal("lake"),
-            quote_literal(table_name.schema()),
-            quote_literal(table_name.table())
-        ),
-        [],
-        |row| row.get::<_, i64>(0),
-    )
-    .is_ok_and(|count| count > 0)
+    conn.prepare(&format!("select * from {} limit 0", qualified_lake_table_name(table_name)))
+        .is_ok()
 }
 
 async fn open_lake_conn_when_tables_visible(
@@ -488,12 +478,13 @@ async fn wait_for_concurrent_destination_tasks(tasks: Vec<tokio::task::JoinHandl
 }
 
 fn qualified_lake_table_name(table_name: &DuckLakeTableName) -> String {
-    format!(
-        "{}.{}.{}",
-        quote_identifier("lake"),
-        quote_identifier(table_name.schema()),
-        quote_identifier(table_name.table())
-    )
+    let mut parts = vec![quote_identifier("lake").into_owned()];
+    if let Some(namespace) = table_name.namespace() {
+        parts.push(quote_identifier(namespace).into_owned());
+    }
+    parts.push(quote_identifier(table_name.schema()).into_owned());
+    parts.push(quote_identifier(table_name.table()).into_owned());
+    parts.join(".")
 }
 
 fn count_rows(conn: &Connection, table_name: &DuckLakeTableName) -> i64 {
@@ -704,6 +695,164 @@ async fn write_table_rows_basic() {
     assert_eq!(name.as_deref(), Some("Alice"));
 }
 
+/// Separate projects may reuse source OIDs, schema names, LSNs and batch IDs.
+#[tokio::test(flavor = "multi_thread")]
+async fn namespaced_projects_isolate_copy_cdc_replay_and_truncate() {
+    use etl::{event::InsertEvent, schema::PgLsn};
+
+    let lake = create_test_lake("namespaced_projects").await;
+    let schema = make_schema(1, "public", "orders");
+    let replicated = make_replicated_table_schema(&schema);
+    let mut destinations = Vec::new();
+    let mut stores = Vec::new();
+    for (namespace, label) in [("project_a", "first"), ("project_b", "second")] {
+        let store = MemoryStore::new();
+        store.store_table_schema(schema.clone()).await.unwrap();
+        let destination = DuckLakeDestination::builder(
+            lake.catalog_url.clone(),
+            lake.data_url.clone(),
+            1,
+            store.clone(),
+        )
+        .table_namespace(Some(namespace.to_owned()))
+        .build()
+        .await
+        .unwrap();
+        destination
+            .write_table_rows_for_tests(
+                &replicated,
+                vec![TableRow::new(vec![Cell::I32(1), Cell::String(label.to_owned())])],
+            )
+            .await
+            .unwrap();
+        let event = Event::Insert(InsertEvent {
+            commit_lsn: PgLsn::from(100u64),
+            tx_ordinal: 0,
+            replicated_table_schema: replicated.clone(),
+            table_row: TableRow::new(vec![Cell::I32(2), Cell::String(label.to_owned())]),
+        });
+        destination.write_events(vec![event.clone()]).await.unwrap();
+        destination.write_events(vec![event]).await.unwrap();
+        stores.push(store);
+        destinations.push(destination);
+    }
+    let a = DuckLakeTableName::new("public", "orders").with_namespace(Some("project_a".to_owned()));
+    let b = DuckLakeTableName::new("public", "orders").with_namespace(Some("project_b".to_owned()));
+    let conn =
+        open_lake_conn_when_tables_visible(&lake.catalog_url, &lake.data_url, &[&a, &b]).await;
+    assert_eq!(count_rows(&conn, &a), 2);
+    assert_eq!(count_rows(&conn, &b), 2);
+    drop(conn);
+    let evolved = make_schema_with_email(&schema, 200);
+    stores[0].store_table_schema(evolved.clone()).await.unwrap();
+    let evolved = make_replicated_table_schema(&evolved);
+    destinations[0]
+        .write_events(vec![Event::Insert(InsertEvent {
+            commit_lsn: PgLsn::from(201u64),
+            tx_ordinal: 0,
+            replicated_table_schema: evolved.clone(),
+            table_row: TableRow::new(vec![
+                Cell::I32(3),
+                Cell::Null,
+                Cell::String("example@test.invalid".to_owned()),
+            ]),
+        })])
+        .await
+        .unwrap();
+    let conn =
+        open_lake_conn_when_tables_visible(&lake.catalog_url, &lake.data_url, &[&a, &b]).await;
+    assert!(conn.prepare(&format!("select email from {}", qualified_lake_table_name(&a))).is_ok());
+    assert!(conn.prepare(&format!("select email from {}", qualified_lake_table_name(&b))).is_err());
+    drop(conn);
+    destinations[0].truncate_table(&evolved).await.unwrap();
+    for destination in &destinations {
+        destination.shutdown().await.unwrap();
+    }
+    drop(destinations);
+    let redirected = DuckLakeDestination::builder(
+        lake.catalog_url.clone(),
+        lake.data_url.clone(),
+        1,
+        stores[1].clone(),
+    )
+    .table_namespace(Some("project_a".to_owned()))
+    .build()
+    .await
+    .unwrap();
+    let error = redirected
+        .write_events(vec![Event::Insert(InsertEvent {
+            commit_lsn: PgLsn::from(101u64),
+            tx_ordinal: 0,
+            replicated_table_schema: replicated.clone(),
+            table_row: TableRow::new(vec![Cell::I32(3), Cell::Null]),
+        })])
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("namespace cannot be changed"));
+    redirected.shutdown().await.unwrap();
+    let restarted = DuckLakeDestination::builder(
+        lake.catalog_url.clone(),
+        lake.data_url.clone(),
+        1,
+        stores[1].clone(),
+    )
+    .table_namespace(Some("project_b".to_owned()))
+    .build()
+    .await
+    .unwrap();
+    restarted
+        .write_events(vec![Event::Insert(InsertEvent {
+            commit_lsn: PgLsn::from(100u64),
+            tx_ordinal: 0,
+            replicated_table_schema: replicated.clone(),
+            table_row: TableRow::new(vec![Cell::I32(2), Cell::String("second".to_owned())]),
+        })])
+        .await
+        .unwrap();
+    restarted.shutdown().await.unwrap();
+    let conn =
+        open_lake_conn_when_tables_visible(&lake.catalog_url, &lake.data_url, &[&a, &b]).await;
+    assert_eq!(count_rows(&conn, &a), 0);
+    assert_eq!(count_rows(&conn, &b), 2);
+}
+
+/// Parent setup is idempotent and identifiers are never split at embedded dots.
+#[tokio::test(flavor = "multi_thread")]
+async fn namespaced_tables_preserve_identifier_components() {
+    let lake = create_test_lake("namespaced_identifiers").await;
+    let namespace = "project.\"a";
+    let store = MemoryStore::new();
+    let destination = DuckLakeDestination::builder(
+        lake.catalog_url.clone(),
+        lake.data_url.clone(),
+        1,
+        store.clone(),
+    )
+    .table_namespace(Some(namespace.to_owned()))
+    .build()
+    .await
+    .unwrap();
+    for (id, schema_name, name) in
+        [(1, "public", "orders"), (2, "Mixed.Schema", "odd\" table"), (3, "public", "other")]
+    {
+        let schema = make_schema(id, schema_name, name);
+        store.store_table_schema(schema.clone()).await.unwrap();
+        destination
+            .write_table_rows_for_tests(
+                &make_replicated_table_schema(&schema),
+                vec![TableRow::new(vec![Cell::I32(1), Cell::Null])],
+            )
+            .await
+            .unwrap();
+        let table =
+            DuckLakeTableName::new(schema_name, name).with_namespace(Some(namespace.to_owned()));
+        let conn =
+            open_lake_conn_when_tables_visible(&lake.catalog_url, &lake.data_url, &[&table]).await;
+        assert_eq!(count_rows(&conn, &table), 1);
+    }
+    destination.shutdown().await.unwrap();
+}
+
 /// Maintenance discovers the PostgreSQL metadata schema through its named
 /// DuckDB catalog and flushes inline rows without upgrading an existing 1.0
 /// catalog.
@@ -723,6 +872,17 @@ async fn maintenance_discovers_metadata_schema_and_flushes_rows() {
     .unwrap();
     drop(conn);
     assert_eq!(lake.catalog_version().await, "1.0");
+    let result = DuckLakeDestination::builder(
+        lake.catalog_url.clone(),
+        lake.data_url.clone(),
+        1,
+        MemoryStore::new(),
+    )
+    .table_namespace(Some("project_a".to_owned()))
+    .build()
+    .await;
+    assert!(result.is_err());
+    assert_eq!(lake.catalog_version().await, "1.0");
 
     let writer_config = DuckLakeWriterConfig::default();
     let target_file_size = writer_config.target_file_size().to_owned();
@@ -731,6 +891,7 @@ async fn maintenance_discovers_metadata_schema_and_flushes_rows() {
         data_path: lake.data_url.clone(),
         s3: None,
         metadata_schema: None,
+        table_namespace: None,
         writer_config,
         inline_flush: InlineFlushMaintenanceConfig { enabled: true, min_inlined_bytes: 0 },
         merge_adjacent_files: MergeAdjacentFilesMaintenanceConfig {
@@ -762,6 +923,59 @@ async fn maintenance_discovers_metadata_schema_and_flushes_rows() {
         .map_err(RedactedDuckDbError::from)
         .unwrap();
     assert_eq!(rows, 2);
+}
+
+/// Maintenance selects a parent schema by identity even when leaves repeat.
+#[tokio::test(flavor = "multi_thread")]
+async fn namespaced_maintenance_only_flushes_selected_project() {
+    let lake = create_test_lake("namespaced_maintenance").await;
+    let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
+    conn.execute_batch(
+        "create schema lake.project_a; create schema lake.project_a.public; create schema \
+         lake.project_b; create schema lake.project_b.public; create table \
+         lake.project_a.public.orders (id bigint); create table lake.project_b.public.orders (id \
+         bigint); insert into lake.project_a.public.orders values (1), (2); insert into \
+         lake.project_b.public.orders values (3), (4), (5);",
+    )
+    .unwrap();
+    drop(conn);
+    let writer_config = DuckLakeWriterConfig::default();
+    let target_file_size = writer_config.target_file_size().to_owned();
+    let outcome = run_maintenance_once(DuckLakeMaintenanceConfig {
+        catalog_url: lake.catalog_url.clone(),
+        data_path: lake.data_url.clone(),
+        s3: None,
+        metadata_schema: None,
+        table_namespace: Some("project_a".to_owned()),
+        writer_config,
+        inline_flush: InlineFlushMaintenanceConfig { enabled: true, min_inlined_bytes: 0 },
+        merge_adjacent_files: MergeAdjacentFilesMaintenanceConfig {
+            enabled: false,
+            max_compacted_files: 40,
+            max_tables_per_run: 1,
+            target_file_size,
+        },
+        rewrite_data_files: RewriteDataFilesMaintenanceConfig {
+            enabled: false,
+            min_active_data_files: 0,
+            max_tables_per_run: 1,
+        },
+        expire_snapshots: ExpireSnapshotsMaintenanceConfig {
+            enabled: false,
+            older_than: "7 days".to_owned(),
+        },
+        cleanup_old_files: CleanupOldFilesMaintenanceConfig { enabled: false },
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.inline_flush_tables, 1);
+    assert_eq!(outcome.inline_flush_rows, 2);
+    let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
+    let rows: i64 = conn
+        .query_row("select count(*) from lake.project_b.public.orders", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(rows, 3);
 }
 
 /// COPY connections should retain direct-to-Parquet behavior while sharing the

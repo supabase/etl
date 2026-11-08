@@ -559,6 +559,8 @@ pub struct DuckLakeDestination<S> {
     tasks: TaskRegistry,
     metrics_sampler: Arc<Option<DuckLakeMetricsSampler>>,
     metadata_schema: Arc<str>,
+    /// Immutable source namespace for this destination.
+    table_namespace: Option<String>,
     expire_snapshots_older_than: Arc<str>,
     metadata_pg_pool: PgPool,
     /// Desired per-table sort orders indexed by source schema and table.
@@ -611,6 +613,8 @@ pub struct DuckLakeDestinationBuilder<S> {
     s3: Option<S3Config>,
     /// Optional schema that stores DuckLake metadata.
     metadata_schema: Option<String>,
+    /// Immutable source namespace for newly created tables.
+    table_namespace: Option<String>,
     /// Optional target size used by DuckLake maintenance.
     maintenance_target_file_size: Option<String>,
     /// Optional Parquet row-group byte limit.
@@ -639,6 +643,7 @@ impl<S> DuckLakeDestinationBuilder<S> {
             pool_size,
             s3: None,
             metadata_schema: None,
+            table_namespace: None,
             maintenance_target_file_size: None,
             parquet_row_group_size_bytes: None,
             parquet_row_group_size: None,
@@ -659,6 +664,12 @@ impl<S> DuckLakeDestinationBuilder<S> {
     /// Sets the optional PostgreSQL schema that stores DuckLake metadata.
     pub fn metadata_schema(mut self, metadata_schema: Option<String>) -> Self {
         self.metadata_schema = metadata_schema;
+        self
+    }
+
+    /// Sets the immutable namespace used for every source table.
+    pub fn table_namespace(mut self, table_namespace: Option<String>) -> Self {
+        self.table_namespace = table_namespace;
         self
     }
 
@@ -734,6 +745,7 @@ where
             self.pool_size,
             self.s3,
             self.metadata_schema,
+            self.table_namespace,
             writer_config,
             self.expire_snapshots_older_than,
             self.copy_buffer_config,
@@ -965,10 +977,20 @@ fn validate_ducklake_replica_identity(
 }
 
 /// Builds the query used to inspect a DuckLake table shape.
-fn ducklake_table_columns_sql(table_name: &DuckLakeTableName) -> String {
+fn ducklake_table_columns_sql(table_name: &DuckLakeTableName, nullable_only: bool) -> String {
+    let parent_filter = match table_name.namespace() {
+        None => "s.parent_schema_oid is null".to_owned(),
+        Some(namespace) => {
+            format!("p.schema_name = {} and p.parent_schema_oid is null", quote_literal(namespace))
+        }
+    };
+    let nullable_filter = if nullable_only { " and c.is_nullable" } else { "" };
     format!(
-        "select column_name from information_schema.columns where table_catalog = {} and \
-         table_schema = {} and table_name = {} order by ordinal_position",
+        "select c.column_name from duckdb_columns() c join duckdb_schemas() s on c.database_oid = \
+         s.database_oid and c.schema_oid = s.oid left join duckdb_schemas() p on s.database_oid = \
+         p.database_oid and s.parent_schema_oid = p.oid where c.database_name = {} and \
+         s.schema_name = {} and c.table_name = {} and {parent_filter}{nullable_filter} order by \
+         c.column_index",
         quote_literal(LAKE_CATALOG),
         quote_literal(table_name.schema()),
         quote_literal(table_name.table())
@@ -982,7 +1004,7 @@ fn read_ducklake_table_column_names_blocking(
     conn: &duckdb::Connection,
     table_name: &DuckLakeTableName,
 ) -> EtlResult<Vec<String>> {
-    let sql = ducklake_table_columns_sql(table_name);
+    let sql = ducklake_table_columns_sql(table_name, false);
     let mut statement = conn.prepare(&sql).map_err(|source| {
         classified_error_with_detail(
             ErrorKind::DestinationQueryFailed,
@@ -1028,13 +1050,7 @@ fn read_ducklake_nullable_column_names_blocking(
     conn: &duckdb::Connection,
     table_name: &DuckLakeTableName,
 ) -> EtlResult<HashSet<String>> {
-    let sql = format!(
-        "select column_name from information_schema.columns where table_catalog = {} and \
-         table_schema = {} and table_name = {} and is_nullable = 'YES'",
-        quote_literal(LAKE_CATALOG),
-        quote_literal(table_name.schema()),
-        quote_literal(table_name.table())
-    );
+    let sql = ducklake_table_columns_sql(table_name, true);
     let mut statement = conn.prepare(&sql).map_err(|source| {
         classified_error_with_detail(
             ErrorKind::DestinationQueryFailed,
@@ -1780,6 +1796,7 @@ where
             pool_size,
             s3,
             metadata_schema,
+            None,
             writer_config,
             expire_snapshots_older_than,
             DuckLakeCopyBufferConfig::default(),
@@ -1848,6 +1865,7 @@ where
         pool_size: u32,
         s3: Option<S3Config>,
         metadata_schema: Option<String>,
+        table_namespace: Option<String>,
         writer_config: DuckLakeWriterConfig,
         expire_snapshots_older_than: Option<String>,
         copy_buffer_config: DuckLakeCopyBufferConfig,
@@ -1856,6 +1874,15 @@ where
         store: S,
     ) -> EtlResult<Self> {
         register_metrics();
+        etl_config::shared::validate_ducklake_table_namespace(table_namespace.as_deref()).map_err(
+            |error| {
+                classified_error(
+                    ErrorKind::ConfigError,
+                    "DuckLake table namespace is invalid",
+                    error,
+                )
+            },
+        )?;
 
         if !matches!(catalog_url.scheme(), "postgres" | "postgresql") {
             return Err(etl_error!(
@@ -1888,7 +1915,12 @@ where
                 "Set DuckLake maintenance_mode to `kubernetes` or `postgres`"
             ));
         }
-        let table_sorting = Arc::new(index_table_sorting_config(table_sorting)?);
+        let table_sorting = Arc::new(
+            index_table_sorting_config(table_sorting)?
+                .into_iter()
+                .map(|(name, sorting)| (name.with_namespace(table_namespace.clone()), sorting))
+                .collect(),
+        );
 
         let extension_strategy = current_duckdb_extension_strategy()?;
         let disable_extension_autoload = extension_strategy.disables_autoload();
@@ -1925,6 +1957,22 @@ where
             build_warm_ducklake_pool(manager.as_ref().clone(), pool_size, "write", ()).await?,
         );
         let blocking_slots = Arc::new(Semaphore::new(pool_size as usize));
+
+        if table_namespace.is_some() {
+            run_duckdb_blocking(Arc::clone(&pool), Arc::clone(&blocking_slots), |conn| {
+                conn.execute_batch(&etl_maintenance::ducklake::namespace_version_check_sql(
+                    LAKE_CATALOG,
+                ))
+                .map_err(|source| {
+                    classified_error(
+                        ErrorKind::ConfigError,
+                        "DuckLake namespace requires catalog format 1.1",
+                        RedactedDuckDbError::from(source),
+                    )
+                })
+            })
+            .await?;
+        }
 
         // `target_file_size` is a catalog-wide DuckLake option consumed during
         // compaction. Apply it once on the write pool so foreground writes and
@@ -2059,6 +2107,7 @@ where
             tasks: TaskRegistry::new(),
             metrics_sampler: Arc::new(None),
             metadata_schema: Arc::clone(&metadata_schema),
+            table_namespace,
             expire_snapshots_older_than: Arc::clone(&expire_snapshots_older_than),
             metadata_pg_pool: metadata_pg_pool.clone(),
             table_sorting,
@@ -2333,7 +2382,7 @@ where
         let sql = format!(
             "CALL {LAKE_CATALOG}.set_option('data_inlining_row_limit', {row_limit}, schema => {}, \
              table_name => {});",
-            quote_literal(table_name.schema()),
+            quote_literal(&table_name.schema_path()),
             quote_literal(table_name.table()),
         );
         let table_name = table_name.clone();
@@ -2742,7 +2791,7 @@ where
                     )
                 )
             })?;
-        let table_name = DuckLakeTableName::from_metadata_id(metadata.table_id())?;
+        let table_name = self.stored_table_name(metadata.table_id())?;
         let metadata = if metadata.is_pending() {
             self.recover_pending_metadata(
                 table_id,
@@ -2946,12 +2995,14 @@ where
         let checkpoint_guard = self.acquire_mutation_guard().await;
         let write_guard = DuckLakeWriteGuard::new(&table_write_permit, &checkpoint_guard);
 
+        let namespace_filter =
+            etl_maintenance::ducklake::table_namespace_filter(self.metadata_schema.as_ref());
         let sql = format!(
             "select e.expression, e.sort_direction, e.null_order from {}.{} as e join {}.{} as i \
              on i.sort_id = e.sort_id and i.table_id = e.table_id join {}.{} as t on t.table_id = \
              i.table_id join {}.{} as s on s.schema_id = t.schema_id where s.schema_name = $1 and \
              t.table_name = $2 and s.end_snapshot is null and t.end_snapshot is null and \
-             i.end_snapshot is null order by e.sort_key_index",
+             i.end_snapshot is null and {namespace_filter} order by e.sort_key_index",
             quote_postgres_identifier(self.metadata_schema.as_ref()),
             quote_postgres_identifier("ducklake_sort_expression"),
             quote_postgres_identifier(self.metadata_schema.as_ref()),
@@ -2964,6 +3015,7 @@ where
         let active: Vec<(String, String, String)> = sqlx::query_as(AssertSqlSafe(sql))
             .bind(table_name.schema())
             .bind(table_name.table())
+            .bind(table_name.namespace())
             .fetch_all(&self.metadata_pg_pool)
             .await
             .map_err(|source| {
@@ -3173,7 +3225,7 @@ where
                 continue;
             };
 
-            let table_name = DuckLakeTableName::from_metadata_id(metadata.table_id())?;
+            let table_name = self.stored_table_name(metadata.table_id())?;
             if metadata.is_pending() {
                 self.recover_pending_metadata(table_id, &table_name, metadata, None).await?;
                 continue;
@@ -3702,6 +3754,24 @@ where
         Ok(metadata)
     }
 
+    /// Builds a physical path only when no durable destination identity exists.
+    fn source_table_name(&self, source: &TableName) -> EtlResult<DuckLakeTableName> {
+        Ok(DuckLakeTableName::from_source(source).with_namespace(self.table_namespace.clone()))
+    }
+
+    /// Prevents configuration edits from redirecting an existing pipeline.
+    fn stored_table_name(&self, value: &str) -> EtlResult<DuckLakeTableName> {
+        let table = DuckLakeTableName::from_metadata_id(value)?;
+        if table.namespace() != self.table_namespace.as_deref() {
+            return Err(etl_error!(
+                ErrorKind::InvalidState,
+                "DuckLake table namespace cannot be changed",
+                "Recreate the destination and replication state to change the namespace"
+            ));
+        }
+        Ok(table)
+    }
+
     /// Resolves the ETL-owned destination table and completes pending setup.
     ///
     /// Applied metadata is authoritative and only repopulates process state;
@@ -3713,8 +3783,8 @@ where
         let table_id = replicated_table_schema.id();
         let metadata = self.store.get_destination_table_metadata(table_id).await?;
         let table_name = metadata.as_ref().map_or_else(
-            || table_name_to_ducklake_table_name(replicated_table_schema.name()),
-            |metadata| DuckLakeTableName::from_metadata_id(metadata.table_id()),
+            || self.source_table_name(replicated_table_schema.name()),
+            |metadata| self.stored_table_name(metadata.table_id()),
         )?;
 
         if let Some(metadata) = &metadata {
@@ -3747,8 +3817,8 @@ where
 
         let metadata = self.store.get_destination_table_metadata(table_id).await?;
         let table_name = metadata.as_ref().map_or_else(
-            || table_name_to_ducklake_table_name(replicated_table_schema.name()),
-            |metadata| DuckLakeTableName::from_metadata_id(metadata.table_id()),
+            || self.source_table_name(replicated_table_schema.name()),
+            |metadata| self.stored_table_name(metadata.table_id()),
         )?;
 
         if let Some(metadata) = &metadata {
@@ -3802,7 +3872,7 @@ where
             return Ok(None);
         }
 
-        DuckLakeTableName::from_metadata_id(metadata.table_id()).map(Some)
+        self.stored_table_name(metadata.table_id()).map(Some)
     }
 
     /// Ensures destination metadata and physical columns can accept a row
@@ -3875,10 +3945,10 @@ where
         let table_id = replicated_table_schema.id();
 
         if let Some(existing) = self.store.get_destination_table_metadata(table_id).await? {
-            return DuckLakeTableName::from_metadata_id(existing.table_id());
+            return self.stored_table_name(existing.table_id());
         }
 
-        table_name_to_ducklake_table_name(replicated_table_schema.name())
+        self.source_table_name(replicated_table_schema.name())
     }
 
     /// Serializes table-local truncate and CDC mutation writes.
@@ -4173,16 +4243,9 @@ where
 
     /// Lists active DuckLake table names from the metadata catalog.
     async fn list_active_ducklake_tables(&self) -> EtlResult<Vec<DuckLakeTableName>> {
-        let sql = format!(
-            "SELECT s.schema_name, t.table_name FROM {}.{} AS t JOIN {}.{} AS s ON s.schema_id = \
-             t.schema_id WHERE t.end_snapshot IS NULL AND s.end_snapshot IS NULL ORDER BY \
-             s.schema_name, t.table_name",
-            quote_postgres_identifier(self.metadata_schema.as_ref()),
-            quote_postgres_identifier("ducklake_table"),
-            quote_postgres_identifier(self.metadata_schema.as_ref()),
-            quote_postgres_identifier("ducklake_schema")
-        );
-        let rows: Vec<(String, String)> = sqlx::query_as(AssertSqlSafe(sql))
+        let sql = etl_maintenance::ducklake::namespaced_tables_query(self.metadata_schema.as_ref());
+        let rows: Vec<(Option<String>, String, String)> = sqlx::query_as(AssertSqlSafe(sql))
+            .bind(self.table_namespace.as_deref())
             .fetch_all(&self.metadata_pg_pool)
             .await
             .map_err(|source| {
@@ -4195,7 +4258,9 @@ where
             })?;
         Ok(rows
             .into_iter()
-            .map(|(schema_name, table_name)| DuckLakeTableName::new(schema_name, table_name))
+            .map(|(namespace, schema_name, table_name)| {
+                DuckLakeTableName::new(schema_name, table_name).with_namespace(namespace)
+            })
             .collect())
     }
 

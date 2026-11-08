@@ -589,6 +589,9 @@ pub enum DestinationConfig {
         s3_use_ssl: Option<bool>,
         /// Optional metadata schema for DuckLake metadata tables.
         metadata_schema: Option<String>,
+        /// Immutable source namespace above each replicated schema.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        table_namespace: Option<String>,
         /// Optional DuckLake maintenance target file size.
         maintenance_target_file_size: Option<String>,
         /// Optional Parquet row-group byte limit.
@@ -648,8 +651,9 @@ impl Validate for DestinationConfig {
         match self {
             DestinationConfig::BigQuery { table_options, .. } => table_options.validate(),
             DestinationConfig::Iceberg { config } => config.validate(),
-            DestinationConfig::Ducklake { copy_buffer, table_sorting, .. } => {
+            DestinationConfig::Ducklake { copy_buffer, table_sorting, table_namespace, .. } => {
                 copy_buffer.validate()?;
+                crate::shared::validate_ducklake_table_namespace(table_namespace.as_deref())?;
                 table_sorting.validate()
             }
             DestinationConfig::ClickHouse { .. } | DestinationConfig::Snowflake { .. } => Ok(()),
@@ -843,6 +847,9 @@ pub enum DestinationConfigWithoutSecrets {
         s3_use_ssl: Option<bool>,
         /// Optional metadata schema for DuckLake metadata tables.
         metadata_schema: Option<String>,
+        /// Immutable source namespace above each replicated schema.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        table_namespace: Option<String>,
         /// Optional DuckLake maintenance target file size.
         maintenance_target_file_size: Option<String>,
         /// Optional Parquet row-group byte limit.
@@ -883,8 +890,14 @@ impl Validate for DestinationConfigWithoutSecrets {
                 table_options.validate()
             }
             DestinationConfigWithoutSecrets::Iceberg { config } => config.validate(),
-            DestinationConfigWithoutSecrets::Ducklake { copy_buffer, table_sorting, .. } => {
+            DestinationConfigWithoutSecrets::Ducklake {
+                copy_buffer,
+                table_sorting,
+                table_namespace,
+                ..
+            } => {
                 copy_buffer.validate()?;
+                crate::shared::validate_ducklake_table_namespace(table_namespace.as_deref())?;
                 table_sorting.validate()
             }
             DestinationConfigWithoutSecrets::ClickHouse { .. }
@@ -927,6 +940,7 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
+                table_namespace,
                 maintenance_target_file_size,
                 parquet_row_group_size_bytes,
                 parquet_row_group_size,
@@ -942,6 +956,7 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
+                table_namespace,
                 maintenance_target_file_size,
                 parquet_row_group_size_bytes,
                 parquet_row_group_size,
@@ -1003,6 +1018,7 @@ mod tests {
             s3_url_style: None,
             s3_use_ssl: None,
             metadata_schema: None,
+            table_namespace: None,
             maintenance_target_file_size: None,
             parquet_row_group_size_bytes: None,
             parquet_row_group_size: None,

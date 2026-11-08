@@ -535,6 +535,7 @@ async fn run_ducklake_compaction(args: &RunArgs) -> Result<Option<DuckLakeCompac
             data_path,
             s3: None,
             metadata_schema: None,
+            table_namespace: None,
             writer_config,
             inline_flush: InlineFlushMaintenanceConfig { enabled: false, min_inlined_bytes: 0 },
             merge_adjacent_files: MergeAdjacentFilesMaintenanceConfig {
