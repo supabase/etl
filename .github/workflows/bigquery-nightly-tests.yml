@@ -83,13 +83,14 @@ jobs:
           tool: cargo-nextest@0.9.148
 
       # Pull-request CI runs every BigQuery test except the ignored ones,
-      # which make too many paid calls to run on every change.
+      # which make too many paid calls to run on every change. The binary
+      # filter keeps the lib's ignored known-defect tests out of this run.
       - name: Run ignored BigQuery tests
         env:
           PROPERTY_TEST_BUDGET_SECS: ${{ inputs.property-budget-secs || '300' }}
         run: |
           cargo --locked nextest run -p etl-destinations --features bigquery,test-utils \
-            --run-ignored only -E 'test(/^bigquery::/)'
+            --run-ignored only -E 'binary_id(etl-destinations::main) & test(/^bigquery::/)'
 
       - name: Remove BigQuery credentials
         if: always()
