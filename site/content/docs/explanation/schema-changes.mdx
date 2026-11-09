@@ -272,8 +272,17 @@ metadata does not lose replicated row values.
 ETL supports deterministic literal defaults such as strings, numbers,
 booleans, dates, times, timestamps, JSON, and UUIDs when the destination can
 render them safely. Runtime or session-dependent expressions—including
-`now()`, sequences, `random()`, `current_user`, and generated UUID functions—are
-skipped with a warning.
+`now()`, sequences, `random()`, `current_user`, generated UUID functions, and
+literals whose stored value depends on the session that evaluates them—are
+skipped with a warning. The last group covers conversions to or from
+`timestamptz` and from `time` to `timetz`, which read `TimeZone`, and
+built-in date, interval, float, or bytea literals on text columns, whose text
+follows `DateStyle`, `IntervalStyle`, `extra_float_digits`, or `bytea_output`.
+
+Types ETL replicates as text, such as enums, domains, and extension types, keep
+a default only when it is a literal of the column's own type, as enum defaults
+are. Domain defaults are skipped, because the domain's type modifier can change
+the value PostgreSQL stores.
 
 ETL does not issue table-wide `UPDATE`, `MERGE`, CTAS/swap, or materialization
 operations to backfill historical destination rows. The result depends on why

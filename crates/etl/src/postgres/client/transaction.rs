@@ -659,6 +659,7 @@ impl<'a> PgReplicationTransactionCore<'a> {
                             'attnum', s.attnum,
                             'atttypid', s.atttypid::pg_catalog.int8,
                             'atttypmod', s.atttypmod,
+                            'formatted_type', s.formatted_type,
                             'attnotnull', s.attnotnull,
                             'default_expression', s.default_expression
                         )
