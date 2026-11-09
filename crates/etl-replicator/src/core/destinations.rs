@@ -345,6 +345,7 @@ mod ducklake {
     ) -> ReplicatorResult<Pipeline<ReplicatorStore, impl PipelineDestination>> {
         let DestinationConfig::Ducklake {
             catalog_url,
+            catalog_pooler_url,
             data_path,
             pool_size,
             s3_access_key_id,
@@ -362,6 +363,7 @@ mod ducklake {
             maintenance_mode,
             copy_buffer,
             table_sorting,
+            table_partitioning,
         } = &replicator_config.destination
         else {
             unreachable!("Destination kind should match DuckLake config");
@@ -402,6 +404,13 @@ mod ducklake {
             *pool_size,
             store.clone(),
         )
+        .catalog_pooler_url(
+            catalog_pooler_url
+                .as_ref()
+                .map(|url| parse_ducklake_url(url.expose_secret()))
+                .transpose()
+                .map_err(ReplicatorError::config)?,
+        )
         .s3(s3_config)
         .metadata_schema(metadata_schema.clone())
         .table_namespace(table_namespace.clone())
@@ -411,6 +420,7 @@ mod ducklake {
         .expire_snapshots_older_than(expire_snapshots_older_than.clone())
         .copy_buffer(*copy_buffer)
         .table_sorting(table_sorting.clone())
+        .table_partitioning(table_partitioning.clone())
         .external_maintenance(external_maintenance)
         .build()
         .await?;

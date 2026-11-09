@@ -5,17 +5,21 @@ use etl::{
         BatchConfig, IntoConnectOptions, InvalidatedSlotBehavior, MemoryBackpressureConfig,
         PgConnectionConfig, PgConnectionOptions, PipelineConfig, TableSyncCopyConfig,
     },
+    migrations::run_migrations,
     pipeline::Pipeline,
     postgres::migrations::{ETL_SCHEMA_LOCK_ID, run_source_migrations},
     store::{MemoryStore, PostgresStore, StateStore, WorkerType},
     test_utils::memory_destination::MemoryDestination,
 };
 use etl_postgres::{
-    test_utils::{local_tls_config_from_env, test_database_port_from_env},
+    test_utils::{
+        local_tls_config_from_env, test_database_port_from_env, test_database_replica_port_from_env,
+    },
     tokio::test_utils::PgDatabase,
 };
 use etl_telemetry::tracing::init_test_tracing;
 use sqlx::{Connection, Executor, PgConnection, migrate::Migrator, postgres::PgConnectOptions};
+use tokio::try_join;
 use tokio_postgres::{Client, types::PgLsn};
 use uuid::Uuid;
 
@@ -1286,4 +1290,69 @@ async fn concurrent_source_migrations_bootstrap_a_fresh_database() {
 
     assert!(source_helper_exists(&database).await);
     assert_eq!(applied_migration_versions(&database).await, source_migration_versions());
+}
+
+/// One-shot upgrades preserve legacy progress without starting replication.
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_only_upgrades_stopped_sources() {
+    let database = spawn_unmigrated_database().await;
+    let mut conn = migration_connection(&database.config).await;
+    postgres_store_migrator()
+        .run_direct(Some(POSTGRES_STORE_PRE_PIPELINE_ID_V2_VERSION), &mut conn, false)
+        .await
+        .unwrap();
+    conn.execute(
+        "insert into etl.replication_progress (pipeline_id, worker_type, flush_lsn)
+         values (150, 'apply', '0/A')",
+    )
+    .await
+    .unwrap();
+    drop(conn);
+
+    // Startup and an operator Job can reach the same database together.
+    try_join!(run_migrations(&database.config, None), run_migrations(&database.config, None))
+        .unwrap();
+    run_migrations(&database.config, None).await.unwrap();
+
+    assert!(source_helper_exists(&database).await);
+    assert!(
+        query_bool(
+            &database,
+            "select pipeline_id_v2 = '150' and flush_lsn = '0/A'::pg_lsn from \
+             etl.replication_progress"
+        )
+        .await
+    );
+    assert!(
+        query_bool(
+            &database,
+            "select not exists (select 1 from pg_replication_slots where database = \
+             current_database())"
+        )
+        .await
+    );
+    let expected: BTreeSet<_> = source_migration_versions()
+        .into_iter()
+        .chain(postgres_store_migration_versions())
+        .collect();
+    assert_eq!(
+        applied_migration_versions(&database).await.into_iter().collect::<BTreeSet<_>>(),
+        expected
+    );
+}
+
+/// Explicit upgrades reject a standby before changing a separate writable
+/// store.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires a physical standby on TESTS_DATABASE_REPLICA_PORT or source port plus 1000"]
+async fn migration_only_rejects_standby_before_upgrading_store() {
+    let store = spawn_unmigrated_database().await;
+    let mut source = local_pg_connection_config();
+    source.port = test_database_replica_port_from_env().unwrap_or(source.port + 1000);
+    source.name = "postgres".to_owned();
+
+    let error = run_migrations(&source, Some(&store.config)).await.unwrap_err();
+
+    assert!(error.to_string().contains("standby source"));
+    assert!(!postgres_store_table_exists(&store).await);
 }

@@ -29,7 +29,7 @@ use rust_decimal::Decimal;
 use url::Url;
 
 use crate::support::ducklake::{
-    catalog_attach_target, create_test_lake, ducklake_load_sql, open_verification_connection,
+    checkpoint_lake, create_test_lake, open_lake_conn, qualified_lake_table_name,
 };
 
 /// Row size that exceeds the test's preferred 8 MiB batch limit.
@@ -81,52 +81,6 @@ struct DdlTypeRow {
     ddl_col_2_0: Option<bool>,
     ddl_col_3_0_is_present: bool,
     ddl_col_4_0: Option<Decimal>,
-}
-
-/// Opens a DuckLake verification connection using blocking DuckDB APIs.
-///
-/// Production async code must wrap equivalent DuckDB work in
-/// `run_duckdb_blocking`.
-fn open_lake_conn(catalog: &Url, data: &Url) -> Connection {
-    let conn = open_verification_connection();
-    let catalog_attach_target = catalog_attach_target(catalog);
-    conn.execute_batch(&format!(
-        "{} attach {} as {} (data_path {}, automatic_migration false);",
-        ducklake_load_sql(),
-        quote_literal(&format!("ducklake:{catalog_attach_target}")),
-        quote_identifier("lake"),
-        quote_literal(data.as_str())
-    ))
-    .map_err(RedactedDuckDbError::from)
-    .unwrap();
-
-    conn
-}
-
-/// Forces DuckLake to checkpoint catalog metadata before cross-connection
-/// verification.
-///
-/// These end-to-end tests shut the destination down and then attach a fresh
-/// DuckDB connection to verify the final lake state. Without an explicit
-/// checkpoint here, that new connection can observe stale catalog metadata for
-/// a short period even though the pipeline shutdown has already completed,
-/// which makes the assertions flaky in CI. Running `checkpoint` makes the final
-/// durable state visible to the verification connection deterministically.
-///
-/// Production async code must wrap equivalent blocking DuckDB work in
-/// `run_duckdb_blocking`.
-fn checkpoint_lake(catalog: &Url, data: &Url) {
-    let conn = open_lake_conn(catalog, data);
-    conn.execute_batch("checkpoint").map_err(RedactedDuckDbError::from).unwrap();
-}
-
-fn qualified_lake_table_name(table_name: &DuckLakeTableName) -> String {
-    format!(
-        "{}.{}.{}",
-        quote_identifier("lake"),
-        quote_identifier(table_name.schema()),
-        quote_identifier(table_name.table())
-    )
 }
 
 /// Counts one applied-marker kind for a destination table.

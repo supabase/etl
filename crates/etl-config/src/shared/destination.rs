@@ -7,7 +7,10 @@ use utoipa::ToSchema;
 
 use crate::{
     clickhouse::ClickHouseUrl,
-    shared::{Validate, ValidationError},
+    shared::{
+        DuckLakeTablePartitioningConfig, Validate, ValidationError,
+        validate_ducklake_table_namespace,
+    },
 };
 
 const fn default_connection_pool_size() -> usize {
@@ -426,6 +429,9 @@ pub struct DuckLakeTableSortConfig {
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DuckLakeSortBy {
+    /// Explicitly remove this table's sort order.
+    None,
+
     /// Use the explicitly configured columns in their listed order.
     Columns {
         /// Ordered sort columns.
@@ -510,6 +516,10 @@ impl DestinationKind {
 /// leaking secrets in the config into serialized forms.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "One configuration is stored per pipeline; keep the existing unboxed config API"
+)]
 pub enum DestinationConfig {
     /// Google BigQuery destination configuration.
     ///
@@ -568,8 +578,14 @@ pub enum DestinationConfig {
         config: IcebergConfig,
     },
     Ducklake {
-        /// DuckLake catalog URL.
+        /// Direct DuckLake catalog URL used by DuckDB writers.
         catalog_url: SecretString,
+        /// Optional transaction-pooler URL for background SQLx metadata
+        /// queries. Falls back to `catalog_url` when absent.
+        /// Destination replay bookkeeping and Postgres maintenance
+        /// coordination always use `catalog_url`.
+        #[serde(default)]
+        catalog_pooler_url: Option<SecretString>,
         /// DuckLake data path.
         data_path: String,
         /// Size of the DuckDB connection pool.
@@ -609,6 +625,10 @@ pub enum DestinationConfig {
         /// Optional per-table sort orders applied during DuckLake maintenance.
         #[serde(default, skip_serializing_if = "DuckLakeTableSortingConfig::is_empty")]
         table_sorting: DuckLakeTableSortingConfig,
+        /// Explicit per-table partition specifications; omitted tables are
+        /// preserved.
+        #[serde(default, skip_serializing_if = "DuckLakeTablePartitioningConfig::is_empty")]
+        table_partitioning: DuckLakeTablePartitioningConfig,
     },
     Snowflake {
         /// Snowflake account identifier in "ORGNAME-ACCOUNTNAME" format.
@@ -651,10 +671,17 @@ impl Validate for DestinationConfig {
         match self {
             DestinationConfig::BigQuery { table_options, .. } => table_options.validate(),
             DestinationConfig::Iceberg { config } => config.validate(),
-            DestinationConfig::Ducklake { copy_buffer, table_sorting, table_namespace, .. } => {
+            DestinationConfig::Ducklake {
+                copy_buffer,
+                table_sorting,
+                table_partitioning,
+                table_namespace,
+                ..
+            } => {
                 copy_buffer.validate()?;
-                crate::shared::validate_ducklake_table_namespace(table_namespace.as_deref())?;
-                table_sorting.validate()
+                validate_ducklake_table_namespace(table_namespace.as_deref())?;
+                table_sorting.validate()?;
+                table_partitioning.validate()
             }
             DestinationConfig::ClickHouse { .. } | DestinationConfig::Snowflake { .. } => Ok(()),
         }
@@ -867,6 +894,10 @@ pub enum DestinationConfigWithoutSecrets {
         /// Optional per-table sort orders applied during DuckLake maintenance.
         #[serde(default, skip_serializing_if = "DuckLakeTableSortingConfig::is_empty")]
         table_sorting: DuckLakeTableSortingConfig,
+        /// Explicit per-table partition specifications; omitted tables are
+        /// preserved.
+        #[serde(default, skip_serializing_if = "DuckLakeTablePartitioningConfig::is_empty")]
+        table_partitioning: DuckLakeTablePartitioningConfig,
     },
     Snowflake {
         /// Snowflake account identifier in "ORGNAME-ACCOUNTNAME" format.
@@ -893,12 +924,14 @@ impl Validate for DestinationConfigWithoutSecrets {
             DestinationConfigWithoutSecrets::Ducklake {
                 copy_buffer,
                 table_sorting,
+                table_partitioning,
                 table_namespace,
                 ..
             } => {
                 copy_buffer.validate()?;
-                crate::shared::validate_ducklake_table_namespace(table_namespace.as_deref())?;
-                table_sorting.validate()
+                validate_ducklake_table_namespace(table_namespace.as_deref())?;
+                table_sorting.validate()?;
+                table_partitioning.validate()
             }
             DestinationConfigWithoutSecrets::ClickHouse { .. }
             | DestinationConfigWithoutSecrets::Snowflake { .. } => Ok(()),
@@ -931,6 +964,7 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
             }
             DestinationConfig::Ducklake {
                 catalog_url: _,
+                catalog_pooler_url: _,
                 data_path,
                 pool_size,
                 s3_access_key_id: _,
@@ -948,6 +982,7 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 maintenance_mode,
                 copy_buffer,
                 table_sorting,
+                table_partitioning,
             } => DestinationConfigWithoutSecrets::Ducklake {
                 data_path,
                 pool_size,
@@ -964,6 +999,7 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 maintenance_mode,
                 copy_buffer,
                 table_sorting,
+                table_partitioning,
             },
             DestinationConfig::Snowflake {
                 account_id,
@@ -1005,10 +1041,33 @@ mod tests {
         assert_eq!(configured.parquet_row_group_size(), "500000");
     }
 
+    /// Existing configs stay valid and pooler credentials remain
+    /// secret-bearing.
+    #[test]
+    fn ducklake_catalog_pooler_url_is_optional_and_redacted() {
+        let mut json = serde_json::json!({"ducklake": {
+            "catalog_url": "postgres://placeholder@direct.example.com/catalog",
+            "data_path": "s3://example-bucket/"
+        }});
+        for pooler in [None, Some("postgres://placeholder@pooler.example.com:6543/catalog")] {
+            json["ducklake"]["catalog_pooler_url"] = serde_json::json!(pooler);
+            let config: DestinationConfig = serde_json::from_value(json.clone()).unwrap();
+            assert!(!format!("{config:?}").contains("pooler.example.com"));
+            let DestinationConfig::Ducklake { catalog_pooler_url, .. } = config else {
+                unreachable!();
+            };
+            assert_eq!(catalog_pooler_url.is_some(), pooler.is_some());
+        }
+        json["ducklake"].as_object_mut().unwrap().remove("catalog_pooler_url");
+        let config: DestinationConfig = serde_json::from_value(json).unwrap();
+        assert!(matches!(config, DestinationConfig::Ducklake { catalog_pooler_url: None, .. }));
+    }
+
     #[test]
     fn ducklake_without_secrets_omits_catalog_url() {
         let config = DestinationConfig::Ducklake {
             catalog_url: "postgres://user:pass@localhost:5432/ducklake_catalog".to_owned().into(),
+            catalog_pooler_url: Some("postgres://placeholder@pooler.example.com/catalog".into()),
             data_path: "s3://bucket/path".to_owned(),
             pool_size: 4,
             s3_access_key_id: None,
@@ -1025,6 +1084,7 @@ mod tests {
             expire_snapshots_older_than: None,
             maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
             copy_buffer: DuckLakeCopyBufferConfig::default(),
+            table_partitioning: DuckLakeTablePartitioningConfig::default(),
             table_sorting: DuckLakeTableSortingConfig {
                 tables: vec![DuckLakeTableSortConfig {
                     schema: "public".to_owned(),
@@ -1039,6 +1099,8 @@ mod tests {
         let serialized = json.to_string();
 
         assert!(!serialized.contains("catalog_url"));
+        assert!(!serialized.contains("catalog_pooler_url"));
+        assert!(!serialized.contains("pooler.example.com"));
         assert!(!serialized.contains("user:pass"));
         assert_eq!(
             json["ducklake"]["table_sorting"]["tables"][0]["sort_by"]["kind"],

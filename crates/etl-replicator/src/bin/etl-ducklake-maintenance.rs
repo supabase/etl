@@ -47,6 +47,7 @@ fn try_main() -> MaintenanceResult<()> {
 async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
     let DestinationConfig::Ducklake {
         catalog_url,
+        catalog_pooler_url,
         data_path,
         s3_access_key_id,
         s3_secret_access_key,
@@ -96,6 +97,10 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
     );
     let maintenance_config = DuckLakeMaintenanceConfig {
         catalog_url: parse_ducklake_url(catalog_url.expose_secret())?,
+        catalog_pooler_url: catalog_pooler_url
+            .as_ref()
+            .map(|url| parse_ducklake_url(url.expose_secret()))
+            .transpose()?,
         data_path: parse_ducklake_s3_data_path(&data_path)?,
         s3,
         metadata_schema,

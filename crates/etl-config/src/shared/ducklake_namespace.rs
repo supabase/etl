@@ -4,15 +4,26 @@ use serde::{Deserialize, Serialize};
 
 use crate::shared::{Validate, ValidationError};
 
+/// Durable table identities with a rollback-incompatible namespaced shape.
+#[derive(Deserialize, Serialize)]
+#[serde(untagged, deny_unknown_fields)]
+enum DuckLakeTableMetadata {
+    /// Ordered namespace, source schema, and table components.
+    Namespaced { namespaced: [String; 3] },
+    /// Original representation, including its serialized field order.
+    Legacy { schema: String, table: String },
+}
+
 /// A physical DuckLake table, with an optional source namespace above its
 /// schema.
 ///
 /// Missing namespaces retain the original metadata representation and replay
-/// key.
+/// key. Namespaced metadata omits the top-level schema and table fields so
+/// pre-namespace binaries reject it instead of writing into the flat layout.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
+#[serde(from = "DuckLakeTableMetadata", into = "DuckLakeTableMetadata")]
 pub struct DuckLakeTableName {
     /// Source namespace; absent for existing flat destinations.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     namespace: Option<String>,
     /// Source schema, kept as one identifier even when it contains dots.
     schema: String,
@@ -97,6 +108,30 @@ impl DuckLakeTableName {
     }
 }
 
+impl From<DuckLakeTableMetadata> for DuckLakeTableName {
+    fn from(metadata: DuckLakeTableMetadata) -> Self {
+        match metadata {
+            DuckLakeTableMetadata::Namespaced { namespaced: [namespace, schema, table] } => {
+                Self { namespace: Some(namespace), schema, table }
+            }
+            DuckLakeTableMetadata::Legacy { schema, table } => {
+                Self { namespace: None, schema, table }
+            }
+        }
+    }
+}
+
+impl From<DuckLakeTableName> for DuckLakeTableMetadata {
+    fn from(table_name: DuckLakeTableName) -> Self {
+        match table_name.namespace {
+            Some(namespace) => {
+                Self::Namespaced { namespaced: [namespace, table_name.schema, table_name.table] }
+            }
+            None => Self::Legacy { schema: table_name.schema, table: table_name.table },
+        }
+    }
+}
+
 impl std::fmt::Display for DuckLakeTableName {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "{}.{}", self.schema_path(), self.table)
@@ -133,7 +168,16 @@ impl Validate for DuckLakeTableName {
 
 #[cfg(test)]
 mod tests {
+    use serde::Deserialize;
+
     use crate::shared::DuckLakeTableName;
+
+    /// Matches the permissive metadata parser in pre-namespace binaries.
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct LegacyDuckLakeTableName {
+        schema: String,
+        table: String,
+    }
 
     #[test]
     fn legacy_metadata_and_replay_keys_are_unchanged() {
@@ -145,6 +189,36 @@ mod tests {
             serde_json::to_string(&table).unwrap(),
             r#"{"schema":"public","table":"orders"}"#
         );
+        assert_eq!(
+            serde_json::from_str::<LegacyDuckLakeTableName>(
+                &serde_json::to_string(&table).unwrap()
+            )
+            .unwrap(),
+            LegacyDuckLakeTableName { schema: "public".into(), table: "orders".into() }
+        );
+    }
+
+    #[test]
+    fn namespaced_metadata_is_rejected_by_pre_namespace_binaries() {
+        for namespace in ["project_a", "project_b", "quoted.\"名"] {
+            let table =
+                DuckLakeTableName::new("public", "orders").with_namespace(Some(namespace.into()));
+            let metadata = serde_json::to_string(&table).unwrap();
+            assert!(serde_json::from_str::<LegacyDuckLakeTableName>(&metadata).is_err());
+            assert_eq!(serde_json::from_str::<DuckLakeTableName>(&metadata).unwrap(), table);
+        }
+    }
+
+    #[test]
+    fn malformed_namespaced_metadata_cannot_fall_back_to_flat_layout() {
+        for metadata in [
+            r#"{"namespaced":["project_a","public"]}"#,
+            r#"{"namespaced":["project_a","public","orders","extra"]}"#,
+            r#"{"namespaced":null,"schema":"public","table":"orders"}"#,
+            r#"{"namespace":"project_a","schema":"public","table":"orders"}"#,
+        ] {
+            assert!(serde_json::from_str::<DuckLakeTableName>(metadata).is_err());
+        }
     }
 
     #[test]

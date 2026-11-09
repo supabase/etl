@@ -5,6 +5,9 @@
 //! systems. Handles test database setup, replication slot management, worker
 //! lifecycle coordination, and data consistency validation.
 
+// Gated like `property` because generated workloads need `proptest`.
+#[cfg(feature = "test-utils")]
+pub mod cdc_workload;
 pub mod database;
 pub mod destination;
 pub mod event;

@@ -10,8 +10,10 @@
 //!
 //! Generation plans every operation against a model of committed rows, so each
 //! committed transaction emits exactly one data event per planned operation.
-//! [`assert_workload_converged`] checks delivery per transaction, replay
-//! stability, and the materialized destination state against the source.
+//! A [`WorkloadShape`] keeps generated changes inside what a destination can
+//! preserve. [`assert_workload_converged`] checks delivery per transaction,
+//! replay stability, and the materialized destination state against the
+//! source.
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -21,47 +23,72 @@ use std::{
     time::Duration,
 };
 
-use etl::{
-    data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
-    event::{Event, UpdateEvent},
-    schema::{ReplicatedTableSchema, TableId, TableName},
-    test_utils::{
-        database::test_table_name,
-        materialize::{FromTableRow, materialize_events},
-        memory_destination::MemoryDestination,
-        notify::TimedNotify,
-        notifying_store::NotifyingStore,
-        test_destination_wrapper::TestDestinationWrapper,
-    },
-};
 use etl_config::shared::PgConnectionConfig;
 use etl_postgres::tokio::test_utils::{PgDatabase, TableModification, connect_to_pg_database};
 use pg_escape::quote_literal;
 use proptest::{collection::vec, prelude::*, sample::Index};
 use tokio_postgres::{Client, types::PgLsn};
+use uuid::Uuid;
+
+use crate::{
+    data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
+    event::{Event, UpdateEvent},
+    schema::{ReplicatedTableSchema, TableId, TableName},
+    test_utils::{
+        database::{replication_slot_state, test_table_name},
+        materialize::{FromTableRow, materialize_events},
+        notify::TimedNotify,
+        test_destination_wrapper::TestDestinationWrapper,
+    },
+};
 
 /// Number of tables each workload writes.
-pub(crate) const TABLE_COUNT: usize = 2;
+pub const TABLE_COUNT: usize = 2;
 
 /// Publication covering every workload table.
-pub(crate) const WORKLOAD_PUBLICATION: &str = "cdc_workload_pub";
+pub const WORKLOAD_PUBLICATION: &str = "cdc_workload_pub";
 
 /// Maximum time for one workload synchronization point.
-pub(crate) const WORKLOAD_TIMEOUT: Duration = Duration::from_secs(60);
+pub const WORKLOAD_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Large-note size, above the out-of-line TOAST threshold for
 /// `storage external` columns.
 const LARGE_NOTE_BYTES: usize = 4096;
 
-/// Destination wrapper used by workload properties.
+/// Change shapes a workload may generate.
 ///
-/// `S` is the store the inner destination records table metadata in.
-pub(crate) type WorkloadDestination<S = NotifyingStore> =
-    TestDestinationWrapper<MemoryDestination<S>>;
+/// Destinations that cannot preserve a shape reject it by design, so their
+/// properties generate workloads without it instead of expecting failures.
+#[derive(Clone, Copy, Debug)]
+pub struct WorkloadShape {
+    /// Whether tables may use replica identity `DEFAULT`, so updates that
+    /// leave a TOASTed note unchanged arrive as partial rows.
+    partial_updates: bool,
+    /// Whether updates may move a row to a new primary key.
+    key_changes: bool,
+}
+
+impl WorkloadShape {
+    /// Allows every generated change shape.
+    pub const fn all() -> Self {
+        Self { partial_updates: true, key_changes: true }
+    }
+
+    /// Uses replica identity `FULL` for every table, so every update carries
+    /// a full new row.
+    pub const fn without_partial_updates(self) -> Self {
+        Self { partial_updates: false, ..self }
+    }
+
+    /// Keeps every update on its row's primary key.
+    pub const fn without_key_changes(self) -> Self {
+        Self { key_changes: false, ..self }
+    }
+}
 
 /// Replica identity configured for one workload table.
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum IdentityMode {
+pub enum IdentityMode {
     /// Primary-key identity: deletes carry key rows and unchanged TOAST
     /// values can arrive as partial updates.
     Default,
@@ -223,7 +250,7 @@ impl PlannedOp {
 
 /// One planned transaction.
 #[derive(Clone, Debug)]
-pub(crate) struct PlannedTx {
+pub struct PlannedTx {
     /// Operations in execution order; each emits one data event on commit.
     ops: Vec<PlannedOp>,
     /// Whether the transaction rolls back.
@@ -232,7 +259,7 @@ pub(crate) struct PlannedTx {
 
 /// One step after the fault point.
 #[derive(Clone, Debug)]
-pub(crate) enum AfterFaultStep {
+pub enum AfterFaultStep {
     /// Runs a transaction.
     Tx(PlannedTx),
     /// Commits the straddling transaction.
@@ -241,7 +268,7 @@ pub(crate) enum AfterFaultStep {
 
 /// A planned workload ready to execute.
 #[derive(Clone, Debug)]
-pub(crate) struct Workload {
+pub struct Workload {
     /// Replica identity per table.
     identities: [IdentityMode; TABLE_COUNT],
     /// Inserts committed before the pipeline starts.
@@ -258,22 +285,22 @@ pub(crate) struct Workload {
 
 impl Workload {
     /// Returns the transactions before the fault transaction.
-    pub(crate) fn before_fault(&self) -> &[PlannedTx] {
+    pub fn before_fault(&self) -> &[PlannedTx] {
         &self.before_fault
     }
 
     /// Returns the straddling transaction's inserts, if any.
-    pub(crate) fn straddle(&self) -> Option<&PlannedTx> {
+    pub fn straddle(&self) -> Option<&PlannedTx> {
         self.straddle.as_ref()
     }
 
     /// Returns the transaction whose delivery the fault interrupts.
-    pub(crate) fn fault_tx(&self) -> &PlannedTx {
+    pub fn fault_tx(&self) -> &PlannedTx {
         &self.fault_tx
     }
 
     /// Returns the steps after the fault.
-    pub(crate) fn after_fault(&self) -> &[AfterFaultStep] {
+    pub fn after_fault(&self) -> &[AfterFaultStep] {
         &self.after_fault
     }
 
@@ -282,7 +309,7 @@ impl Workload {
     /// Apply promotes a table to `Ready` only after its decoder materializes
     /// from a relation or change on the current connection, so tables without
     /// post-fault changes may legitimately stay in `SyncDone`.
-    pub(crate) fn tables_written_after_fault(&self) -> [bool; TABLE_COUNT] {
+    pub fn tables_written_after_fault(&self) -> [bool; TABLE_COUNT] {
         let mut written = [false; TABLE_COUNT];
         let committed_after_fault = self.after_fault.iter().filter_map(|step| match step {
             AfterFaultStep::Tx(tx) if !tx.rollback => Some(tx),
@@ -310,12 +337,20 @@ struct Planner {
     /// Whether an open transaction or table copy holds a lock that blocks
     /// truncate.
     truncate_blocked: bool,
+    /// Whether updates may change a row's primary key.
+    key_changes: bool,
 }
 
 impl Planner {
     /// Creates a planner over empty tables.
-    fn new() -> Self {
-        Self { tables: Default::default(), next_id: 1, next_note: 1, truncate_blocked: false }
+    fn new(shape: WorkloadShape) -> Self {
+        Self {
+            tables: Default::default(),
+            next_id: 1,
+            next_note: 1,
+            truncate_blocked: false,
+            key_changes: shape.key_changes,
+        }
     }
 
     /// Allocates a unique note for `intent`.
@@ -378,9 +413,10 @@ impl Planner {
 
     /// Plans one operation and applies it to the model.
     ///
-    /// Operations that need a row degrade to inserts on an empty table, and
-    /// truncate degrades to an insert while an open transaction or table copy
-    /// holds a lock that would block it.
+    /// Operations that need a row degrade to inserts on an empty table, a key
+    /// update degrades to a counter update when the shape forbids key changes,
+    /// and truncate degrades to an insert while an open transaction or table
+    /// copy holds a lock that would block it.
     fn plan_op(&mut self, intent: OpIntent) -> PlannedOp {
         let op = match intent {
             OpIntent::Insert { table, note } => self.new_row(table, note),
@@ -393,6 +429,7 @@ impl Planner {
                 None => self.new_row(table, NoteIntent::Large),
             },
             OpIntent::UpdateKey { table, target } => match self.target(table, target) {
+                Some(id) if !self.key_changes => PlannedOp::UpdateCounter { table, id },
                 Some(old_id) => PlannedOp::UpdateKey { table, old_id, new_id: self.id() },
                 None => self.new_row(table, NoteIntent::Large),
             },
@@ -516,15 +553,23 @@ fn tx_intents() -> impl Strategy<Value = TxIntent> {
         .prop_map(|(ops, rollback)| TxIntent { ops, rollback })
 }
 
-/// Generates one replica identity.
-fn identity_modes() -> impl Strategy<Value = IdentityMode> {
-    prop_oneof![Just(IdentityMode::Default), Just(IdentityMode::Full)]
+/// Generates one replica identity allowed by `shape`.
+fn identity_modes(shape: WorkloadShape) -> BoxedStrategy<IdentityMode> {
+    if shape.partial_updates {
+        prop_oneof![Just(IdentityMode::Default), Just(IdentityMode::Full)].boxed()
+    } else {
+        Just(IdentityMode::Full).boxed()
+    }
 }
 
-/// Generates planned workloads, sometimes with a transaction left open across
-/// the fault.
-pub(crate) fn workloads() -> impl Strategy<Value = Workload> {
-    plan_workloads(prop::option::weighted(0.4, vec((0..TABLE_COUNT, note_intents()), 1..=2)), false)
+/// Generates planned workloads within `shape`, sometimes with a transaction
+/// left open across the fault.
+pub fn workloads(shape: WorkloadShape) -> impl Strategy<Value = Workload> {
+    plan_workloads(
+        shape,
+        prop::option::weighted(0.4, vec((0..TABLE_COUNT, note_intents()), 1..=2)),
+        false,
+    )
 }
 
 /// Generates planned workloads whose pre-fault transactions run while a table
@@ -534,19 +579,21 @@ pub(crate) fn workloads() -> impl Strategy<Value = Workload> {
 /// create a replication slot and slot creation waits for open transactions.
 /// Pre-fault transactions never truncate, because truncate waits for the open
 /// copy's lock.
-pub(crate) fn sync_workloads() -> impl Strategy<Value = Workload> {
-    plan_workloads(Just(None), true)
+pub fn sync_workloads() -> impl Strategy<Value = Workload> {
+    plan_workloads(WorkloadShape::all(), Just(None), true)
 }
 
-/// Plans workloads whose straddling transaction comes from `straddle`.
+/// Plans workloads within `shape` whose straddling transaction comes from
+/// `straddle`.
 ///
 /// `copy_open_before_fault` keeps truncates out of pre-fault transactions.
 fn plan_workloads(
+    shape: WorkloadShape,
     straddle: impl Strategy<Value = Option<Vec<(usize, NoteIntent)>>>,
     copy_open_before_fault: bool,
 ) -> impl Strategy<Value = Workload> {
     (
-        [identity_modes(), identity_modes()],
+        [identity_modes(shape), identity_modes(shape)],
         vec((0..TABLE_COUNT, note_intents()), 0..=4),
         vec(tx_intents(), 1..=4),
         straddle,
@@ -562,7 +609,7 @@ fn plan_workloads(
                 after_fault,
                 straddle_commit,
             )| {
-                Planner::new().plan(WorkloadIntent {
+                Planner::new(shape).plan(WorkloadIntent {
                     identities,
                     initial_rows,
                     before_fault,
@@ -576,16 +623,23 @@ fn plan_workloads(
 }
 
 /// Source tables written by a workload.
-pub(crate) struct WorkloadTables {
+pub struct WorkloadTables {
     /// Table names, indexed like planned operations.
     names: [TableName; TABLE_COUNT],
     /// Table IDs, indexed like planned operations.
     ids: [TableId; TABLE_COUNT],
+    /// Replica identity per table, indexed like planned operations.
+    identities: [IdentityMode; TABLE_COUNT],
 }
 
 impl WorkloadTables {
+    /// Returns the table names.
+    pub fn names(&self) -> &[TableName; TABLE_COUNT] {
+        &self.names
+    }
+
     /// Returns the table IDs.
-    pub(crate) fn ids(&self) -> &[TableId; TABLE_COUNT] {
+    pub fn ids(&self) -> &[TableId; TABLE_COUNT] {
         &self.ids
     }
 
@@ -593,14 +647,25 @@ impl WorkloadTables {
     fn quoted(&self, table: usize) -> String {
         self.names[table].as_quoted_identifier()
     }
+
+    /// Returns whether any table can emit partial updates.
+    fn has_default_identity(&self) -> bool {
+        self.identities.iter().any(|identity| matches!(identity, IdentityMode::Default))
+    }
 }
 
 /// Creates the workload tables and publication, then commits initial rows.
-pub(crate) async fn create_workload_tables(
+///
+/// Table names carry a random suffix, so destinations that share storage
+/// across cases never see the same name twice.
+pub async fn create_workload_tables(
     database: &PgDatabase<Client>,
     workload: &Workload,
 ) -> WorkloadTables {
-    let names = std::array::from_fn(|table| test_table_name(&format!("cdc_workload_{table}")));
+    let suffix = Uuid::new_v4().simple().to_string();
+    let names = std::array::from_fn(|table| {
+        test_table_name(&format!("cdc_workload_{}_{table}", &suffix[..12]))
+    });
     let mut ids = [TableId::new(0); TABLE_COUNT];
 
     for (table, name) in names.iter().enumerate() {
@@ -622,7 +687,7 @@ pub(crate) async fn create_workload_tables(
     }
     database.create_publication(WORKLOAD_PUBLICATION, &names).await.unwrap();
 
-    let tables = WorkloadTables { names, ids };
+    let tables = WorkloadTables { names, ids, identities: workload.identities };
     let client = database.client.as_ref().unwrap();
     for op in &workload.initial_rows {
         client.batch_execute(&op.sql(&tables)).await.unwrap();
@@ -633,7 +698,7 @@ pub(crate) async fn create_workload_tables(
 
 /// Stage of a committed transaction relative to the fault.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TxPhase {
+pub enum TxPhase {
     /// Committed and delivered before the fault transaction.
     BeforeFault,
     /// The transaction whose delivery the fault interrupts.
@@ -655,7 +720,7 @@ struct CommittedTx {
 
 /// Source-side record of an executed workload.
 #[derive(Debug, Default)]
-pub(crate) struct WorkloadHistory {
+pub struct WorkloadHistory {
     /// Committed transactions in commit order.
     committed: Vec<CommittedTx>,
     /// Transaction IDs of rolled-back transactions.
@@ -665,7 +730,7 @@ pub(crate) struct WorkloadHistory {
 }
 
 /// A transaction left open on its own session across the fault.
-pub(crate) struct StraddleSession {
+pub struct StraddleSession {
     /// Session holding the open transaction.
     client: Client,
     /// Open transaction ID.
@@ -675,7 +740,7 @@ pub(crate) struct StraddleSession {
 }
 
 /// Returns whether `events` contain the commit of transaction `xid`.
-fn has_committed_xid(events: &[Event], xid: u32) -> bool {
+pub fn has_committed_xid(events: &[Event], xid: u32) -> bool {
     events
         .iter()
         .filter_map(|event| match event {
@@ -692,15 +757,12 @@ fn has_committed_xid(events: &[Event], xid: u32) -> bool {
 /// Registers a notification for the delivery of transaction `xid`'s commit.
 ///
 /// Register before the commit or restart that can deliver it.
-pub(crate) async fn notify_on_commit<S>(
-    destination: &WorkloadDestination<S>,
-    xid: u32,
-) -> TimedNotify {
+pub async fn notify_on_commit<D>(destination: &TestDestinationWrapper<D>, xid: u32) -> TimedNotify {
     destination.notify_on_events(move |events| has_committed_xid(events, xid)).await
 }
 
 /// Waits for one bounded workload synchronization point.
-pub(crate) async fn wait_for_notification(
+pub async fn wait_for_notification(
     notification: &TimedNotify,
     description: impl Into<String>,
 ) -> Result<(), TestCaseError> {
@@ -708,6 +770,53 @@ pub(crate) async fn wait_for_notification(
     tokio::time::timeout(WORKLOAD_TIMEOUT, notification.inner().notified())
         .await
         .map_err(|_| TestCaseError::fail(format!("timed out waiting for {description}")))
+}
+
+/// Waits until the old apply worker releases its replication slot connection.
+pub async fn wait_for_apply_disconnect(
+    client: &Client,
+    apply_slot_name: &str,
+) -> Result<(), TestCaseError> {
+    tokio::time::timeout(WORKLOAD_TIMEOUT, async {
+        loop {
+            let (_, active_pid) = replication_slot_state(client, apply_slot_name).await;
+            if active_pid.is_none() {
+                return;
+            }
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .map_err(|_| TestCaseError::fail("timed out waiting for the old apply worker to stop"))
+}
+
+/// Waits until the finished table sync worker's replication slot is removed.
+///
+/// Slot cleanup is allowed at `SyncDone` or `Ready`. Its absence means
+/// table-sync work has stopped, not that apply has already marked the table
+/// ready.
+pub async fn wait_for_sync_slot_removal(
+    database: &PgDatabase<Client>,
+    sync_slot_name: &str,
+) -> Result<(), TestCaseError> {
+    tokio::time::timeout(WORKLOAD_TIMEOUT, async {
+        loop {
+            let slot_state =
+                database.get_replication_slot_state(sync_slot_name).await.map_err(|error| {
+                    TestCaseError::fail(format!(
+                        "failed to read the table sync slot state: {error}"
+                    ))
+                })?;
+            if slot_state.is_none() {
+                return Ok::<(), TestCaseError>(());
+            }
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .map_err(|_| TestCaseError::fail("timed out waiting for the table sync slot removal"))?
 }
 
 /// Returns the current transaction ID truncated to pgoutput's 32 bits.
@@ -730,7 +839,7 @@ async fn execute(client: &Client, sql: &str) -> Result<(), TestCaseError> {
 }
 
 /// Executes workload transactions against the source and records history.
-pub(crate) struct WorkloadRunner<'a> {
+pub struct WorkloadRunner<'a> {
     /// Session for regular transactions.
     client: &'a Client,
     /// Tables the workload writes.
@@ -741,16 +850,12 @@ pub(crate) struct WorkloadRunner<'a> {
 
 impl<'a> WorkloadRunner<'a> {
     /// Creates a runner over `tables`.
-    pub(crate) fn new(client: &'a Client, tables: &'a WorkloadTables) -> Self {
+    pub fn new(client: &'a Client, tables: &'a WorkloadTables) -> Self {
         Self { client, tables, history: WorkloadHistory::default() }
     }
 
     /// Executes `tx` without waiting for its delivery.
-    pub(crate) async fn execute(
-        &mut self,
-        tx: &PlannedTx,
-        phase: TxPhase,
-    ) -> Result<(), TestCaseError> {
+    pub async fn execute(&mut self, tx: &PlannedTx, phase: TxPhase) -> Result<(), TestCaseError> {
         if let Some(xid) = self.run_until_commit(tx).await? {
             self.commit(tx, phase, xid).await?;
         }
@@ -762,11 +867,11 @@ impl<'a> WorkloadRunner<'a> {
     /// [`None`] when the transaction rolls back.
     ///
     /// The notification is armed before `COMMIT`, so it cannot miss delivery.
-    pub(crate) async fn execute_notified<S>(
+    pub async fn execute_notified<D>(
         &mut self,
         tx: &PlannedTx,
         phase: TxPhase,
-        destination: &WorkloadDestination<S>,
+        destination: &TestDestinationWrapper<D>,
     ) -> Result<Option<TimedNotify>, TestCaseError> {
         let Some(xid) = self.run_until_commit(tx).await? else {
             return Ok(None);
@@ -809,11 +914,11 @@ impl<'a> WorkloadRunner<'a> {
     }
 
     /// Executes `tx` and waits until `destination` records its commit.
-    pub(crate) async fn execute_and_wait<S>(
+    pub async fn execute_and_wait<D>(
         &mut self,
         tx: &PlannedTx,
         phase: TxPhase,
-        destination: &WorkloadDestination<S>,
+        destination: &TestDestinationWrapper<D>,
     ) -> Result<(), TestCaseError> {
         if let Some(committed) = self.execute_notified(tx, phase, destination).await? {
             wait_for_notification(&committed, format!("delivery of {phase:?} transaction")).await?;
@@ -823,7 +928,7 @@ impl<'a> WorkloadRunner<'a> {
     }
 
     /// Opens the straddling transaction on a new session and runs its inserts.
-    pub(crate) async fn open_straddle(
+    pub async fn open_straddle(
         &self,
         config: &PgConnectionConfig,
         straddle: &PlannedTx,
@@ -839,10 +944,10 @@ impl<'a> WorkloadRunner<'a> {
     }
 
     /// Commits the straddling transaction and waits for its delivery.
-    pub(crate) async fn commit_straddle<S>(
+    pub async fn commit_straddle<D>(
         &mut self,
         straddle: StraddleSession,
-        destination: &WorkloadDestination<S>,
+        destination: &TestDestinationWrapper<D>,
     ) -> Result<(), TestCaseError> {
         let xid = straddle.xid;
         let committed = notify_on_commit(destination, xid).await;
@@ -858,25 +963,32 @@ impl<'a> WorkloadRunner<'a> {
     }
 
     /// Returns the committed fault transaction ID, once it has run.
-    pub(crate) fn fault_xid(&self) -> Option<u32> {
+    pub fn fault_xid(&self) -> Option<u32> {
         self.history.committed.iter().find(|tx| tx.phase == TxPhase::Fault).map(|tx| tx.xid)
     }
 
     /// Returns the executed history.
-    pub(crate) fn into_history(self) -> WorkloadHistory {
+    pub fn into_history(self) -> WorkloadHistory {
         self.history
     }
 }
 
 /// One materialized workload row.
 #[derive(Clone, PartialEq, Eq)]
-pub(crate) struct WorkloadRecord {
+pub struct WorkloadRecord {
     /// Primary key.
     id: i64,
     /// Note column.
     note: Option<String>,
     /// Counter column.
     counter: i32,
+}
+
+impl WorkloadRecord {
+    /// Creates a record from the row's column values.
+    pub fn new(id: i64, note: Option<String>, counter: i32) -> Self {
+        Self { id, note, counter }
+    }
 }
 
 impl fmt::Debug for WorkloadRecord {
@@ -924,7 +1036,7 @@ impl FromTableRow for WorkloadRecord {
 }
 
 /// Reads the committed rows of every workload table.
-pub(crate) async fn read_source_rows(
+pub async fn read_source_rows(
     client: &Client,
     tables: &WorkloadTables,
 ) -> Result<[BTreeMap<i64, WorkloadRecord>; TABLE_COUNT], TestCaseError> {
@@ -1017,7 +1129,7 @@ fn data_event_payload(event: &Event) -> Option<(PgLsn, u64, String)> {
 /// Use it on the history recorded after a restart to prove that an
 /// unacknowledged transaction replays in full without duplication, however
 /// its events were split across destination writes.
-pub(crate) fn assert_phase_delivered_once(
+pub fn assert_phase_delivered_once(
     events: &[Event],
     history: &WorkloadHistory,
     phase: TxPhase,
@@ -1059,13 +1171,15 @@ pub(crate) fn assert_phase_delivered_once(
     Ok(())
 }
 
-/// Cases a property must pass before it must have seen a partial update.
+/// Cases with a `DEFAULT` identity table a property must pass before it must
+/// have seen a partial update.
 ///
 /// 300-second runs passed 33 to 50 cases with 14 to 17 partial updates, so
-/// missing every one across this many cases means the TOAST path stopped
-/// firing, not bad luck. Short default budgets pass fewer cases and skip the
-/// check.
-const MIN_CASES_FOR_PARTIAL_UPDATE_CHECK: usize = 30;
+/// missing every one across 30 cases meant the TOAST path stopped firing, not
+/// bad luck. About three in four cases have a `DEFAULT` identity table, so 22
+/// of them match the earlier 30-case gate. Short default budgets pass fewer
+/// cases and skip the check, and so do shapes without partial updates.
+const MIN_CASES_FOR_PARTIAL_UPDATE_CHECK: usize = 22;
 
 /// Counts how often passing cases reached the workload's hard paths.
 ///
@@ -1073,9 +1187,12 @@ const MIN_CASES_FOR_PARTIAL_UPDATE_CHECK: usize = 30;
 /// large note small enough to be stored inline stops producing partial
 /// updates. The counts make that visible.
 #[derive(Debug, Default)]
-pub(crate) struct WorkloadCoverage {
+pub struct WorkloadCoverage {
     /// Passing cases.
     cases: AtomicUsize,
+    /// Passing cases with at least one `DEFAULT` identity table, the only
+    /// cases that can produce partial updates.
+    default_identity_cases: AtomicUsize,
     /// Committed transactions.
     committed_transactions: AtomicUsize,
     /// Rolled-back transactions.
@@ -1094,7 +1211,7 @@ pub(crate) struct WorkloadCoverage {
 
 impl WorkloadCoverage {
     /// Records a held write that replayed exactly once after a restart.
-    pub(crate) fn record_held_replay(&self) {
+    pub fn record_held_replay(&self) {
         self.held_replays.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -1102,26 +1219,33 @@ impl WorkloadCoverage {
     ///
     /// # Panics
     ///
-    /// Panics when at least [`MIN_CASES_FOR_PARTIAL_UPDATE_CHECK`] cases passed
-    /// without a single partial update.
-    pub(crate) fn report(&self, property: &str) {
-        let cases = self.cases.load(Ordering::Relaxed);
+    /// Panics when at least [`MIN_CASES_FOR_PARTIAL_UPDATE_CHECK`] cases with
+    /// a `DEFAULT` identity table passed without a single partial update.
+    pub fn report(&self, property: &str) {
+        let default_identity_cases = self.default_identity_cases.load(Ordering::Relaxed);
         let partial_updates = self.partial_updates.load(Ordering::Relaxed);
         println!("property '{property}' coverage: {self:?}");
 
         assert!(
-            cases < MIN_CASES_FOR_PARTIAL_UPDATE_CHECK || partial_updates > 0,
-            "property '{property}' passed {cases} cases without a partial update: {self:?}"
+            default_identity_cases < MIN_CASES_FOR_PARTIAL_UPDATE_CHECK || partial_updates > 0,
+            "property '{property}' passed {default_identity_cases} cases with a DEFAULT identity \
+             table without a partial update: {self:?}"
         );
     }
 
-    /// Adds one passing case's history and first deliveries.
-    fn record(&self, history: &WorkloadHistory, first_deliveries: &[Event]) {
+    /// Adds one passing case's tables, history, and first deliveries.
+    fn record(
+        &self,
+        tables: &WorkloadTables,
+        history: &WorkloadHistory,
+        first_deliveries: &[Event],
+    ) {
         let add = |counter: &AtomicUsize, count: usize| {
             counter.fetch_add(count, Ordering::Relaxed);
         };
 
         add(&self.cases, 1);
+        add(&self.default_identity_cases, usize::from(tables.has_default_identity()));
         add(&self.committed_transactions, history.committed.len());
         add(&self.rolled_back_transactions, history.rolled_back.len());
         add(&self.straddle_commits, usize::from(history.straddle_committed));
@@ -1162,7 +1286,7 @@ fn update_changes_key(update: &UpdateEvent) -> bool {
 
 /// Source order that first deliveries of data events must follow.
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum DeliveryOrder {
+pub enum DeliveryOrder {
     /// One apply stream delivers every table, so all first deliveries follow
     /// source position order.
     Source,
@@ -1184,7 +1308,7 @@ pub(crate) enum DeliveryOrder {
 /// table; replays are checked for identity instead of being applied again.
 /// Passing cases are added to `coverage`.
 #[expect(clippy::too_many_arguments)]
-pub(crate) fn assert_workload_converged(
+pub fn assert_workload_converged(
     tables: &WorkloadTables,
     copied_rows: &HashMap<TableId, Vec<TableRow>>,
     events: &[Event],
@@ -1322,7 +1446,7 @@ pub(crate) fn assert_workload_converged(
         );
     }
 
-    coverage.record(history, &first_deliveries);
+    coverage.record(tables, history, &first_deliveries);
 
     Ok(())
 }

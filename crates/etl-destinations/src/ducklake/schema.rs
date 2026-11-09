@@ -4,7 +4,10 @@ use etl::schema::{
     ColumnSchema, DefaultExpression, NumericModifiers, Type, is_array_type, numeric_modifiers,
     parse_default_expression,
 };
-use etl_config::shared::{DuckLakeSortColumn, DuckLakeSortDirection, DuckLakeSortNulls};
+use etl_config::shared::{
+    DuckLakePartitionColumn, DuckLakePartitionTransform, DuckLakeSortColumn, DuckLakeSortDirection,
+    DuckLakeSortNulls,
+};
 use pg_escape::quote_literal;
 use tracing::warn;
 
@@ -248,6 +251,33 @@ pub(super) fn build_create_table_sql_ducklake(
          {table_name} ({})",
         col_defs.join(",\n")
     )
+}
+
+/// Builds a partition specification from quoted identifiers and typed
+/// transforms.
+pub(super) fn build_partition_by_sql_ducklake(
+    table_name: &DuckLakeTableName,
+    columns: &[DuckLakePartitionColumn],
+) -> String {
+    let table_name = qualified_lake_table_name(table_name);
+    if columns.is_empty() {
+        return format!("alter table {table_name} reset partitioned by");
+    }
+    let keys = columns
+        .iter()
+        .map(|key| {
+            let column = quote_identifier(key.column());
+            match key.transform() {
+                DuckLakePartitionTransform::Identity {} => column,
+                DuckLakePartitionTransform::Bucket { count } => {
+                    format!("bucket({count}, {column})")
+                }
+                transform => format!("{}({column})", transform.catalog_name()),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("alter table {table_name} set partitioned by ({keys})")
 }
 
 /// Builds a DuckLake `alter table set sorted by` statement.

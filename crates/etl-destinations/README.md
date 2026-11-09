@@ -42,6 +42,12 @@ layout identity: changing, adding, or removing it on an existing pipeline is
 rejected when stored table metadata is loaded. Create a new destination and
 replication state and perform a fresh copy to change layouts.
 
+Namespaced table metadata uses a separate JSON shape without top-level `schema`
+and `table` fields. Pre-namespace replicators reject these persisted identities
+instead of silently treating them as flat tables after an image rollback. Keep
+using a namespace-capable image for these destinations; legacy flat metadata
+remains byte-identical and readable by older binaries.
+
 Namespaces require DuckDB 2.0 and DuckLake catalog format 1.1. Writers and external
 maintenance check the format and never automatically upgrade a 1.0 catalog.
 Existing flat destinations can continue using format 1.0. An explicit catalog

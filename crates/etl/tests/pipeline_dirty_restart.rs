@@ -1,10 +1,15 @@
-use std::time::Duration;
-
 use etl::{
     pipeline::PipelineId,
     store::{PostgresStore, StateStore, TableStateType},
     test_utils::{
-        database::{replication_slot_state, spawn_source_database},
+        cdc_workload::{
+            AfterFaultStep, DeliveryOrder, TxPhase, WORKLOAD_PUBLICATION, WORKLOAD_TIMEOUT,
+            Workload, WorkloadCoverage, WorkloadRunner, WorkloadShape, assert_phase_delivered_once,
+            assert_workload_converged, create_workload_tables, notify_on_commit, read_source_rows,
+            wait_for_apply_disconnect, wait_for_notification, wait_for_sync_slot_removal,
+            workloads,
+        },
+        database::spawn_source_database,
         faults::FaultyOp,
         memory_destination::MemoryDestination,
         notifying_store::NotifyingStore,
@@ -14,16 +19,9 @@ use etl::{
         test_destination_wrapper::TestDestinationWrapper,
     },
 };
-use etl_postgres::{slots::EtlReplicationSlot, tokio::test_utils::PgDatabase};
+use etl_postgres::slots::EtlReplicationSlot;
 use etl_telemetry::tracing::init_test_tracing;
 use proptest::prelude::*;
-use tokio_postgres::Client;
-
-use crate::support::cdc_workload::{
-    AfterFaultStep, DeliveryOrder, TxPhase, WORKLOAD_PUBLICATION, WORKLOAD_TIMEOUT, Workload,
-    WorkloadCoverage, WorkloadRunner, assert_phase_delivered_once, assert_workload_converged,
-    create_workload_tables, notify_on_commit, read_source_rows, wait_for_notification, workloads,
-};
 
 /// Controls the destination response state when the pipeline crashes.
 #[derive(Clone, Copy, Debug)]
@@ -50,53 +48,8 @@ fn dirty_restart_cases() -> impl Strategy<Value = DirtyRestartCase> {
         Just(CrashTiming::WhileWriteResponseHeld),
     ];
 
-    (workloads(), crash_timing)
+    (workloads(WorkloadShape::all()), crash_timing)
         .prop_map(|(workload, crash_timing)| DirtyRestartCase { workload, crash_timing })
-}
-
-/// Waits until the old apply worker releases its replication slot connection.
-async fn wait_for_apply_disconnect(
-    client: &Client,
-    apply_slot_name: &str,
-) -> Result<(), TestCaseError> {
-    tokio::time::timeout(WORKLOAD_TIMEOUT, async {
-        loop {
-            let (_, active_pid) = replication_slot_state(client, apply_slot_name).await;
-            if active_pid.is_none() {
-                return;
-            }
-
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .map_err(|_| TestCaseError::fail("timed out waiting for the old apply worker to stop"))
-}
-
-/// Waits until the finished table sync worker's replication slot is removed.
-///
-/// Slot cleanup is allowed at [`TableStateType::SyncDone`] or
-/// [`TableStateType::Ready`]. Its absence means table-sync work has stopped,
-/// not that apply has already marked the table ready.
-async fn wait_for_sync_slot_removal(
-    database: &PgDatabase<Client>,
-    sync_slot_name: &str,
-) -> Result<(), TestCaseError> {
-    tokio::time::timeout(WORKLOAD_TIMEOUT, async {
-        loop {
-            let slot_state = database
-                .get_replication_slot_state(sync_slot_name)
-                .await
-                .expect("failed to read the table sync slot state");
-            if slot_state.is_none() {
-                return;
-            }
-
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .map_err(|_| TestCaseError::fail("timed out waiting for the table sync slot removal"))
 }
 
 /// Runs one generated workload and dirty-restart schedule to convergence.

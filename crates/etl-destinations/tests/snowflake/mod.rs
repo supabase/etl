@@ -1,5 +1,6 @@
 mod auth;
 mod common;
+mod crash_replay;
 mod destination;
 mod large_rows;
 mod partial_updates;
