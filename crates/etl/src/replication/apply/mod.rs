@@ -91,6 +91,7 @@ use crate::{
     store::{PipelineStore, StateStore},
 };
 
+mod handoff;
 mod tasks;
 
 /// Fallback source timeout when PostgreSQL disables it or cannot report it.
@@ -3252,7 +3253,7 @@ where
                 None
             }
             WorkerContext::TableSync(ctx) => {
-                table_sync_worker::process_syncing_tables_after_flush(
+                table_sync_worker::try_complete_catchup(
                     ctx,
                     current_lsn,
                     table_sync_decoding_state.as_ref(),
@@ -3409,7 +3410,7 @@ where
                 .await
             }
             WorkerContext::TableSync(ctx) => {
-                table_sync_worker::process_syncing_tables_when_quiescent(
+                table_sync_worker::try_complete_catchup(
                     ctx,
                     current_lsn,
                     table_sync_decoding_state.as_ref(),
@@ -3448,9 +3449,10 @@ where
 
 /// Functions specific to the apply worker.
 mod apply_worker {
-    use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
+    use std::{collections::HashMap, fmt, future::Future, pin::Pin, sync::Arc};
 
     use tokio_postgres::types::PgLsn;
+    use tokio_util::sync::CancellationToken;
     use tracing::{debug, error, info};
 
     use crate::{
@@ -3459,14 +3461,20 @@ mod apply_worker {
         error::EtlResult,
         replication::{
             TableDecodingState, WorkerType,
-            apply::{ApplyWorkerContext, ExitIntent, get_syncing_tables},
+            apply::{
+                ApplyWorkerContext, ExitIntent, get_syncing_tables,
+                handoff::{
+                    self, ActiveAction, ActiveFlushAction, IdleAction, ReadinessInputs, ReadyProof,
+                },
+            },
             state::{TableState, TableStateType},
         },
         runtime::{
-            TableSyncWorker, TableSyncWorkerPool, TableSyncWorkerState, concurrency::ShutdownResult,
+            TableSyncWorker, TableSyncWorkerPool, TableSyncWorkerState, TableSyncWorkerStateGuard,
+            concurrency::ShutdownResult,
         },
         schema::TableId,
-        store::{PipelineStore, SchemaStore, SharedStateStore},
+        store::{PipelineStore, SharedStateStore, StateStore},
     };
 
     /// Why the apply worker is waiting for table-sync catchup.
@@ -3551,124 +3559,323 @@ mod apply_worker {
         Ok(is_state_ready_for_changes(state, remote_final_lsn))
     }
 
-    /// Processes syncing tables after commit.
+    /// A syncing table whose sync worker is running, observed under the
+    /// worker's state lock.
     ///
-    /// Spawns new table sync workers, triggers catchup when encountering
-    /// SyncWait, and waits for workers already in Catchup. Does NOT perform
-    /// SyncDone → Ready transitions.
-    pub(super) async fn process_syncing_tables_after_commit_event<S, D>(
-        ctx: &mut ApplyWorkerContext<S, D>,
-        activity_handle: &ActivityHandle,
-        current_lsn: PgLsn,
-        table_decoding_states: &mut HashMap<TableId, TableDecodingState>,
-    ) -> EtlResult<Option<ExitIntent>>
-    where
-        S: PipelineStore,
-        D: PipelineDestination,
-    {
-        for (table_id, table_state) in get_syncing_tables(&ctx.store).await? {
-            let exit_intent = process_single_syncing_table_after_commit_event(
-                ctx,
-                activity_handle,
-                table_id,
-                table_state,
-                current_lsn,
-                table_decoding_states,
-            )
-            .await?;
-
-            if exit_intent.is_some() {
-                return Ok(exit_intent);
-            }
-        }
-
-        Ok(None)
+    /// Holding the lock makes the observed state and any transition one atomic
+    /// step. Catchup consumes the handle and returns a [`CatchupWait`] without
+    /// the lock, so the apply worker cannot wait while holding the lock the
+    /// table-sync worker needs to reach `SyncDone`.
+    struct ActiveTable {
+        /// Table the worker synchronizes.
+        table_id: TableId,
+        /// Shared state of the running worker.
+        worker_state: TableSyncWorkerState,
+        /// Lock on `worker_state`, held from observation through transition.
+        guard: TableSyncWorkerStateGuard,
     }
 
-    /// Waits for a table-sync worker in catchup to hand the table back.
-    async fn wait_for_table_sync_worker_catchup<S, D>(
-        ctx: &ApplyWorkerContext<S, D>,
-        activity_handle: &ActivityHandle,
+    impl ActiveTable {
+        /// Locks the state of a running worker.
+        async fn lock(table_id: TableId, worker_state: TableSyncWorkerState) -> Self {
+            let guard = worker_state.lock_owned().await;
+
+            Self { table_id, worker_state, guard }
+        }
+
+        /// Returns the worker's current table state.
+        fn table_state(&self) -> TableState {
+            self.guard.table_state()
+        }
+
+        /// Moves the worker from `SyncWait` to `Catchup`, then releases the
+        /// lock for the wait.
+        async fn start_catchup<S: StateStore>(
+            mut self,
+            catchup_lsn: PgLsn,
+            store: &S,
+        ) -> EtlResult<CatchupWait> {
+            self.guard.set_and_store(TableState::Catchup { lsn: catchup_lsn }, store).await?;
+
+            Ok(self.into_catchup_wait(catchup_lsn, CatchupWaitReason::EnteredCatchup))
+        }
+
+        /// Releases the lock to wait for a worker already in `Catchup`.
+        fn await_catchup(self, catchup_lsn: PgLsn) -> CatchupWait {
+            self.into_catchup_wait(catchup_lsn, CatchupWaitReason::AlreadyInCatchup)
+        }
+
+        /// Stores `Ready` under the lock.
+        async fn promote_to_ready<S: StateStore>(
+            mut self,
+            proof: ReadyProof,
+            store: &S,
+        ) -> EtlResult<()> {
+            log_ready_transition(self.table_id, &proof);
+
+            self.guard.set_and_store(TableState::Ready, store).await
+        }
+
+        /// Releases the lock and returns the catchup wait.
+        fn into_catchup_wait(self, catchup_lsn: PgLsn, reason: CatchupWaitReason) -> CatchupWait {
+            let Self { table_id, worker_state, guard } = self;
+            drop(guard);
+
+            CatchupWait { table_id, worker_state, catchup_lsn, reason }
+        }
+    }
+
+    /// Wait for a table-sync worker in catchup to hand its table back.
+    ///
+    /// It holds no state lock, so the table-sync worker can reach `SyncDone`.
+    struct CatchupWait {
+        /// Table the worker synchronizes.
         table_id: TableId,
-        worker_state: &TableSyncWorkerState,
+        /// Shared state of the running worker.
+        worker_state: TableSyncWorkerState,
+        /// LSN the worker streams up to before `SyncDone`.
         catchup_lsn: PgLsn,
-        wait_reason: CatchupWaitReason,
-    ) -> Option<ExitIntent>
-    where
-        S: SchemaStore,
-    {
-        // The table-sync worker owns the table through `SyncDone`. Reaching
-        // that state releases the apply loop. An owned relation can rebuild the
-        // decoder using the handover boundary, while relation-less DML can
-        // restore the complete stored decoder on demand.
-        let catchup_state = match wait_reason {
-            CatchupWaitReason::EnteredCatchup => "entered",
-            CatchupWaitReason::AlreadyInCatchup => "already_in",
-        };
+        /// How the worker came to be in catchup.
+        reason: CatchupWaitReason,
+    }
 
-        info!(
-            worker_type = %WorkerType::Apply,
-            table_id = table_id.0,
-            %catchup_lsn,
-            catchup_state,
-            "apply worker blocking until table sync worker reaches sync_done",
-        );
+    impl CatchupWait {
+        /// Waits until the table-sync worker reaches `SyncDone` or `Errored`.
+        ///
+        /// The table-sync worker owns the table through `SyncDone`; reaching it
+        /// releases the apply loop. An owned relation can rebuild the decoder
+        /// using the handover boundary, while relation-less DML can restore the
+        /// complete stored decoder on demand. Returns [`ExitIntent::Pause`]
+        /// when shutdown interrupts the wait.
+        async fn wait(
+            self,
+            shutdown_token: &CancellationToken,
+            activity_handle: &ActivityHandle,
+        ) -> Option<ExitIntent> {
+            let Self { table_id, worker_state, catchup_lsn, reason } = self;
+            let catchup_state = match reason {
+                CatchupWaitReason::EnteredCatchup => "entered",
+                CatchupWaitReason::AlreadyInCatchup => "already_in",
+            };
 
-        // We wait for both states since if the table sync worker errors, we
-        // don't want to stall forever.
-        let _activity_suspension = activity_handle.suspend();
-        let result = worker_state
-            .wait_for_state_type(
-                &[TableStateType::SyncDone, TableStateType::Errored],
-                ctx.shutdown_token.clone(),
-            )
-            .await;
+            info!(
+                worker_type = %WorkerType::Apply,
+                table_id = table_id.0,
+                %catchup_lsn,
+                catchup_state,
+                "apply worker blocking until table sync worker reaches sync_done",
+            );
 
-        match result {
-            ShutdownResult::Ok(result) => {
-                let final_state = result.table_state();
-                if final_state.as_type().is_errored() {
+            // We wait for both states since if the table sync worker errors, we
+            // don't want to stall forever.
+            let _activity_suspension = activity_handle.suspend();
+            let result = worker_state
+                .wait_for_state_type(
+                    &[TableStateType::SyncDone, TableStateType::Errored],
+                    shutdown_token.clone(),
+                )
+                .await;
+
+            match result {
+                ShutdownResult::Ok(result) => {
+                    let final_state = result.table_state();
+                    if final_state.as_type().is_errored() {
+                        info!(
+                            worker_type = %WorkerType::Apply,
+                            table_id = table_id.0,
+                            table_state_type = %final_state.as_type(),
+                            "apply worker unblocked: table sync worker errored, skipping table",
+                        );
+
+                        return None;
+                    }
+
                     info!(
                         worker_type = %WorkerType::Apply,
                         table_id = table_id.0,
                         table_state_type = %final_state.as_type(),
-                        "apply worker unblocked: table sync worker errored, skipping table",
+                        "apply worker unblocked: table sync worker reached sync_done",
                     );
 
-                    return None;
+                    None
                 }
+                ShutdownResult::Shutdown(_) => {
+                    info!(
+                        worker_type = %WorkerType::Apply,
+                        table_id = table_id.0,
+                        "apply worker unblocked: shutdown signal received while waiting for table sync worker",
+                    );
 
-                info!(
-                    worker_type = %WorkerType::Apply,
-                    table_id = table_id.0,
-                    table_state_type = %final_state.as_type(),
-                    "apply worker unblocked: table sync worker reached sync_done",
-                );
-
-                None
-            }
-            ShutdownResult::Shutdown(_) => {
-                info!(
-                    worker_type = %WorkerType::Apply,
-                    table_id = table_id.0,
-                    "apply worker unblocked: shutdown signal received while waiting for table sync worker",
-                );
-
-                Some(ExitIntent::Pause)
+                    Some(ExitIntent::Pause)
+                }
             }
         }
     }
 
-    /// Processes a single syncing table after commit.
-    ///
-    /// Handles SyncWait → Catchup transitions, waits for workers already in
-    /// Catchup, and spawns new workers. Does NOT handle SyncDone → Ready
-    /// transitions.
-    async fn process_single_syncing_table_after_commit_event<S, D>(
-        ctx: &mut ApplyWorkerContext<S, D>,
-        activity_handle: &ActivityHandle,
+    /// A syncing table as the apply worker observed it.
+    enum ObservedTable {
+        /// The table's sync worker is running.
+        Active(ActiveTable),
+        /// No sync worker is running; the state is the stored one.
+        Idle(TableState),
+    }
+
+    /// Observes a syncing table, locking its worker's state when one is
+    /// running.
+    async fn observe_table<S, D>(
+        ctx: &ApplyWorkerContext<S, D>,
         table_id: TableId,
-        table_state: TableState,
+        stored_state: TableState,
+    ) -> ObservedTable {
+        match ctx.pool.get_active_worker_state(table_id).await {
+            Some(worker_state) => {
+                ObservedTable::Active(ActiveTable::lock(table_id, worker_state).await)
+            }
+            None => ObservedTable::Idle(stored_state),
+        }
+    }
+
+    /// Returns syncing tables with the persisted apply checkpoint.
+    ///
+    /// The checkpoint is not read when no table is syncing. This apply loop
+    /// serializes checkpoint persistence, so no apply checkpoint write can race
+    /// this read before the caller finishes its evaluation and persists its
+    /// next candidate.
+    async fn syncing_tables_with_checkpoint<S: StateStore>(
+        store: &S,
+    ) -> EtlResult<(Vec<(TableId, TableState)>, Option<PgLsn>)> {
+        let syncing_tables = get_syncing_tables(store).await?;
+        if syncing_tables.is_empty() {
+            return Ok((syncing_tables, None));
+        }
+
+        let persisted_checkpoint_lsn = store.get_replication_checkpoint(WorkerType::Apply).await?;
+
+        Ok((syncing_tables, persisted_checkpoint_lsn))
+    }
+
+    /// Returns the readiness inputs for one table.
+    fn readiness_inputs(
+        table_id: TableId,
+        current_lsn: PgLsn,
+        persisted_checkpoint_lsn: Option<PgLsn>,
+        table_decoding_states: &HashMap<TableId, TableDecodingState>,
+    ) -> ReadinessInputs {
+        let has_materialized_decoding_state =
+            matches!(table_decoding_states.get(&table_id), Some(TableDecodingState::WithSchema(_)));
+
+        ReadinessInputs::new(current_lsn, persisted_checkpoint_lsn, has_materialized_decoding_state)
+    }
+
+    /// Logs one handoff decision.
+    fn log_handoff_decision(
+        trigger: &'static str,
+        current_lsn: PgLsn,
+        table_id: TableId,
+        table_state: &TableState,
+        action: &impl fmt::Debug,
+    ) {
+        debug!(
+            worker_type = %WorkerType::Apply,
+            table_id = table_id.0,
+            table_state_type = %table_state.as_type(),
+            trigger,
+            %current_lsn,
+            ?action,
+            "evaluated table sync handoff",
+        );
+    }
+
+    /// Logs a `SyncDone -> Ready` transition.
+    fn log_ready_transition(table_id: TableId, proof: &ReadyProof) {
+        info!(
+            worker_type = %WorkerType::Apply,
+            table_id = table_id.0,
+            sync_done_lsn = %proof.sync_done_lsn(),
+            "transitioning sync_done -> ready",
+        );
+    }
+
+    /// Executes the handoff action for a table whose worker is running.
+    ///
+    /// Returns an exit intent when shutdown interrupts a catchup wait.
+    async fn execute_active_action<S, D>(
+        ctx: &ApplyWorkerContext<S, D>,
+        activity_handle: &ActivityHandle,
+        table: ActiveTable,
+        action: ActiveAction,
+    ) -> EtlResult<Option<ExitIntent>>
+    where
+        S: StateStore,
+    {
+        let catchup_wait = match action {
+            ActiveAction::StartCatchup { catchup_lsn } => {
+                info!(
+                    worker_type = %WorkerType::Apply,
+                    table_id = table.table_id.0,
+                    %catchup_lsn,
+                    "transitioning sync_wait -> catchup",
+                );
+
+                table.start_catchup(catchup_lsn, &ctx.store).await?
+            }
+            ActiveAction::AwaitCatchup { catchup_lsn } => table.await_catchup(catchup_lsn),
+            ActiveAction::PromoteToReady(proof) => {
+                table.promote_to_ready(proof, &ctx.store).await?;
+
+                return Ok(None);
+            }
+            ActiveAction::Keep => return Ok(None),
+        };
+
+        Ok(catchup_wait.wait(&ctx.shutdown_token, activity_handle).await)
+    }
+
+    /// Executes the handoff action for a table without a running worker.
+    async fn execute_idle_action<S, D>(
+        ctx: &ApplyWorkerContext<S, D>,
+        table_id: TableId,
+        action: IdleAction,
+        table_decoding_states: &mut HashMap<TableId, TableDecodingState>,
+    ) -> EtlResult<()>
+    where
+        S: PipelineStore,
+        D: PipelineDestination,
+    {
+        match action {
+            IdleAction::PromoteToReady(proof) => {
+                log_ready_transition(table_id, &proof);
+
+                ctx.store.update_table_state(table_id, TableState::Ready).await
+            }
+            IdleAction::SpawnWorker => {
+                reset_table_decoding_state_for_sync(table_decoding_states, table_id);
+                let table_sync_worker = build_table_sync_worker(ctx, table_id);
+                if let Err(err) =
+                    start_table_sync_worker(Arc::clone(&ctx.pool), table_sync_worker).await
+                {
+                    error!(
+                        worker_type = %WorkerType::Apply,
+                        table_id = table_id.0,
+                        error = %err,
+                        "failed to start table sync worker",
+                    );
+                }
+
+                Ok(())
+            }
+            IdleAction::Keep => Ok(()),
+        }
+    }
+
+    /// Processes syncing tables after a COMMIT.
+    ///
+    /// Moves `SyncWait` workers to `Catchup`, waits for workers in catchup, and
+    /// spawns workers for tables without one. The COMMIT decisions take no
+    /// readiness inputs, so this path never stores `Ready`.
+    pub(super) async fn process_syncing_tables_after_commit_event<S, D>(
+        ctx: &ApplyWorkerContext<S, D>,
+        activity_handle: &ActivityHandle,
         current_lsn: PgLsn,
         table_decoding_states: &mut HashMap<TableId, TableDecodingState>,
     ) -> EtlResult<Option<ExitIntent>>
@@ -3676,129 +3883,38 @@ mod apply_worker {
         S: PipelineStore,
         D: PipelineDestination,
     {
-        let worker_state = ctx.pool.get_active_worker_state(table_id).await;
-
-        if let Some(worker_state) = worker_state {
-            let mut worker_state_guard = worker_state.lock().await;
-            let state = worker_state_guard.table_state();
-
-            debug!(
-                worker_type = %WorkerType::Apply,
-                table_id = table_id.0,
-                table_state_type = %state.as_type(),
-                %current_lsn,
-                "checking table with active worker after commit",
-            );
-
-            match state {
-                TableState::SyncWait { lsn: snapshot_lsn } => {
-                    // The catchup lsn is determined via max since it could be
-                    // that the table sync worker is started from a lsn which is
-                    // far in the future compared to where the apply worker is.
-                    let catchup_lsn = snapshot_lsn.max(current_lsn);
-
-                    info!(
-                        worker_type = %WorkerType::Apply,
-                        table_id = table_id.0,
-                        %current_lsn,
-                        %snapshot_lsn,
-                        %catchup_lsn,
-                        "transitioning sync_wait -> catchup",
-                    );
-
-                    worker_state_guard
-                        .set_and_store(TableState::Catchup { lsn: catchup_lsn }, &ctx.store)
-                        .await?;
-
-                    // It's important to drop the state guard before waiting,
-                    // otherwise we deadlock.
-                    drop(worker_state_guard);
-
-                    if let Some(exit_intent) = wait_for_table_sync_worker_catchup(
-                        ctx,
-                        activity_handle,
+        for (table_id, stored_state) in get_syncing_tables(&ctx.store).await? {
+            let exit_intent = match observe_table(ctx, table_id, stored_state).await {
+                ObservedTable::Active(table) => {
+                    let table_state = table.table_state();
+                    let action = handoff::active_after_commit(&table_state, current_lsn);
+                    log_handoff_decision(
+                        "after_commit",
+                        current_lsn,
                         table_id,
-                        &worker_state,
-                        catchup_lsn,
-                        CatchupWaitReason::EnteredCatchup,
-                    )
-                    .await
-                    {
-                        return Ok(Some(exit_intent));
-                    }
-                }
-                TableState::SyncDone { lsn, .. } => {
-                    debug!(
-                        worker_type = %WorkerType::Apply,
-                        table_id = table_id.0,
-                        sync_done_lsn = %lsn,
-                        "table in sync_done state, waiting for readiness evaluation",
+                        &table_state,
+                        &action,
                     );
-                }
-                TableState::Catchup { lsn: catchup_lsn } => {
-                    drop(worker_state_guard);
 
-                    if let Some(exit_intent) = wait_for_table_sync_worker_catchup(
-                        ctx,
-                        activity_handle,
+                    execute_active_action(ctx, activity_handle, table, action).await?
+                }
+                ObservedTable::Idle(table_state) => {
+                    let action = handoff::idle_after_commit(&table_state);
+                    log_handoff_decision(
+                        "after_commit",
+                        current_lsn,
                         table_id,
-                        &worker_state,
-                        catchup_lsn,
-                        CatchupWaitReason::AlreadyInCatchup,
-                    )
-                    .await
-                    {
-                        return Ok(Some(exit_intent));
-                    }
-                }
-                _ => {
-                    debug!(
-                        worker_type = %WorkerType::Apply,
-                        table_id = table_id.0,
-                        table_state_type = %state.as_type(),
-                        "no action needed for current state after commit",
+                        &table_state,
+                        &action,
                     );
-                }
-            }
-        } else {
-            debug!(
-                worker_type = %WorkerType::Apply,
-                table_id = table_id.0,
-                table_state_type = %table_state.as_type(),
-                "checking table without active worker after commit",
-            );
+                    execute_idle_action(ctx, table_id, action, table_decoding_states).await?;
 
-            // No active worker exists, potentially start a new worker.
-            match table_state {
-                TableState::SyncDone { lsn, .. } => {
-                    debug!(
-                        worker_type = %WorkerType::Apply,
-                        table_id = table_id.0,
-                        sync_done_lsn = %lsn,
-                        "table in sync_done state, waiting for readiness evaluation",
-                    );
+                    None
                 }
-                _ => {
-                    debug!(
-                        worker_type = %WorkerType::Apply,
-                        table_id = table_id.0,
-                        table_state_type = %table_state.as_type(),
-                        "spawning new table sync worker",
-                    );
-                    // Start a new worker for this table.
-                    reset_table_decoding_state_for_sync(table_decoding_states, table_id);
-                    let table_sync_worker = build_table_sync_worker(ctx, table_id);
-                    if let Err(err) =
-                        start_table_sync_worker(Arc::clone(&ctx.pool), table_sync_worker).await
-                    {
-                        error!(
-                            worker_type = %WorkerType::Apply,
-                            table_id = table_id.0,
-                            error = %err,
-                            "failed to start table sync worker",
-                        );
-                    }
-                }
+            };
+
+            if exit_intent.is_some() {
+                return Ok(exit_intent);
             }
         }
 
@@ -3809,7 +3925,7 @@ mod apply_worker {
     ///
     /// Handles `SyncDone → Ready` transitions only after the persisted apply
     /// checkpoint reaches `SyncDone.lsn` and this connection has materialized
-    /// the table decoder, and spawns new workers.
+    /// the table decoder, and spawns new workers. It never waits for catchup.
     ///
     /// The caller invokes this before persisting `current_lsn`, so
     /// `persisted_checkpoint_lsn` is the restart frontier from an earlier
@@ -3821,7 +3937,7 @@ mod apply_worker {
     /// `SyncDone.lsn` was already durable and that the current connection no
     /// longer needs the stored decoding payload.
     pub(super) async fn process_syncing_tables_after_flush<S, D>(
-        ctx: &mut ApplyWorkerContext<S, D>,
+        ctx: &ApplyWorkerContext<S, D>,
         current_lsn: PgLsn,
         table_decoding_states: &mut HashMap<TableId, TableDecodingState>,
     ) -> EtlResult<()>
@@ -3829,161 +3945,45 @@ mod apply_worker {
         S: PipelineStore,
         D: PipelineDestination,
     {
-        let syncing_tables = get_syncing_tables(&ctx.store).await?;
-        if syncing_tables.is_empty() {
-            return Ok(());
-        }
-
-        // This apply loop serializes checkpoint persistence. No apply
-        // checkpoint write can race this read before the caller finishes this
-        // state evaluation and persists its next candidate.
-        let persisted_checkpoint_lsn =
-            ctx.store.get_replication_checkpoint(WorkerType::Apply).await?;
-        for (table_id, table_state) in syncing_tables {
-            process_single_syncing_table_after_flush(
-                ctx,
+        let (syncing_tables, persisted_checkpoint_lsn) =
+            syncing_tables_with_checkpoint(&ctx.store).await?;
+        for (table_id, stored_state) in syncing_tables {
+            let readiness = readiness_inputs(
                 table_id,
-                table_state,
                 current_lsn,
                 persisted_checkpoint_lsn,
                 table_decoding_states,
-            )
-            .await?;
-        }
-
-        Ok(())
-    }
-
-    /// Processes a single syncing table after batch flush.
-    ///
-    /// Handles `SyncDone → Ready` transitions and spawns new workers.
-    async fn process_single_syncing_table_after_flush<S, D>(
-        ctx: &mut ApplyWorkerContext<S, D>,
-        table_id: TableId,
-        table_state: TableState,
-        current_lsn: PgLsn,
-        persisted_checkpoint_lsn: Option<PgLsn>,
-        table_decoding_states: &mut HashMap<TableId, TableDecodingState>,
-    ) -> EtlResult<()>
-    where
-        S: PipelineStore,
-        D: PipelineDestination,
-    {
-        let worker_state = ctx.pool.get_active_worker_state(table_id).await;
-
-        // If there is an active worker, we want to see if we can switch it to
-        // the ready state. If there isn't an active worker, we just try to see
-        // if we can switch the table to ready state or start a new worker for
-        // that table.
-        if let Some(worker_state) = worker_state {
-            let mut worker_state_guard = worker_state.lock().await;
-            let state = worker_state_guard.table_state();
-            let has_materialized_decoding_state = matches!(
-                table_decoding_states.get(&table_id),
-                Some(TableDecodingState::WithSchema(_))
             );
 
-            debug!(
-                worker_type = %WorkerType::Apply,
-                table_id = table_id.0,
-                table_state_type = %state.as_type(),
-                %current_lsn,
-                "checking table with active worker after batch flush",
-            );
-
-            if let TableState::SyncDone { lsn: sync_done_lsn, .. } = state {
-                if can_transition_to_ready(
-                    current_lsn,
-                    persisted_checkpoint_lsn,
-                    sync_done_lsn,
-                    has_materialized_decoding_state,
-                ) {
-                    info!(
-                        worker_type = %WorkerType::Apply,
-                        table_id = table_id.0,
-                        %sync_done_lsn,
-                        %current_lsn,
-                        ?persisted_checkpoint_lsn,
-                        "transitioning sync_done -> ready",
-                    );
-
-                    worker_state_guard.set_and_store(TableState::Ready, &ctx.store).await?;
-                } else {
-                    debug!(
-                        worker_type = %WorkerType::Apply,
-                        table_id = table_id.0,
-                        %sync_done_lsn,
-                        %current_lsn,
-                        ?persisted_checkpoint_lsn,
-                        has_materialized_decoding_state,
-                        "table not yet ready, checkpoint or local decoding schema unavailable",
-                    );
-                }
-            }
-        } else {
-            let has_materialized_decoding_state = matches!(
-                table_decoding_states.get(&table_id),
-                Some(TableDecodingState::WithSchema(_))
-            );
-
-            debug!(
-                worker_type = %WorkerType::Apply,
-                table_id = table_id.0,
-                table_state_type = %table_state.as_type(),
-                "checking table without active worker after batch flush",
-            );
-
-            match table_state {
-                TableState::SyncDone { lsn: sync_done_lsn, .. } => {
-                    if can_transition_to_ready(
+            match observe_table(ctx, table_id, stored_state).await {
+                ObservedTable::Active(table) => {
+                    let table_state = table.table_state();
+                    let action = handoff::active_after_flush(&table_state, &readiness);
+                    log_handoff_decision(
+                        "after_flush",
                         current_lsn,
-                        persisted_checkpoint_lsn,
-                        sync_done_lsn,
-                        has_materialized_decoding_state,
-                    ) {
-                        info!(
-                            worker_type = %WorkerType::Apply,
-                            table_id = table_id.0,
-                            %sync_done_lsn,
-                            %current_lsn,
-                            ?persisted_checkpoint_lsn,
-                            "transitioning sync_done -> ready",
-                        );
-
-                        ctx.store.update_table_state(table_id, TableState::Ready).await?;
-                    } else {
-                        debug!(
-                            worker_type = %WorkerType::Apply,
-                            table_id = table_id.0,
-                            %sync_done_lsn,
-                            %current_lsn,
-                            ?persisted_checkpoint_lsn,
-                            has_materialized_decoding_state,
-                            "table not yet ready, checkpoint or local decoding schema unavailable",
-                        );
-                    }
-                }
-                _ => {
-                    debug!(
-                        worker_type = %WorkerType::Apply,
-                        table_id = table_id.0,
-                        table_state_type = %table_state.as_type(),
-                        "spawning new table sync worker",
+                        table_id,
+                        &table_state,
+                        &action,
                     );
 
-                    // Start a new worker for this table.
-                    reset_table_decoding_state_for_sync(table_decoding_states, table_id);
-                    let table_sync_worker = build_table_sync_worker(ctx, table_id);
-                    if let Err(err) =
-                        start_table_sync_worker(Arc::clone(&ctx.pool), table_sync_worker).await
-                    {
-                        error!(
-                            worker_type = %WorkerType::Apply,
-                            table_id = table_id.0,
-                            error = %err,
-                            "failed to start table sync worker",
-                        );
+                    match action {
+                        ActiveFlushAction::PromoteToReady(proof) => {
+                            table.promote_to_ready(proof, &ctx.store).await?;
+                        }
+                        ActiveFlushAction::Keep => {}
                     }
+                }
+                ObservedTable::Idle(table_state) => {
+                    let action = handoff::idle_after_flush(&table_state, &readiness);
+                    log_handoff_decision(
+                        "after_flush",
+                        current_lsn,
+                        table_id,
+                        &table_state,
+                        &action,
+                    );
+                    execute_idle_action(ctx, table_id, action, table_decoding_states).await?;
                 }
             }
         }
@@ -3993,16 +3993,14 @@ mod apply_worker {
 
     /// Processes syncing tables while the apply loop is quiescent.
     ///
-    /// Handles `SyncWait → Catchup`, waits for workers already in Catchup,
-    /// transitions `SyncDone → Ready` only after the persisted apply checkpoint
-    /// reaches `SyncDone.lsn` and this connection has materialized the table
-    /// decoder, and spawns workers.
+    /// Does the COMMIT work for each table, or the flush work when the COMMIT
+    /// decision keeps it.
     ///
     /// This path does not advance the apply checkpoint because no destination
     /// flush completed. A quiet table may therefore remain in `SyncDone` until
     /// a later durable apply flush advances the persisted checkpoint.
     pub(super) async fn process_syncing_tables_when_quiescent<S, D>(
-        ctx: &mut ApplyWorkerContext<S, D>,
+        ctx: &ApplyWorkerContext<S, D>,
         activity_handle: &ActivityHandle,
         current_lsn: PgLsn,
         table_decoding_states: &mut HashMap<TableId, TableDecodingState>,
@@ -4011,27 +4009,32 @@ mod apply_worker {
         S: PipelineStore,
         D: PipelineDestination,
     {
-        let syncing_tables = get_syncing_tables(&ctx.store).await?;
-        if syncing_tables.is_empty() {
-            return Ok(None);
-        }
-
-        // This apply loop serializes checkpoint persistence. No apply
-        // checkpoint write can race this read before the caller finishes this
-        // state evaluation and persists its next candidate.
-        let persisted_checkpoint_lsn =
-            ctx.store.get_replication_checkpoint(WorkerType::Apply).await?;
-        for (table_id, table_state) in syncing_tables {
-            let exit_intent = process_single_syncing_table_when_quiescent(
-                ctx,
-                activity_handle,
+        let (syncing_tables, persisted_checkpoint_lsn) =
+            syncing_tables_with_checkpoint(&ctx.store).await?;
+        for (table_id, stored_state) in syncing_tables {
+            let readiness = readiness_inputs(
                 table_id,
-                table_state,
                 current_lsn,
                 persisted_checkpoint_lsn,
                 table_decoding_states,
-            )
-            .await?;
+            );
+
+            let exit_intent = match observe_table(ctx, table_id, stored_state).await {
+                ObservedTable::Active(table) => {
+                    let table_state = table.table_state();
+                    let action = handoff::active_when_quiescent(&table_state, &readiness);
+                    log_handoff_decision("quiescent", current_lsn, table_id, &table_state, &action);
+
+                    execute_active_action(ctx, activity_handle, table, action).await?
+                }
+                ObservedTable::Idle(table_state) => {
+                    let action = handoff::idle_after_flush(&table_state, &readiness);
+                    log_handoff_decision("quiescent", current_lsn, table_id, &table_state, &action);
+                    execute_idle_action(ctx, table_id, action, table_decoding_states).await?;
+
+                    None
+                }
+            };
 
             if exit_intent.is_some() {
                 return Ok(exit_intent);
@@ -4039,263 +4042,6 @@ mod apply_worker {
         }
 
         Ok(None)
-    }
-
-    /// Processes a single syncing table while the apply loop is quiescent.
-    ///
-    /// Handles `SyncWait → Catchup` and `SyncDone → Ready` transitions, waits
-    /// for workers already in Catchup, and spawns workers.
-    async fn process_single_syncing_table_when_quiescent<S, D>(
-        ctx: &mut ApplyWorkerContext<S, D>,
-        activity_handle: &ActivityHandle,
-        table_id: TableId,
-        table_state: TableState,
-        current_lsn: PgLsn,
-        persisted_checkpoint_lsn: Option<PgLsn>,
-        table_decoding_states: &mut HashMap<TableId, TableDecodingState>,
-    ) -> EtlResult<Option<ExitIntent>>
-    where
-        S: PipelineStore,
-        D: PipelineDestination,
-    {
-        let worker_state = ctx.pool.get_active_worker_state(table_id).await;
-
-        // If there is an active worker, we want to see if we can start the
-        // catchup or if we can switch it to ready state. If there isn't an
-        // active worker, we just try to see if we can switch the table to ready
-        // state or start a new worker for that table.
-        if let Some(worker_state) = worker_state {
-            let mut worker_state_guard = worker_state.lock().await;
-            let state = worker_state_guard.table_state();
-            let has_materialized_decoding_state = matches!(
-                table_decoding_states.get(&table_id),
-                Some(TableDecodingState::WithSchema(_))
-            );
-
-            debug!(
-                worker_type = %WorkerType::Apply,
-                table_id = table_id.0,
-                table_state_type = %state.as_type(),
-                %current_lsn,
-                "checking table with active worker when quiescent",
-            );
-
-            match state {
-                TableState::SyncWait { lsn: snapshot_lsn } => {
-                    // The catchup lsn is determined via max since it could be
-                    // that the table sync worker is started from a lsn which is
-                    // far in the future compared to where the apply worker is.
-                    let catchup_lsn = snapshot_lsn.max(current_lsn);
-
-                    info!(
-                        worker_type = %WorkerType::Apply,
-                        table_id = table_id.0,
-                        %current_lsn,
-                        %snapshot_lsn,
-                        %catchup_lsn,
-                        "transitioning sync_wait -> catchup",
-                    );
-
-                    worker_state_guard
-                        .set_and_store(TableState::Catchup { lsn: catchup_lsn }, &ctx.store)
-                        .await?;
-
-                    // It's important to drop the state guard before waiting,
-                    // otherwise we deadlock.
-                    drop(worker_state_guard);
-
-                    if let Some(exit_intent) = wait_for_table_sync_worker_catchup(
-                        ctx,
-                        activity_handle,
-                        table_id,
-                        &worker_state,
-                        catchup_lsn,
-                        CatchupWaitReason::EnteredCatchup,
-                    )
-                    .await
-                    {
-                        return Ok(Some(exit_intent));
-                    }
-                }
-                TableState::SyncDone { lsn: sync_done_lsn, .. } => {
-                    if can_transition_to_ready(
-                        current_lsn,
-                        persisted_checkpoint_lsn,
-                        sync_done_lsn,
-                        has_materialized_decoding_state,
-                    ) {
-                        info!(
-                            worker_type = %WorkerType::Apply,
-                            table_id = table_id.0,
-                            %sync_done_lsn,
-                            %current_lsn,
-                            ?persisted_checkpoint_lsn,
-                            "transitioning sync_done -> ready",
-                        );
-
-                        worker_state_guard.set_and_store(TableState::Ready, &ctx.store).await?;
-
-                        return Ok(None);
-                    }
-
-                    debug!(
-                        worker_type = %WorkerType::Apply,
-                        table_id = table_id.0,
-                        %sync_done_lsn,
-                        %current_lsn,
-                        ?persisted_checkpoint_lsn,
-                        has_materialized_decoding_state,
-                        "table not yet ready, checkpoint or local decoding schema unavailable",
-                    );
-                }
-                TableState::Catchup { lsn: catchup_lsn } => {
-                    drop(worker_state_guard);
-
-                    if let Some(exit_intent) = wait_for_table_sync_worker_catchup(
-                        ctx,
-                        activity_handle,
-                        table_id,
-                        &worker_state,
-                        catchup_lsn,
-                        CatchupWaitReason::AlreadyInCatchup,
-                    )
-                    .await
-                    {
-                        return Ok(Some(exit_intent));
-                    }
-                }
-                _ => {
-                    debug!(
-                        worker_type = %WorkerType::Apply,
-                        table_id = table_id.0,
-                        table_state_type = %state.as_type(),
-                        "no action needed for current state when quiescent",
-                    );
-                }
-            }
-        } else {
-            let has_materialized_decoding_state = matches!(
-                table_decoding_states.get(&table_id),
-                Some(TableDecodingState::WithSchema(_))
-            );
-
-            debug!(
-                worker_type = %WorkerType::Apply,
-                table_id = table_id.0,
-                table_state_type = %table_state.as_type(),
-                "checking table without active worker when quiescent",
-            );
-
-            match table_state {
-                TableState::SyncDone { lsn: sync_done_lsn, .. } => {
-                    if can_transition_to_ready(
-                        current_lsn,
-                        persisted_checkpoint_lsn,
-                        sync_done_lsn,
-                        has_materialized_decoding_state,
-                    ) {
-                        info!(
-                            worker_type = %WorkerType::Apply,
-                            table_id = table_id.0,
-                            %sync_done_lsn,
-                            %current_lsn,
-                            ?persisted_checkpoint_lsn,
-                            "transitioning sync_done -> ready",
-                        );
-
-                        ctx.store.update_table_state(table_id, TableState::Ready).await?;
-                    } else {
-                        debug!(
-                            worker_type = %WorkerType::Apply,
-                            table_id = table_id.0,
-                            %sync_done_lsn,
-                            %current_lsn,
-                            ?persisted_checkpoint_lsn,
-                            has_materialized_decoding_state,
-                            "table not yet ready, checkpoint or local decoding schema unavailable",
-                        );
-                    }
-                }
-                _ => {
-                    debug!(
-                        worker_type = %WorkerType::Apply,
-                        table_id = table_id.0,
-                        table_state_type = %table_state.as_type(),
-                        "spawning new table sync worker",
-                    );
-
-                    // Start a new worker for this table.
-                    reset_table_decoding_state_for_sync(table_decoding_states, table_id);
-                    let table_sync_worker = build_table_sync_worker(ctx, table_id);
-                    if let Err(err) =
-                        start_table_sync_worker(Arc::clone(&ctx.pool), table_sync_worker).await
-                    {
-                        error!(
-                            worker_type = %WorkerType::Apply,
-                            table_id = table_id.0,
-                            error = %err,
-                            "failed to start table sync worker",
-                        );
-                    }
-                }
-            }
-        }
-
-        Ok(None)
-    }
-
-    /// Returns whether stored `SyncDone` decoding state can be discarded as
-    /// `Ready`.
-    ///
-    /// The three checks cover separate safety obligations:
-    ///
-    /// - `current_lsn >= sync_done_lsn` proves that this connection reached the
-    ///   boundary where apply ownership resumes.
-    /// - `persisted_checkpoint_lsn >= sync_done_lsn` proves restart safety.
-    ///   Requiring the stored value—not the apply loop's in-memory checkpoint—
-    ///   makes `Ready(H) => persisted apply checkpoint >= H` hold across
-    ///   crashes and checkpoint-write failures. Startup selects the later of
-    ///   the replication-slot position and this checkpoint, so a later
-    ///   connection has a bootstrap snapshot at or beyond `SyncDone`. A fresh
-    ///   pgoutput connection emits relation metadata before its first row
-    ///   change, so that relation can resolve the newest stored schema at or
-    ///   before the bootstrap.
-    /// - `has_materialized_decoding_state` proves current-connection safety.
-    ///   PostgreSQL may have sent the relation before `SyncDone`, while table
-    ///   sync still owned the table. Apply skipped that relation, and
-    ///   PostgreSQL need not send it again on the same connection. If DML then
-    ///   arrives without a local decoder, apply can recover only while
-    ///   `SyncDone` still retains the exact snapshot and masks.
-    ///
-    /// Apply-side decoding state is cleared before table sync starts.
-    /// Consequently, a later [`TableDecodingState::WithSchema`] proves that
-    /// this connection now has a complete decoder: relation-less DML restored
-    /// it from `SyncDone`, or an owned relation materialized it. Only then may
-    /// `Ready` discard the durable fallback.
-    ///
-    /// The `WithSchema` check does not make a table that is already `Ready`
-    /// safer across restart. The persisted-checkpoint condition provides that
-    /// guarantee. A restarted loop which still finds `SyncDone` applies this
-    /// same check only because the restarted loop is now the current connection
-    /// whose decoder must be established before it stores `Ready`.
-    ///
-    /// A handled DDL records a pending relation while retaining any previous
-    /// masks. PostgreSQL's following relation materializes the new exact
-    /// snapshot and masks. A relation-less row instead combines the retained
-    /// masks with the stored new table schema and transitions to `WithSchema`.
-    ///
-    /// A table which lacks local decoding state remains in `SyncDone`; this
-    /// does not block owned changes at or after the boundary. Its first
-    /// relation or DML can materialize the decoder on demand.
-    fn can_transition_to_ready(
-        current_lsn: PgLsn,
-        persisted_checkpoint_lsn: Option<PgLsn>,
-        sync_done_lsn: PgLsn,
-        has_materialized_decoding_state: bool,
-    ) -> bool {
-        has_materialized_decoding_state
-            && current_lsn >= sync_done_lsn
-            && persisted_checkpoint_lsn.is_some_and(|lsn| lsn >= sync_done_lsn)
     }
 
     /// Creates a new table sync worker for the specified table.
@@ -4427,40 +4173,12 @@ mod table_sync_worker {
         None
     }
 
-    /// Processes syncing tables after batch flush.
-    ///
-    /// Validates whether catchup position has been reached. If so, transitions
-    /// to SyncDone and returns Complete.
-    pub(super) async fn process_syncing_tables_after_flush<S>(
-        ctx: &mut TableSyncWorkerContext<S>,
-        current_lsn: PgLsn,
-        table_decoding_state: Option<&TableDecodingState>,
-    ) -> EtlResult<Option<ExitIntent>>
-    where
-        S: SharedStateStore,
-    {
-        try_complete_catchup(ctx, current_lsn, table_decoding_state).await
-    }
-
-    /// Processes syncing tables while the apply loop is quiescent.
-    ///
-    /// If catchup position reached, transitions to SyncDone.
-    pub(super) async fn process_syncing_tables_when_quiescent<S>(
-        ctx: &mut TableSyncWorkerContext<S>,
-        current_lsn: PgLsn,
-        table_decoding_state: Option<&TableDecodingState>,
-    ) -> EtlResult<Option<ExitIntent>>
-    where
-        S: SharedStateStore,
-    {
-        try_complete_catchup(ctx, current_lsn, table_decoding_state).await
-    }
-
     /// Attempts to complete catchup and transition to SyncDone.
     ///
-    /// If catchup position has been reached, transitions to SyncDone and
-    /// returns Complete.
-    async fn try_complete_catchup<S>(
+    /// Runs after a batch flush and while the apply loop is quiescent. If the
+    /// catchup position has been reached, transitions to SyncDone and returns
+    /// Complete.
+    pub(super) async fn try_complete_catchup<S>(
         ctx: &mut TableSyncWorkerContext<S>,
         current_lsn: PgLsn,
         table_decoding_state: Option<&TableDecodingState>,
