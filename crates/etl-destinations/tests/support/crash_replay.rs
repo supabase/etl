@@ -285,37 +285,6 @@ impl CrashReplayCoverage {
     }
 }
 
-/// Runs the crash-and-replay property against target `T`.
-pub(crate) fn run_crash_replay_property<T: CrashReplayTarget>(property: &str, config: T::Config) {
-    let strategy = crash_replay_cases(T::SHAPE);
-    let coverage = CrashReplayCoverage::default();
-    run_expensive_property(property, &strategy, |case| {
-        block_on(run_case::<T>(config, case, &coverage))
-    });
-    coverage.report(property);
-}
-
-/// Runs one case on fresh source and destination storage.
-async fn run_case<T: CrashReplayTarget>(
-    config: T::Config,
-    case: &CrashReplayCase,
-    coverage: &CrashReplayCoverage,
-) -> Result<(), TestCaseError> {
-    let database = spawn_source_database().await;
-    let tables = create_workload_tables(&database, &case.workload).await;
-    let pipeline_id: PipelineId = random_pipeline_id().into();
-    let target = T::setup(config, &tables, &pipeline_id).await;
-
-    let result =
-        run_case_on_target(&database, &tables, &pipeline_id, &target, case, coverage).await;
-    target.teardown().await;
-    if result.is_ok() {
-        coverage.record_fault(case.fault);
-    }
-
-    result
-}
-
 /// Pipeline that writes through the fault-injecting wrapper.
 type CasePipeline<D> = Pipeline<PostgresStore, TestDestinationWrapper<D>>;
 
@@ -384,6 +353,110 @@ impl Deliveries {
 /// cut off mid-write may fail to shut down cleanly.
 async fn shut_down_crashed<D: PipelineDestination>(destination: &TestDestinationWrapper<D>) {
     let _ = tokio::time::timeout(WORKLOAD_TIMEOUT, destination.shutdown()).await;
+}
+
+/// Returns how often a transaction of `phase` may be acknowledged.
+///
+/// An unacknowledged suffix may replay once after any fault. Transactions
+/// after the fault run only once the fault transaction is delivered.
+fn delivery_counts(phase: TxPhase) -> RangeInclusive<usize> {
+    match phase {
+        TxPhase::BeforeFault | TxPhase::Fault => 1..=2,
+        TxPhase::AfterFault => 1..=1,
+    }
+}
+
+/// Checks that rows read from the destination equal the source rows of
+/// `table`, with each key present once.
+fn compare_current_rows(
+    table: usize,
+    rows: Vec<WorkloadRecord>,
+    source: &BTreeMap<i64, WorkloadRecord>,
+) -> Result<(), TestCaseError> {
+    let mut current = BTreeMap::new();
+    for row in rows {
+        let id = row.id();
+        if let Some(previous) = current.insert(id, row) {
+            return Err(TestCaseError::fail(format!(
+                "table {table} shows key {id} more than once, including {previous:?}"
+            )));
+        }
+    }
+    prop_assert_eq!(&current, source, "table {} destination state differs from the source", table);
+
+    Ok(())
+}
+
+/// Checks a stored change log and returns how many replayed copies it holds.
+///
+/// A copied row may be stored once: a failed copy drops the table before
+/// copying it again. A replayed change may be stored again, but only as an
+/// identical copy.
+fn assert_replay_copies_allowed(
+    table: usize,
+    versions: &[StoredVersion],
+) -> Result<usize, TestCaseError> {
+    let mut first_copies = HashMap::<(VersionOrigin, i64, &str), &StoredVersion>::new();
+    let mut copies = 0;
+    for version in versions {
+        let key = (version.origin, version.id, version.position.as_str());
+        let Some(first) = first_copies.get(&key) else {
+            first_copies.insert(key, version);
+            continue;
+        };
+
+        prop_assert!(
+            matches!(version.origin, VersionOrigin::Change),
+            "table {} stores copied key {} more than once",
+            table,
+            version.id
+        );
+        prop_assert_eq!(
+            *first,
+            version,
+            "table {} stores different versions of key {} at {}",
+            table,
+            version.id,
+            &version.position
+        );
+        copies += 1;
+    }
+
+    Ok(copies)
+}
+
+/// Checks the destination's state of `table` against its source rows.
+///
+/// Destinations whose state settles asynchronously are read until it matches
+/// or [`CrashReplayTarget::SETTLE_TIMEOUT`] elapses; read failures within that
+/// window are retried as well, since a just-written table may not be readable
+/// yet.
+async fn assert_destination_converged<T: CrashReplayTarget>(
+    target: &T,
+    table: usize,
+    name: &TableName,
+    source: &BTreeMap<i64, WorkloadRecord>,
+    coverage: &CrashReplayCoverage,
+) -> Result<(), TestCaseError> {
+    let deadline = Instant::now() + T::SETTLE_TIMEOUT;
+    loop {
+        let result = target
+            .current_rows(name)
+            .await
+            .and_then(|rows| compare_current_rows(table, rows, source));
+        match result {
+            Ok(()) => break,
+            Err(error) if Instant::now() >= deadline => return Err(error),
+            Err(_) => tokio::time::sleep(SETTLE_POLL_INTERVAL).await,
+        }
+    }
+
+    if let Some(versions) = target.stored_versions(name).await? {
+        let copies = assert_replay_copies_allowed(table, &versions)?;
+        coverage.replay_copies.fetch_add(copies, Ordering::Relaxed);
+    }
+
+    Ok(())
 }
 
 /// Runs one case against prepared source tables and destination storage.
@@ -602,106 +675,33 @@ async fn run_case_on_target<T: CrashReplayTarget>(
     Ok(())
 }
 
-/// Returns how often a transaction of `phase` may be acknowledged.
-///
-/// An unacknowledged suffix may replay once after any fault. Transactions
-/// after the fault run only once the fault transaction is delivered.
-fn delivery_counts(phase: TxPhase) -> RangeInclusive<usize> {
-    match phase {
-        TxPhase::BeforeFault | TxPhase::Fault => 1..=2,
-        TxPhase::AfterFault => 1..=1,
-    }
-}
-
-/// Checks that rows read from the destination equal the source rows of
-/// `table`, with each key present once.
-fn compare_current_rows(
-    table: usize,
-    rows: Vec<WorkloadRecord>,
-    source: &BTreeMap<i64, WorkloadRecord>,
-) -> Result<(), TestCaseError> {
-    let mut current = BTreeMap::new();
-    for row in rows {
-        let id = row.id();
-        if let Some(previous) = current.insert(id, row) {
-            return Err(TestCaseError::fail(format!(
-                "table {table} shows key {id} more than once, including {previous:?}"
-            )));
-        }
-    }
-    prop_assert_eq!(&current, source, "table {} destination state differs from the source", table);
-
-    Ok(())
-}
-
-/// Checks a stored change log and returns how many replayed copies it holds.
-///
-/// A copied row may be stored once: a failed copy drops the table before
-/// copying it again. A replayed change may be stored again, but only as an
-/// identical copy.
-fn assert_replay_copies_allowed(
-    table: usize,
-    versions: &[StoredVersion],
-) -> Result<usize, TestCaseError> {
-    let mut first_copies = HashMap::<(VersionOrigin, i64, &str), &StoredVersion>::new();
-    let mut copies = 0;
-    for version in versions {
-        let key = (version.origin, version.id, version.position.as_str());
-        let Some(first) = first_copies.get(&key) else {
-            first_copies.insert(key, version);
-            continue;
-        };
-
-        prop_assert!(
-            matches!(version.origin, VersionOrigin::Change),
-            "table {} stores copied key {} more than once",
-            table,
-            version.id
-        );
-        prop_assert_eq!(
-            *first,
-            version,
-            "table {} stores different versions of key {} at {}",
-            table,
-            version.id,
-            &version.position
-        );
-        copies += 1;
-    }
-
-    Ok(copies)
-}
-
-/// Checks the destination's state of `table` against its source rows.
-///
-/// Destinations whose state settles asynchronously are read until it matches
-/// or [`CrashReplayTarget::SETTLE_TIMEOUT`] elapses; read failures within that
-/// window are retried as well, since a just-written table may not be readable
-/// yet.
-async fn assert_destination_converged<T: CrashReplayTarget>(
-    target: &T,
-    table: usize,
-    name: &TableName,
-    source: &BTreeMap<i64, WorkloadRecord>,
+/// Runs one case on fresh source and destination storage.
+async fn run_case<T: CrashReplayTarget>(
+    config: T::Config,
+    case: &CrashReplayCase,
     coverage: &CrashReplayCoverage,
 ) -> Result<(), TestCaseError> {
-    let deadline = Instant::now() + T::SETTLE_TIMEOUT;
-    loop {
-        let result = target
-            .current_rows(name)
-            .await
-            .and_then(|rows| compare_current_rows(table, rows, source));
-        match result {
-            Ok(()) => break,
-            Err(error) if Instant::now() >= deadline => return Err(error),
-            Err(_) => tokio::time::sleep(SETTLE_POLL_INTERVAL).await,
-        }
+    let database = spawn_source_database().await;
+    let tables = create_workload_tables(&database, &case.workload).await;
+    let pipeline_id: PipelineId = random_pipeline_id().into();
+    let target = T::setup(config, &tables, &pipeline_id).await;
+
+    let result =
+        run_case_on_target(&database, &tables, &pipeline_id, &target, case, coverage).await;
+    target.teardown().await;
+    if result.is_ok() {
+        coverage.record_fault(case.fault);
     }
 
-    if let Some(versions) = target.stored_versions(name).await? {
-        let copies = assert_replay_copies_allowed(table, &versions)?;
-        coverage.replay_copies.fetch_add(copies, Ordering::Relaxed);
-    }
+    result
+}
 
-    Ok(())
+/// Runs the crash-and-replay property against target `T`.
+pub(crate) fn run_crash_replay_property<T: CrashReplayTarget>(property: &str, config: T::Config) {
+    let strategy = crash_replay_cases(T::SHAPE);
+    let coverage = CrashReplayCoverage::default();
+    run_expensive_property(property, &strategy, |case| {
+        block_on(run_case::<T>(config, case, &coverage))
+    });
+    coverage.report(property);
 }
