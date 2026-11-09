@@ -19,7 +19,10 @@ use etl::{
 };
 use etl_config::{
     ducklake_catalog_metadata_connect_options, libpq_tcp_host,
-    shared::{DuckLakeTableName as DuckLakeMaintenanceTableName, DuckLakeWriterConfig},
+    shared::{
+        DuckLakeTableName as DuckLakeMaintenanceTableName, DuckLakeWriterConfig,
+        validate_ducklake_table_namespace,
+    },
 };
 use metrics::{gauge, histogram};
 use pg_escape::{quote_identifier, quote_literal};
@@ -1482,6 +1485,7 @@ pub struct DuckLakeMaintenanceConfig {
     /// Optional DuckLake metadata schema.
     pub metadata_schema: Option<String>,
     /// Immutable source namespace; absent for existing flat destinations.
+    /// ASCII letters must be lowercase, matching the destination configuration.
     pub table_namespace: Option<String>,
     /// DuckLake writer options shared with the replicator.
     pub writer_config: DuckLakeWriterConfig,
@@ -1633,7 +1637,17 @@ pub async fn run_maintenance_once(
         validate_expire_snapshots_older_than(&duckdb, &config.expire_snapshots.older_than).await?;
     }
     if config.table_namespace.is_some() {
-        duckdb.run(|conn| conn.execute_batch(&namespace_version_check_sql(LAKE_CATALOG)).map_err(|source| etl_error!(ErrorKind::ConfigError, "DuckLake namespace requires catalog format 1.1", source: RedactedDuckDbError::from(source)))).await?;
+        duckdb
+            .run(|conn| {
+                conn.execute_batch(&namespace_version_check_sql(LAKE_CATALOG)).map_err(|source| {
+                    etl_error!(
+                        ErrorKind::ConfigError,
+                        "DuckLake namespace requires catalog format 1.1",
+                        source: RedactedDuckDbError::from(source)
+                    )
+                })
+            })
+            .await?;
     }
 
     let metadata_schema = match config.metadata_schema.clone() {
@@ -1737,8 +1751,9 @@ pub async fn run_maintenance_once(
 
 /// Validates one maintenance runner config.
 fn validate_config(config: &DuckLakeMaintenanceConfig) -> EtlResult<()> {
-    etl_config::shared::validate_ducklake_table_namespace(config.table_namespace.as_deref())
-        .map_err(|source| etl_error!(ErrorKind::ConfigError, "Invalid DuckLake table namespace", source: source))?;
+    validate_ducklake_table_namespace(config.table_namespace.as_deref()).map_err(|source| {
+        etl_error!(ErrorKind::ConfigError, "Invalid DuckLake table namespace", source: source)
+    })?;
     if !matches!(config.catalog_url.scheme(), "postgres" | "postgresql") {
         return Err(etl_error!(
             ErrorKind::ConfigError,

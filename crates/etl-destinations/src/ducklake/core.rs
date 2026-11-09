@@ -31,12 +31,14 @@ use etl_config::{
         DuckLakeCopyBufferConfig, DuckLakePartitionColumn, DuckLakeSortBy, DuckLakeSortColumn,
         DuckLakeSortDirection, DuckLakeSortNulls, DuckLakeTablePartitioningConfig,
         DuckLakeTableSortingConfig, DuckLakeWriterConfig, Validate,
+        validate_ducklake_table_namespace,
     },
 };
 use etl_maintenance::{
     ExternalMaintenanceOperationPolicy,
     ducklake::{
-        DataFileRewriteReason, RedactedDuckDbError, namespaced_tables_query, table_namespace_filter,
+        DataFileRewriteReason, RedactedDuckDbError, namespace_version_check_sql,
+        namespaced_tables_query, table_namespace_filter,
     },
 };
 use metrics::gauge;
@@ -1976,15 +1978,9 @@ where
         store: S,
     ) -> EtlResult<Self> {
         register_metrics();
-        etl_config::shared::validate_ducklake_table_namespace(table_namespace.as_deref()).map_err(
-            |error| {
-                classified_error(
-                    ErrorKind::ConfigError,
-                    "DuckLake table namespace is invalid",
-                    error,
-                )
-            },
-        )?;
+        validate_ducklake_table_namespace(table_namespace.as_deref()).map_err(|error| {
+            classified_error(ErrorKind::ConfigError, "DuckLake table namespace is invalid", error)
+        })?;
 
         if !matches!(catalog_url.scheme(), "postgres" | "postgresql") {
             return Err(etl_error!(
@@ -2082,10 +2078,7 @@ where
 
         if table_namespace.is_some() {
             run_duckdb_blocking(Arc::clone(&pool), Arc::clone(&blocking_slots), |conn| {
-                conn.execute_batch(&etl_maintenance::ducklake::namespace_version_check_sql(
-                    LAKE_CATALOG,
-                ))
-                .map_err(|source| {
+                conn.execute_batch(&namespace_version_check_sql(LAKE_CATALOG)).map_err(|source| {
                     classified_error(
                         ErrorKind::ConfigError,
                         "DuckLake namespace requires catalog format 1.1",

@@ -606,6 +606,7 @@ pub enum DestinationConfig {
         /// Optional metadata schema for DuckLake metadata tables.
         metadata_schema: Option<String>,
         /// Immutable source namespace above each replicated schema.
+        /// ASCII letters must be lowercase; omission preserves the flat layout.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         table_namespace: Option<String>,
         /// Optional DuckLake maintenance target file size.
@@ -875,6 +876,7 @@ pub enum DestinationConfigWithoutSecrets {
         /// Optional metadata schema for DuckLake metadata tables.
         metadata_schema: Option<String>,
         /// Immutable source namespace above each replicated schema.
+        /// ASCII letters must be lowercase; omission preserves the flat layout.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         table_namespace: Option<String>,
         /// Optional DuckLake maintenance target file size.
@@ -1022,7 +1024,30 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::{from_value, json};
+
     use super::*;
+
+    /// Both public configuration forms reject namespace case aliases.
+    #[test]
+    fn ducklake_configs_validate_namespace_case() {
+        for namespace in [None, Some("projecta"), Some("ProjectA")] {
+            let config: DestinationConfig = from_value(json!({
+                "ducklake": {
+                    "catalog_url": "postgres://placeholder@catalog.example.com/catalog",
+                    "data_path": "s3://example-bucket/",
+                    "table_namespace": namespace
+                }
+            }))
+            .unwrap();
+            let expected_valid = namespace != Some("ProjectA");
+            assert_eq!(config.validate().is_ok(), expected_valid);
+            assert_eq!(
+                DestinationConfigWithoutSecrets::from(config).validate().is_ok(),
+                expected_valid
+            );
+        }
+    }
 
     #[test]
     fn ducklake_writer_config_resolves_defaults_and_overrides() {

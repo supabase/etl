@@ -150,11 +150,22 @@ fn encode_replay_component(value: &str) -> String {
 }
 
 /// Validates a namespace without treating its contents as a SQL path.
+///
+/// ASCII letters must be lowercase because DuckDB resolves even quoted
+/// identifiers case-insensitively, while metadata and replay keys preserve
+/// case. Reject aliases instead of normalizing a durable destination identity.
 pub fn validate_ducklake_table_namespace(namespace: Option<&str>) -> Result<(), ValidationError> {
     if namespace.is_some_and(|namespace| namespace.is_empty() || namespace.contains('\0')) {
         return Err(ValidationError::InvalidFieldValue {
             field: "table_namespace".to_owned(),
             constraint: "must be nonempty and contain no NUL characters".to_owned(),
+        });
+    }
+    if namespace.is_some_and(|namespace| namespace.bytes().any(|byte| byte.is_ascii_uppercase())) {
+        return Err(ValidationError::InvalidFieldValue {
+            field: "table_namespace".to_owned(),
+            constraint: "must use lowercase ASCII letters to avoid case-insensitive schema aliases"
+                .to_owned(),
         });
     }
     Ok(())
@@ -170,7 +181,42 @@ impl Validate for DuckLakeTableName {
 mod tests {
     use serde::Deserialize;
 
-    use crate::shared::DuckLakeTableName;
+    use crate::shared::{DuckLakeTableName, Validate, validate_ducklake_table_namespace};
+
+    /// Namespace validation preserves flat layouts and literal identifier
+    /// contents.
+    #[test]
+    fn namespace_validation_preserves_flat_and_canonical_names() {
+        for namespace in [None, Some("projecta"), Some("project_123"), Some("quoted.\"名")] {
+            validate_ducklake_table_namespace(namespace).unwrap();
+            let table = DuckLakeTableName::new("Public", "Orders")
+                .with_namespace(namespace.map(str::to_owned));
+            table.validate().unwrap();
+            assert_eq!(table.namespace(), namespace);
+        }
+    }
+
+    /// Case variants cannot select the same DuckLake schema with distinct
+    /// replay keys.
+    #[test]
+    fn namespace_validation_rejects_noncanonical_case() {
+        for namespace in ["ProjectA", "projectA", "PROJECTA", "quoted.\"A名"] {
+            let error = validate_ducklake_table_namespace(Some(namespace)).unwrap_err();
+            assert!(error.to_string().contains("lowercase ASCII"));
+            let table = DuckLakeTableName::new("public", "orders")
+                .with_namespace(Some(namespace.to_owned()));
+            assert!(table.validate().is_err());
+            assert_eq!(table.namespace(), Some(namespace));
+        }
+    }
+
+    /// Empty and NUL-containing namespaces remain invalid.
+    #[test]
+    fn namespace_validation_rejects_empty_and_nul() {
+        for namespace in ["", "project\0a"] {
+            assert!(validate_ducklake_table_namespace(Some(namespace)).is_err());
+        }
+    }
 
     /// Matches the permissive metadata parser in pre-namespace binaries.
     #[derive(Debug, Deserialize, PartialEq)]
