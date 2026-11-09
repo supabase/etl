@@ -12,16 +12,15 @@ use tokio_postgres::types::PgLsn;
 
 use crate::{
     destination::DestinationTableMetadata,
-    error::{ErrorKind, EtlResult},
-    etl_error,
+    error::EtlResult,
     replication::{
         WorkerType,
         state::{TableState, TableStateType},
     },
     schema::{SnapshotId, TableId, TableSchema},
     store::{
-        CachedStore, DestinationTablesMetadata, SchemaStore, StateStore, TableSchemaSnapshots,
-        TableStateLifecycleStore, TableStateOperation, TableStates,
+        CachedStore, MemoryStoreData, SchemaStore, StateStore, TableStateLifecycleStore,
+        TableStateOperation, TableStates,
     },
     test_utils::notify::TimedNotify,
 };
@@ -39,13 +38,13 @@ type TableStateCondition = (TableId, Arc<Notify>, Box<dyn Fn(&TableState) -> boo
 type TableSchemaCountCondition = (TableId, usize, Arc<Notify>);
 type TableSchemaPruneCondition = Arc<Notify>;
 
+/// Store data and observers guarded by one lock.
+///
+/// Conditions are checked under the same write lock as the update that may
+/// satisfy them, so no state transition is missed.
 #[derive(Default)]
 struct Inner {
-    table_states: TableStates,
-    table_state_history: HashMap<TableId, Vec<TableState>>,
-    table_schemas: Arc<TableSchemaSnapshots>,
-    destination_tables_metadata: DestinationTablesMetadata,
-    replication_checkpoints: HashMap<WorkerType, PgLsn>,
+    data: MemoryStoreData,
     table_state_type_conditions: Vec<TableStateTypeCondition>,
     table_state_conditions: Vec<TableStateCondition>,
     table_schema_count_conditions: Vec<TableSchemaCountCondition>,
@@ -55,7 +54,7 @@ struct Inner {
 
 impl Inner {
     fn check_conditions(&mut self) {
-        let table_states = Arc::clone(&self.table_states);
+        let table_states = self.data.table_states();
         self.table_state_type_conditions.retain(|(tid, expected_state, notify)| {
             if let Some(state) = table_states.get(tid) {
                 let should_retain = *expected_state != state.as_type();
@@ -81,7 +80,7 @@ impl Inner {
         });
 
         self.table_schema_count_conditions.retain(|(tid, expected_count, notify)| {
-            let schemas_count = self.table_schemas.snapshots_count(*tid);
+            let schemas_count = self.data.table_schema_count(*tid);
             let should_retain = schemas_count < *expected_count;
             if !should_retain {
                 notify.notify_one();
@@ -101,6 +100,9 @@ impl Inner {
 
 /// In-memory store that notifies tests about state and schema changes.
 ///
+/// Store operations are those of [`crate::store::MemoryStore`]; this store
+/// only adds observation.
+///
 /// Notification helpers only observe changes that happen after registration.
 /// Register the returned [`TimedNotify`] before starting the producer that is
 /// expected to satisfy it.
@@ -117,14 +119,12 @@ impl NotifyingStore {
 
     /// Returns the current table states.
     pub async fn get_table_states(&self) -> TableStates {
-        let inner = self.inner.read().await;
-        Arc::clone(&inner.table_states)
+        self.inner.read().await.data.table_states()
     }
 
     /// Returns the previously stored states for one table in update order.
     pub async fn get_table_state_history(&self, table_id: TableId) -> Vec<TableState> {
-        let inner = self.inner.read().await;
-        inner.table_state_history.get(&table_id).cloned().unwrap_or_default()
+        self.inner.read().await.data.table_state_history(table_id).to_vec()
     }
 
     /// Returns the latest schema snapshot stored for each table.
@@ -132,7 +132,7 @@ impl NotifyingStore {
         let inner = self.inner.read().await;
 
         let mut table_schemas = HashMap::new();
-        for schema in inner.table_schemas.all() {
+        for schema in inner.data.table_schemas() {
             table_schemas
                 .entry(schema.id)
                 .and_modify(|current: &mut TableSchema| {
@@ -151,7 +151,7 @@ impl NotifyingStore {
         let inner = self.inner.read().await;
 
         let mut table_schemas: HashMap<TableId, Vec<_>> = HashMap::new();
-        for schema in inner.table_schemas.all() {
+        for schema in inner.data.table_schemas() {
             table_schemas
                 .entry(schema.id)
                 .or_default()
@@ -192,7 +192,8 @@ impl NotifyingStore {
         let notify = Arc::new(Notify::new());
         let mut inner = self.inner.write().await;
         let starts_incomplete = inner
-            .table_states
+            .data
+            .table_states()
             .get(&table_id)
             .is_none_or(|state| !state.as_type().has_completed_table_sync());
         let saw_incomplete = AtomicBool::new(starts_incomplete);
@@ -260,11 +261,7 @@ impl NotifyingStore {
     /// Resets one table to [`TableState::Init`] and clears its state history.
     pub async fn reset_table_state(&self, table_id: TableId) -> EtlResult<()> {
         let mut inner = self.inner.write().await;
-        inner.table_state_history.remove(&table_id);
-
-        let states = Arc::make_mut(&mut inner.table_states);
-        states.remove(&table_id);
-        states.insert(table_id, TableState::Init);
+        inner.data.reset_table_state(table_id);
         inner.check_conditions();
 
         Ok(())
@@ -280,62 +277,33 @@ impl CachedStore for NotifyingStore {
 impl StateStore for NotifyingStore {
     async fn get_table_state(&self, table_id: TableId) -> EtlResult<Option<TableState>> {
         let inner = self.inner.read().await;
-        let result = Ok(inner.table_states.get(&table_id).cloned());
-
+        let table_state = inner.data.table_state(table_id);
         inner.dispatch_method_notification(StateStoreMethod::GetTableState);
 
-        result
+        Ok(table_state)
     }
 
     async fn get_table_states(&self) -> EtlResult<TableStates> {
         let inner = self.inner.read().await;
-        let result = Ok(Arc::clone(&inner.table_states));
-
+        let table_states = inner.data.table_states();
         inner.dispatch_method_notification(StateStoreMethod::GetTableStates);
 
-        result
+        Ok(table_states)
     }
 
     async fn update_table_states(&self, updates: Vec<(TableId, TableState)>) -> EtlResult<()> {
-        let mut guard = self.inner.write().await;
-        let inner = &mut *guard;
-
-        let states = Arc::make_mut(&mut inner.table_states);
-        for (table_id, state) in updates {
-            // Store the current state in history before updating.
-            if let Some(current_state) = states.get(&table_id).cloned() {
-                inner
-                    .table_state_history
-                    .entry(table_id)
-                    .or_insert_with(Vec::new)
-                    .push(current_state);
-            }
-
-            states.insert(table_id, state);
-        }
-
-        guard.check_conditions();
-        guard.dispatch_method_notification(StateStoreMethod::StoreTableState);
+        let mut inner = self.inner.write().await;
+        inner.data.update_table_states(updates);
+        inner.check_conditions();
+        inner.dispatch_method_notification(StateStoreMethod::StoreTableState);
 
         Ok(())
     }
 
     async fn rollback_table_state(&self, table_id: TableId) -> EtlResult<TableState> {
         let mut inner = self.inner.write().await;
-
-        // Get the previous state from history.
-        let previous_state =
-            inner.table_state_history.get_mut(&table_id).and_then(Vec::pop).ok_or_else(|| {
-                etl_error!(
-                    ErrorKind::StateRollbackError,
-                    "No previous state available to roll back to"
-                )
-            })?;
-
-        // Update the current state to the previous state.
-        Arc::make_mut(&mut inner.table_states).insert(table_id, previous_state.clone());
+        let previous_state = inner.data.rollback_table_state(table_id)?;
         inner.check_conditions();
-
         inner.dispatch_method_notification(StateStoreMethod::RollbackTableState);
 
         Ok(previous_state)
@@ -345,9 +313,7 @@ impl StateStore for NotifyingStore {
         &self,
         worker_type: WorkerType,
     ) -> EtlResult<Option<PgLsn>> {
-        let inner = self.inner.read().await;
-
-        Ok(inner.replication_checkpoints.get(&worker_type).copied())
+        Ok(self.inner.read().await.data.replication_checkpoint(worker_type))
     }
 
     async fn upsert_replication_checkpoint(
@@ -355,23 +321,11 @@ impl StateStore for NotifyingStore {
         worker_type: WorkerType,
         checkpoint_lsn: PgLsn,
     ) -> EtlResult<PgLsn> {
-        let mut inner = self.inner.write().await;
-        let persisted_checkpoint_lsn = *inner
-            .replication_checkpoints
-            .entry(worker_type)
-            .and_modify(|persisted_checkpoint_lsn| {
-                if checkpoint_lsn > *persisted_checkpoint_lsn {
-                    *persisted_checkpoint_lsn = checkpoint_lsn;
-                }
-            })
-            .or_insert(checkpoint_lsn);
-
-        Ok(persisted_checkpoint_lsn)
+        Ok(self.inner.write().await.data.upsert_replication_checkpoint(worker_type, checkpoint_lsn))
     }
 
     async fn delete_replication_checkpoint(&self, worker_type: WorkerType) -> EtlResult<()> {
-        let mut inner = self.inner.write().await;
-        inner.replication_checkpoints.remove(&worker_type);
+        self.inner.write().await.data.delete_replication_checkpoint(worker_type);
 
         Ok(())
     }
@@ -380,8 +334,7 @@ impl StateStore for NotifyingStore {
         &self,
         table_id: TableId,
     ) -> EtlResult<Option<DestinationTableMetadata>> {
-        let inner = self.inner.read().await;
-        Ok(inner.destination_tables_metadata.get(&table_id).cloned())
+        Ok(self.inner.read().await.data.destination_table_metadata(table_id))
     }
 
     async fn store_destination_table_metadata(
@@ -389,8 +342,8 @@ impl StateStore for NotifyingStore {
         table_id: TableId,
         metadata: DestinationTableMetadata,
     ) -> EtlResult<()> {
-        let mut inner = self.inner.write().await;
-        Arc::make_mut(&mut inner.destination_tables_metadata).insert(table_id, metadata);
+        self.inner.write().await.data.store_destination_table_metadata(table_id, metadata);
+
         Ok(())
     }
 }
@@ -401,22 +354,16 @@ impl SchemaStore for NotifyingStore {
         table_id: &TableId,
         snapshot_id: SnapshotId,
     ) -> EtlResult<Option<Arc<TableSchema>>> {
-        let inner = self.inner.read().await;
-
-        Ok(inner.table_schemas.get_at_or_before(*table_id, snapshot_id))
+        Ok(self.inner.read().await.data.table_schema(*table_id, snapshot_id))
     }
 
     async fn get_table_schemas(&self) -> EtlResult<Vec<Arc<TableSchema>>> {
-        let inner = self.inner.read().await;
-
-        Ok(inner.table_schemas.all())
+        Ok(self.inner.read().await.data.table_schemas())
     }
 
     async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<Arc<TableSchema>> {
         let mut inner = self.inner.write().await;
-
-        let table_schema = Arc::make_mut(&mut inner.table_schemas).insert(table_schema);
-
+        let table_schema = inner.data.store_table_schema(table_schema);
         inner.check_conditions();
 
         Ok(table_schema)
@@ -427,7 +374,7 @@ impl SchemaStore for NotifyingStore {
         retention_snapshot_ids: BTreeMap<TableId, SnapshotId>,
     ) -> EtlResult<u64> {
         let mut inner = self.inner.write().await;
-        let removed_count = Arc::make_mut(&mut inner.table_schemas).prune(&retention_snapshot_ids);
+        let removed_count = inner.data.prune_table_schemas(&retention_snapshot_ids);
 
         if removed_count > 0 {
             for notify in std::mem::take(&mut inner.table_schema_prune_conditions) {
@@ -441,44 +388,11 @@ impl SchemaStore for NotifyingStore {
 
 impl TableStateLifecycleStore for NotifyingStore {
     async fn apply_table_state_operation(&self, operation: TableStateOperation) -> EtlResult<()> {
-        match operation {
-            TableStateOperation::PrepareForCopy { table_id } => {
-                let mut inner = self.inner.write().await;
-                Arc::make_mut(&mut inner.table_schemas).remove_table(table_id);
-                Arc::make_mut(&mut inner.destination_tables_metadata).remove(&table_id);
-                inner.replication_checkpoints.remove(&WorkerType::TableSync { table_id });
-                inner.check_conditions();
+        let mut inner = self.inner.write().await;
+        inner.data.apply_table_state_operation(operation);
+        inner.check_conditions();
 
-                Ok(())
-            }
-            TableStateOperation::ResetForResync => {
-                let mut guard = self.inner.write().await;
-                let inner = &mut *guard;
-
-                let states = Arc::make_mut(&mut inner.table_states);
-                for (&table_id, state) in states.iter_mut() {
-                    let previous = std::mem::replace(state, TableState::Init);
-                    inner.table_state_history.entry(table_id).or_default().push(previous);
-                }
-
-                inner.replication_checkpoints.remove(&WorkerType::Apply);
-                inner.check_conditions();
-
-                Ok(())
-            }
-            TableStateOperation::Delete { table_id } => {
-                let mut inner = self.inner.write().await;
-
-                Arc::make_mut(&mut inner.table_states).remove(&table_id);
-                inner.table_state_history.remove(&table_id);
-                Arc::make_mut(&mut inner.table_schemas).remove_table(table_id);
-                Arc::make_mut(&mut inner.destination_tables_metadata).remove(&table_id);
-                inner.replication_checkpoints.remove(&WorkerType::TableSync { table_id });
-                inner.check_conditions();
-
-                Ok(())
-            }
-        }
+        Ok(())
     }
 }
 
