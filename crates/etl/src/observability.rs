@@ -45,8 +45,16 @@ pub(crate) const ETL_SCHEMA_CLEANUP_PRUNED_VERSIONS_TOTAL: &str =
     "etl_schema_cleanup_pruned_versions_total";
 pub(crate) const ETL_DDL_SCHEMA_CHANGES_TOTAL: &str = "etl_ddl_schema_changes_total";
 pub(crate) const ETL_DDL_SCHEMA_CHANGE_COLUMNS: &str = "etl_ddl_schema_change_columns";
+pub(crate) const ETL_RELATION_SCHEMA_MISMATCHES_TOTAL: &str =
+    "etl_relation_schema_mismatches_total";
 pub(crate) const ETL_ROW_SIZE_BYTES: &str = "etl_row_size_bytes";
 pub(crate) const ETL_SLOT_INVALIDATIONS_TOTAL: &str = "etl_slot_invalidations_total";
+/// Client-observed duration of each replication-slot creation command attempt.
+pub(crate) const ETL_REPLICATION_SLOT_CREATION_DURATION_SECONDS: &str =
+    "etl_replication_slot_creation_duration_seconds";
+/// Oldest active slot creation command age for each pipeline and worker type.
+pub(crate) const ETL_REPLICATION_SLOT_CREATION_AGE_SECONDS: &str =
+    "etl_replication_slot_creation_age_seconds";
 pub(crate) const ETL_WORKER_ERRORS_TOTAL: &str = "etl_worker_errors_total";
 pub(crate) const ETL_MEMORY_BACKPRESSURE_ACTIVE: &str = "etl_memory_backpressure_active";
 pub(crate) const ETL_MEMORY_BACKPRESSURE_TRANSITIONS_TOTAL: &str =
@@ -89,6 +97,8 @@ pub(crate) const STATUS_UPDATE_TYPE_LABEL: &str = "status_update_type";
 pub(crate) const COMMAND_TAG_LABEL: &str = "command_tag";
 /// Label key for the outcome of an operation.
 pub(crate) const OUTCOME_LABEL: &str = "outcome";
+/// Label key for how a relation message disagrees with the stored schema.
+pub(crate) const MISMATCH_KIND_LABEL: &str = "mismatch_kind";
 /// Label key for worker error classification ("timed", "manual", "no_retry").
 pub(crate) const ERROR_TYPE_LABEL: &str = "error_type";
 /// Label key for transition direction ("activate" or "resume").
@@ -118,6 +128,23 @@ pub(crate) fn ddl_command_tag_label(command_tag: &str) -> &'static str {
 /// register the metrics only once.
 pub(crate) fn register_metrics() {
     REGISTER_METRICS.call_once(|| {
+        describe_histogram!(
+            ETL_REPLICATION_SLOT_CREATION_DURATION_SECONDS,
+            Unit::Seconds,
+            "Client elapsed time for CREATE_REPLICATION_SLOT, including source transaction waits; \
+             labeled by worker_type and outcome (success, error, cancelled). Excludes connection \
+             setup, table locks, old-slot deletion, transaction commit, and copying. Cancellation \
+             ends client observation, not necessarily server execution."
+        );
+
+        describe_gauge!(
+            ETL_REPLICATION_SLOT_CREATION_AGE_SECONDS,
+            Unit::Seconds,
+            "Oldest active client-observed CREATE_REPLICATION_SLOT attempt by worker_type; \
+             sampled every second. Zero means idle, negative means observation stopped. Attempts \
+             end on response or cancellation; age resets across retries and restarts."
+        );
+
         describe_histogram!(
             ETL_POSTGRES_QUERY_DURATION_SECONDS,
             Unit::Seconds,
@@ -309,6 +336,14 @@ pub(crate) fn register_metrics() {
             Unit::Count,
             "Total number of DDL schema change messages handled, labeled by worker_type, \
              command_tag, and outcome."
+        );
+
+        describe_counter!(
+            ETL_RELATION_SCHEMA_MISMATCHES_TOTAL,
+            Unit::Count,
+            "Total number of relation messages whose column order or types disagree with the \
+             stored table schema, labeled by worker_type and mismatch_kind. Replication continues \
+             with the stored schema."
         );
 
         describe_histogram!(

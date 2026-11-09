@@ -31,6 +31,7 @@ jobs:
           - parse_copy_row
           - numeric_text_roundtrip
           - decode_pgoutput_tuple
+          - decode_pgoutput_relation
           - time_fast_paths
     steps:
       - name: Check out source

@@ -53,22 +53,23 @@ use crate::{
         ETL_DDL_SCHEMA_CHANGES_TOTAL, ETL_DESTINATION_BATCH_WRITE_DURATION_SECONDS,
         ETL_DESTINATION_DURABILITY_DURATION_SECONDS,
         ETL_DESTINATION_DURABILITY_WAIT_DURATION_SECONDS, ETL_EVENTS_PROCESSED_TOTAL,
-        ETL_EVENTS_RECEIVED_TOTAL, ETL_REPLICATION_MESSAGES_TOTAL, ETL_TRANSACTION_SIZE,
-        ETL_TRANSACTIONS_TOTAL, OUTCOME_LABEL, REPLICATION_PATH_LABEL, WORKER_TYPE_LABEL,
+        ETL_EVENTS_RECEIVED_TOTAL, ETL_RELATION_SCHEMA_MISMATCHES_TOTAL,
+        ETL_REPLICATION_MESSAGES_TOTAL, ETL_TRANSACTION_SIZE, ETL_TRANSACTIONS_TOTAL,
+        MISMATCH_KIND_LABEL, OUTCOME_LABEL, REPLICATION_PATH_LABEL, WORKER_TYPE_LABEL,
         WRITE_STATUS_LABEL, ddl_command_tag_label,
     },
     pipeline::PipelineId,
     postgres::{
         ReplicationMessageStream,
-        client::{PgReplicationClient, PostgresConnectionUpdate},
+        client::{PgReplicationClient, PostgresConnectionUpdate, SlotCreationMonitor},
         codec::{
             DDL_MESSAGE_PREFIX, SchemaChangeMessage, delete_message_payload_bytes,
-            insert_message_payload_bytes, parse_event_from_begin_message,
-            parse_event_from_commit_message, parse_event_from_delete_message,
-            parse_event_from_insert_message, parse_event_from_truncate_message,
-            parse_event_from_update_message, parse_replica_identity_column_names,
-            parse_replicated_column_names, schema_snapshot_id_from_message,
-            update_message_payload_bytes,
+            detect_relation_schema_mismatch, insert_message_payload_bytes,
+            parse_event_from_begin_message, parse_event_from_commit_message,
+            parse_event_from_delete_message, parse_event_from_insert_message,
+            parse_event_from_truncate_message, parse_event_from_update_message,
+            parse_replica_identity_column_names, parse_replicated_column_names,
+            schema_snapshot_id_from_message, update_message_payload_bytes,
         },
     },
     replication::{
@@ -187,6 +188,8 @@ pub(crate) struct ApplyWorkerContext<S, D> {
     pub(crate) replication_lag_monitor: ReplicationLagMonitor,
     /// Pipeline-owned durability age, retained through worker retries.
     pub(crate) durability_monitor: DurabilityMonitor,
+    /// Pipeline-owned slot creation observations for child table-sync workers.
+    pub(crate) slot_creation_monitor: SlotCreationMonitor,
     /// Cancellation token for graceful termination.
     pub(crate) shutdown_token: CancellationToken,
     /// Semaphore controlling maximum concurrent table sync workers.
@@ -2508,7 +2511,9 @@ where
         // tuple data in the same physical `pg_attribute.attnum` order, skipping
         // unpublished columns. Because stored TableSchema values use that same
         // order, ReplicatedTableSchema becomes the positional view used to
-        // decode later tuple payloads.
+        // decode later tuple payloads. Materialization reports when that view
+        // disagrees with the relation, because a stale snapshot can share
+        // names but not order or types.
         let replicated_columns = parse_replicated_column_names(message)?;
         let identity_columns = parse_replica_identity_column_names(message)?;
 
@@ -2524,6 +2529,7 @@ where
             .materialize_relation_schema(
                 table_id,
                 schema_selection,
+                message,
                 &replicated_columns,
                 &identity_columns,
             )
@@ -2647,10 +2653,14 @@ where
 
     /// Materializes relation metadata against this attempt's selected table
     /// schema.
+    ///
+    /// Logs and counts a relation whose column order or types disagree with
+    /// the materialized decoder, then installs the decoder unchanged.
     async fn materialize_relation_schema(
         &mut self,
         table_id: TableId,
         schema_selection: RelationSchemaSelection,
+        relation: &protocol::RelationBody,
         replicated_columns: &HashSet<String>,
         identity_columns: &HashSet<String>,
     ) -> EtlResult<ReplicatedTableSchema> {
@@ -2660,6 +2670,26 @@ where
         let identity_mask = IdentityMask::try_build(&table_schema, identity_columns)?;
         let replicated_table_schema =
             ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask);
+        // Mismatches are only observed for now, so the rate is known before
+        // they stop replication (PIPE-1283).
+        if let Some(mismatch) = detect_relation_schema_mismatch(relation, &replicated_table_schema)?
+        {
+            let mismatch_kind = mismatch.kind().as_label();
+            warn!(
+                table_id = %table_id,
+                snapshot_id = %replicated_table_schema.inner().snapshot_id,
+                mismatch_kind,
+                mismatch = %mismatch,
+                "relation message does not match the stored table schema, decoding with the \
+                 stored schema"
+            );
+            counter!(
+                ETL_RELATION_SCHEMA_MISMATCHES_TOTAL,
+                WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
+                MISMATCH_KIND_LABEL => mismatch_kind,
+            )
+            .increment(1);
+        }
 
         self.table_decoding_states
             .insert(table_id, TableDecodingState::WithSchema(replicated_table_schema.clone()));
@@ -4286,6 +4316,7 @@ mod apply_worker {
             ctx.store.clone(),
             ctx.destination.clone(),
             ctx.replication_lag_monitor.clone(),
+            ctx.slot_creation_monitor.clone(),
             ctx.shutdown_token.clone(),
             Arc::clone(&ctx.table_sync_worker_permits),
             ctx.memory_monitor.clone(),
@@ -4958,11 +4989,14 @@ mod tests {
             strategy::{Just, Strategy},
             test_runner::TestCaseError,
         };
-        use tokio_postgres::types::Type;
+        use tokio_postgres::types::{Kind, Type};
 
         use crate::{
             error::EtlResult,
-            postgres::codec::{parse_replica_identity_column_names, parse_replicated_column_names},
+            postgres::codec::{
+                RelationSchemaMismatchKind, detect_relation_schema_mismatch,
+                parse_replica_identity_column_names, parse_replicated_column_names,
+            },
             schema::{
                 ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, TableId,
                 TableName, TableSchema,
@@ -5149,7 +5183,6 @@ mod tests {
         }
 
         /// Runs the relation-to-decoder steps of
-        /// [`super::ApplyLoop::handle_relation_message`] and
         /// [`super::ApplyLoop::materialize_relation_schema`] without the store
         /// lookup that selects the snapshot.
         fn materialize(
@@ -5160,12 +5193,21 @@ mod tests {
             let identity_columns = parse_replica_identity_column_names(relation)?;
             let replication_mask = ReplicationMask::try_build(&table_schema, &replicated_columns)?;
             let identity_mask = IdentityMask::try_build(&table_schema, &identity_columns)?;
-
             Ok(ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask))
         }
 
-        /// Checks that a successful materialization agrees with the relation
-        /// position by position.
+        /// Returns how a case's relation disagrees with its materialized
+        /// decoder.
+        fn mismatch_kind(case: &RelationCase) -> Option<RelationSchemaMismatchKind> {
+            let relation = parse_relation(&encode_relation(case));
+            let replicated_table_schema = materialize(stored_schema(case), &relation).unwrap();
+            detect_relation_schema_mismatch(&relation, &replicated_table_schema)
+                .unwrap()
+                .map(|mismatch| mismatch.kind())
+        }
+
+        /// Checks that a successful materialization is reported as a mismatch
+        /// exactly when it disagrees with the relation position by position.
         fn check_relation_agreement(case: &RelationCase) -> Result<(), TestCaseError> {
             let relation = parse_relation(&encode_relation(case));
             let Ok(replicated_table_schema) = materialize(stored_schema(case), &relation) else {
@@ -5183,11 +5225,12 @@ mod tests {
                     (column.name().unwrap().to_owned(), u32::try_from(column.type_id()).unwrap())
                 })
                 .collect();
-            prop_assert_eq!(decoder_columns, relation_columns);
-            prop_assert_eq!(
-                replicated_table_schema.column_schemas().len(),
-                relation.columns().len()
-            );
+            let mismatch =
+                detect_relation_schema_mismatch(&relation, &replicated_table_schema).unwrap();
+            prop_assert_eq!(mismatch.is_some(), decoder_columns != relation_columns);
+            if mismatch.is_some() {
+                return Ok(());
+            }
 
             let decoder_identity: Vec<&str> = replicated_table_schema
                 .identity_column_schemas()
@@ -5229,10 +5272,6 @@ mod tests {
             }
         }
 
-        // Name-permuting and type-changing staleness is excluded here because
-        // materialization currently accepts it with misaligned columns; see
-        // the ignored `relation_materialization_rejects_permuted_names` and
-        // `relation_materialization_rejects_changed_types`.
         #[test]
         fn relation_materialization_agrees_with_relation_columns() {
             run_property(
@@ -5243,9 +5282,7 @@ mod tests {
         }
 
         #[test]
-        #[ignore = "known defect: relation masks match by name, so renamed columns decode at stale \
-                    positions"]
-        fn relation_materialization_rejects_permuted_names() {
+        fn relation_materialization_detects_permuted_names() {
             let swaps = vec((0..MAX_COLUMNS, 0..MAX_COLUMNS), 1..=3);
             run_property(
                 "relation materialization with permuted names",
@@ -5255,8 +5292,7 @@ mod tests {
         }
 
         #[test]
-        #[ignore = "known defect: relation column types are never compared with the stored snapshot"]
-        fn relation_materialization_rejects_changed_types() {
+        fn relation_materialization_detects_changed_types() {
             let type_change = (0..MAX_COLUMNS, 0..COLUMN_TYPES.len())
                 .prop_map(|(index, type_index)| StaleSnapshot::TypeChanged(index, type_index));
             run_property(
@@ -5271,26 +5307,51 @@ mod tests {
         // so its stored snapshot still says (a, b) while the relation says
         // (b, a). Rows would put source `b` into destination `a`.
         #[test]
-        #[ignore = "known defect: relation masks match by name, so renamed columns decode at stale \
-                    positions"]
-        fn relation_with_swapped_column_names_is_not_materialized_at_stale_positions() {
+        fn relation_with_swapped_column_names_is_detected() {
             let case = published_case(
                 &[("b", Type::INT4), ("a", Type::INT4)],
                 &[("a", Type::INT4), ("b", Type::INT4)],
             );
 
-            check_relation_agreement(&case).unwrap();
+            assert_eq!(mismatch_kind(&case), Some(RelationSchemaMismatchKind::NameOrder));
         }
 
         // Minimal counterexample: `alter table root alter column a type int8`
         // reaches a partition leaf with no DDL message, so its stored
         // snapshot still decodes `a` as `int4`.
         #[test]
-        #[ignore = "known defect: relation column types are never compared with the stored snapshot"]
-        fn relation_with_changed_column_type_is_not_materialized_with_the_stale_type() {
+        fn relation_with_changed_column_type_is_detected() {
             let case = published_case(&[("a", Type::INT8)], &[("a", Type::INT4)]);
 
-            check_relation_agreement(&case).unwrap();
+            assert_eq!(mismatch_kind(&case), Some(RelationSchemaMismatchKind::Type));
+        }
+
+        // `alter column a type text` on a `varchar` column changes the type but
+        // not how ETL decodes its values.
+        #[test]
+        fn relation_with_string_type_change_is_text_compatible() {
+            let case = published_case(&[("a", Type::TEXT)], &[("a", Type::VARCHAR)]);
+
+            assert_eq!(mismatch_kind(&case), Some(RelationSchemaMismatchKind::TextCompatibleType));
+        }
+
+        // pgoutput sends a domain's own OID, while the stored snapshot maps
+        // that unknown OID to `text`. A raw OID comparison would report every
+        // table with a domain, enum, or extension type column.
+        #[test]
+        fn relation_with_user_defined_type_matches() {
+            let domain = Type::new(
+                "price".to_owned(),
+                16_500,
+                Kind::Domain(Type::NUMERIC),
+                "public".to_owned(),
+            );
+            let case = published_case(
+                &[("id", Type::INT8), ("p", domain)],
+                &[("id", Type::INT8), ("p", Type::TEXT)],
+            );
+
+            assert_eq!(mismatch_kind(&case), None);
         }
     }
 }

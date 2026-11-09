@@ -39,6 +39,7 @@ type TableStateCondition = (TableId, Arc<Notify>, Box<dyn Fn(&TableState) -> boo
 type TableSchemaCountCondition = (TableId, usize, Arc<Notify>);
 type TableSchemaPruneCondition = Arc<Notify>;
 
+#[derive(Default)]
 struct Inner {
     table_states: TableStates,
     table_state_history: HashMap<TableId, Vec<TableState>>,
@@ -103,7 +104,7 @@ impl Inner {
 /// Notification helpers only observe changes that happen after registration.
 /// Register the returned [`TimedNotify`] before starting the producer that is
 /// expected to satisfy it.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct NotifyingStore {
     inner: Arc<RwLock<Inner>>,
 }
@@ -111,20 +112,7 @@ pub struct NotifyingStore {
 impl NotifyingStore {
     /// Creates an empty notifying store.
     pub fn new() -> Self {
-        let inner = Inner {
-            table_states: Arc::new(BTreeMap::new()),
-            table_state_history: HashMap::new(),
-            table_schemas: Arc::new(TableSchemaSnapshots::default()),
-            destination_tables_metadata: Arc::new(BTreeMap::new()),
-            replication_checkpoints: HashMap::new(),
-            table_state_type_conditions: Vec::new(),
-            table_state_conditions: Vec::new(),
-            table_schema_count_conditions: Vec::new(),
-            table_schema_prune_conditions: Vec::new(),
-            method_call_notifiers: HashMap::new(),
-        };
-
-        Self { inner: Arc::new(RwLock::new(inner)) }
+        Self::default()
     }
 
     /// Returns the current table states.
@@ -280,12 +268,6 @@ impl NotifyingStore {
         inner.check_conditions();
 
         Ok(())
-    }
-}
-
-impl Default for NotifyingStore {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -474,18 +456,9 @@ impl TableStateLifecycleStore for NotifyingStore {
                 let inner = &mut *guard;
 
                 let states = Arc::make_mut(&mut inner.table_states);
-                let table_ids = states.keys().copied().collect::<Vec<_>>();
-
-                for table_id in table_ids {
-                    if let Some(current_state) = states.get(&table_id).cloned() {
-                        inner
-                            .table_state_history
-                            .entry(table_id)
-                            .or_insert_with(Vec::new)
-                            .push(current_state);
-                    }
-
-                    states.insert(table_id, TableState::Init);
+                for (&table_id, state) in states.iter_mut() {
+                    let previous = std::mem::replace(state, TableState::Init);
+                    inner.table_state_history.entry(table_id).or_default().push(previous);
                 }
 
                 inner.replication_checkpoints.remove(&WorkerType::Apply);

@@ -4,7 +4,7 @@ mod channel;
 mod offset_token;
 mod rest_client;
 
-use std::future::Future;
+use std::{future::Future, time::Duration};
 
 #[cfg(feature = "test-utils")]
 pub use batch::BuilderFootprint;
@@ -16,7 +16,14 @@ pub(crate) use channel::{
 pub use offset_token::OffsetToken;
 pub use rest_client::RestStreamClient;
 
-use crate::snowflake::Result;
+use crate::{retry::RetryPolicy, snowflake::Result};
+
+/// HTTP retry policy and backoff bounds shared with channel replay recovery.
+const SNOWPIPE_RETRY_POLICY: RetryPolicy = RetryPolicy {
+    max_retries: 3,
+    initial_delay: Duration::from_millis(500),
+    max_delay: Duration::from_secs(10),
+};
 
 /// Response from opening or reopening a channel.
 #[derive(Debug)]
