@@ -64,11 +64,10 @@ use crate::{
         client::{PgReplicationClient, PostgresConnectionUpdate, SlotCreationMonitor},
         codec::{
             DDL_MESSAGE_PREFIX, SchemaChangeMessage, delete_message_payload_bytes,
-            detect_relation_schema_mismatch, insert_message_payload_bytes,
-            parse_event_from_begin_message, parse_event_from_commit_message,
-            parse_event_from_delete_message, parse_event_from_insert_message,
-            parse_event_from_truncate_message, parse_event_from_update_message,
-            parse_replica_identity_column_names, parse_replicated_column_names,
+            insert_message_payload_bytes, parse_event_from_begin_message,
+            parse_event_from_commit_message, parse_event_from_delete_message,
+            parse_event_from_insert_message, parse_event_from_truncate_message,
+            parse_event_from_update_message, replicated_table_schema_from_relation,
             schema_snapshot_id_from_message, update_message_payload_bytes,
         },
     },
@@ -84,9 +83,7 @@ use crate::{
             table_sync_worker_apply_stream_id, with_shutdown,
         },
     },
-    schema::{
-        IdentityMask, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId, TableSchema,
-    },
+    schema::{ColumnSchema, ReplicatedTableSchema, SnapshotId, TableId, TableSchema},
     source_payload_metadata::StreamingPayloadMetadata,
     store::{PipelineStore, StateStore},
 };
@@ -472,6 +469,12 @@ struct OpenTransaction {
     /// Number of row-change and truncate messages observed since `BEGIN`.
     change_count: u64,
     /// Next zero-based ordinal to assign to transaction events.
+    ///
+    /// Every row-change and truncate message consumes an ordinal, including
+    /// messages for tables this worker skips. Apply and table-sync workers
+    /// decode the same WAL, so a row keeps the same
+    /// [`crate::event::EventPosition`] whichever worker emits it, and
+    /// destinations can deduplicate replays by position.
     next_ordinal: u64,
 }
 
@@ -2592,44 +2595,22 @@ where
             return Ok(HandleMessageResult::no_event());
         }
 
-        // We extract the columns from the message that are needed to build the
-        // masks. The masks themselves are built by name, so relation-message
-        // order is not needed to decide membership: PostgreSQL live column
-        // names are unique within a table schema version. The order matters
-        // after the masks are applied: PostgreSQL writes RELATION columns and
-        // tuple data in the same physical `pg_attribute.attnum` order, skipping
-        // unpublished columns. Because stored TableSchema values use that same
-        // order, ReplicatedTableSchema becomes the positional view used to
-        // decode later tuple payloads. Materialization reports when that view
-        // disagrees with the relation, because a stale snapshot can share
-        // names but not order or types.
-        let replicated_columns = parse_replicated_column_names(message)?;
-        let identity_columns = parse_replica_identity_column_names(message)?;
-
-        fn format_column_names(column_names: &HashSet<String>) -> String {
-            let mut column_names = column_names.iter().map(String::as_str).collect::<Vec<_>>();
-            column_names.sort_unstable();
-            column_names.join(",")
+        fn format_column_names<'a>(columns: impl Iterator<Item = &'a ColumnSchema>) -> String {
+            columns.map(|column| column.name.as_str()).collect::<Vec<_>>().join(",")
         }
 
         let schema_selection =
             self.resolve_relation_schema_selection(table_id, remote_final_lsn).await?;
-        let replicated_table_schema = self
-            .materialize_relation_schema(
-                table_id,
-                schema_selection,
-                message,
-                &replicated_columns,
-                &identity_columns,
-            )
-            .await?;
+        let replicated_table_schema =
+            self.materialize_relation_schema(table_id, schema_selection, message).await?;
 
         debug!(
             table_id = %table_id,
             snapshot_id = %replicated_table_schema.inner().snapshot_id,
             replication_mask = %replicated_table_schema.replication_mask(),
-            replicated_columns = %format_column_names(&replicated_columns),
-            identity_columns = %format_column_names(&identity_columns),
+            replicated_columns = %format_column_names(replicated_table_schema.column_schemas()),
+            identity_columns =
+                %format_column_names(replicated_table_schema.identity_column_schemas()),
             "materialized relation decoding state"
         );
 
@@ -2750,19 +2731,16 @@ where
         table_id: TableId,
         schema_selection: RelationSchemaSelection,
         relation: &protocol::RelationBody,
-        replicated_columns: &HashSet<String>,
-        identity_columns: &HashSet<String>,
     ) -> EtlResult<ReplicatedTableSchema> {
         let table_schema = self.get_table_schema_for_relation(table_id, schema_selection).await?;
 
-        let replication_mask = ReplicationMask::try_build(&table_schema, replicated_columns)?;
-        let identity_mask = IdentityMask::try_build(&table_schema, identity_columns)?;
-        let replicated_table_schema =
-            ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask);
-        // Mismatches are only observed for now, so the rate is known before
-        // they stop replication (PIPE-1283).
-        if let Some(mismatch) = detect_relation_schema_mismatch(relation, &replicated_table_schema)?
-        {
+        // Masks are built by name, but tuples decode by position in the
+        // relation's `attnum` order, so a stale snapshot can share names but
+        // not order or types. Mismatches are only observed for now, so the
+        // rate is known before they stop replication (PIPE-1283).
+        let (replicated_table_schema, mismatch) =
+            replicated_table_schema_from_relation(table_schema, relation)?;
+        if let Some(mismatch) = mismatch {
             let mismatch_kind = mismatch.kind().as_label();
             warn!(
                 table_id = %table_id,
@@ -4968,15 +4946,8 @@ mod tests {
         use tokio_postgres::types::{Kind, Type};
 
         use crate::{
-            error::EtlResult,
-            postgres::codec::{
-                RelationSchemaMismatchKind, detect_relation_schema_mismatch,
-                parse_replica_identity_column_names, parse_replicated_column_names,
-            },
-            schema::{
-                ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, TableId,
-                TableName, TableSchema,
-            },
+            postgres::codec::{RelationSchemaMismatchKind, replicated_table_schema_from_relation},
+            schema::{ColumnSchema, TableId, TableName, TableSchema},
             test_utils::property::run_property,
         };
 
@@ -5158,35 +5129,22 @@ mod tests {
             ))
         }
 
-        /// Runs the relation-to-decoder steps of
-        /// [`super::ApplyLoop::materialize_relation_schema`] without the store
-        /// lookup that selects the snapshot.
-        fn materialize(
-            table_schema: Arc<TableSchema>,
-            relation: &RelationBody,
-        ) -> EtlResult<ReplicatedTableSchema> {
-            let replicated_columns = parse_replicated_column_names(relation)?;
-            let identity_columns = parse_replica_identity_column_names(relation)?;
-            let replication_mask = ReplicationMask::try_build(&table_schema, &replicated_columns)?;
-            let identity_mask = IdentityMask::try_build(&table_schema, &identity_columns)?;
-            Ok(ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask))
-        }
-
         /// Returns how a case's relation disagrees with its materialized
         /// decoder.
         fn mismatch_kind(case: &RelationCase) -> Option<RelationSchemaMismatchKind> {
             let relation = parse_relation(&encode_relation(case));
-            let replicated_table_schema = materialize(stored_schema(case), &relation).unwrap();
-            detect_relation_schema_mismatch(&relation, &replicated_table_schema)
-                .unwrap()
-                .map(|mismatch| mismatch.kind())
+            let (_, mismatch) =
+                replicated_table_schema_from_relation(stored_schema(case), &relation).unwrap();
+            mismatch.map(|mismatch| mismatch.kind())
         }
 
         /// Checks that a successful materialization is reported as a mismatch
         /// exactly when it disagrees with the relation position by position.
         fn check_relation_agreement(case: &RelationCase) -> Result<(), TestCaseError> {
             let relation = parse_relation(&encode_relation(case));
-            let Ok(replicated_table_schema) = materialize(stored_schema(case), &relation) else {
+            let Ok((replicated_table_schema, mismatch)) =
+                replicated_table_schema_from_relation(stored_schema(case), &relation)
+            else {
                 return Ok(());
             };
 
@@ -5201,8 +5159,6 @@ mod tests {
                     (column.name().unwrap().to_owned(), u32::try_from(column.type_id()).unwrap())
                 })
                 .collect();
-            let mismatch =
-                detect_relation_schema_mismatch(&relation, &replicated_table_schema).unwrap();
             prop_assert_eq!(mismatch.is_some(), decoder_columns != relation_columns);
             if mismatch.is_some() {
                 return Ok(());

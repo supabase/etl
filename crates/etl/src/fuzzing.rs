@@ -510,19 +510,20 @@ pub fn check_pgoutput_tuple_decoding(data: &[u8]) {
 /// The input encodes, in order, the schema change message (see
 /// `fuzz_schema_change_message`), the RELATION message (see
 /// `append_fuzz_relation`), and one insert tuple. The relation is applied
-/// with the same steps as `ApplyLoop::materialize_relation_schema`: name-based
-/// replication and identity masks, then mismatch detection.
+/// with `codec::replicated_table_schema_from_relation`, the function
+/// `ApplyLoop::materialize_relation_schema` uses.
 ///
 /// # Panics
 ///
-/// Panics when, after the masks build, any of these breaks: the decoder keeps
-/// exactly the stored columns the relation names, in stored order; identity
-/// columns are replicated; the schema change identity builds a mask for every
-/// mode Postgres sends, covering only replicated columns; mismatch detection
-/// reports nothing exactly when names and mapped types agree position by
-/// position, and reports `name_order` exactly when the first disagreement is a
-/// name; a decoded insert has one value per replicated column. That panic is
-/// the fuzz target's finding signal.
+/// Panics when any of these breaks: the relation is accepted exactly when
+/// every relation column name is UTF-8 and present in the stored schema; the
+/// decoder keeps exactly the stored columns the relation names, in stored
+/// order; identity columns are replicated; the schema change identity builds a
+/// mask for every mode Postgres sends, covering only replicated columns;
+/// mismatch detection reports nothing exactly when names and mapped types
+/// agree position by position, and reports `name_order` exactly when the first
+/// disagreement is a name; a decoded insert has one value per replicated
+/// column. That panic is the fuzz target's finding signal.
 pub fn check_pgoutput_relation_materialization(data: &[u8]) {
     let mut input = FuzzBytes { data };
 
@@ -554,21 +555,27 @@ pub fn check_pgoutput_relation_materialization(data: &[u8]) {
         unreachable!("assembled message is a relation");
     };
 
-    // Non-UTF-8 names and names missing from the stored schema are rejected
-    // here, as in production.
-    let Ok(replicated_names) = codec::parse_replicated_column_names(&relation) else {
+    // Production must accept exactly the relations whose column names are all
+    // UTF-8 and present in the stored schema.
+    let relation_names: Option<HashSet<&str>> =
+        relation.columns().iter().map(|column| column.name().ok()).collect();
+    let names_known = relation_names.as_ref().is_some_and(|names| {
+        names
+            .iter()
+            .all(|name| table_schema.column_schemas.iter().any(|column| column.name == *name))
+    });
+    let materialized =
+        codec::replicated_table_schema_from_relation(Arc::clone(&table_schema), &relation);
+    assert_eq!(materialized.is_ok(), names_known);
+    let (Ok((replicated_table_schema, mismatch)), Some(replicated_names)) =
+        (materialized, relation_names)
+    else {
         return;
     };
-    let Ok(replication_mask) = ReplicationMask::try_build(&table_schema, &replicated_names) else {
-        return;
-    };
-    let identity_names =
-        codec::parse_replica_identity_column_names(&relation).expect("relation names parsed above");
-    let identity_mask = IdentityMask::try_build(&table_schema, &identity_names)
-        .expect("relation identity columns are relation columns");
+    let replication_mask = replicated_table_schema.replication_mask();
 
     let valid_relreplident = ["d", "f", "i", "n"].contains(&identity.relreplident.as_str());
-    match identity.build_identity_mask(&table_schema, &replication_mask) {
+    match identity.build_identity_mask(&table_schema, replication_mask) {
         Ok(mask) => {
             assert!(valid_relreplident);
             assert_eq!(mask.as_slice().len(), column_count);
@@ -582,24 +589,19 @@ pub fn check_pgoutput_relation_materialization(data: &[u8]) {
         Err(_) => assert!(!valid_relreplident),
     }
 
-    let replicated_table_schema = ReplicatedTableSchema::from_masks(
-        Arc::clone(&table_schema),
-        replication_mask,
-        identity_mask,
-    );
     let decoder_names: Vec<&str> =
         replicated_table_schema.column_schemas().map(|column| column.name.as_str()).collect();
     let stored_names: Vec<&str> = table_schema
         .column_schemas
         .iter()
-        .filter(|column| replicated_names.contains(&column.name))
+        .filter(|column| replicated_names.contains(column.name.as_str()))
         .map(|column| column.name.as_str())
         .collect();
     assert_eq!(decoder_names, stored_names);
     assert!(
         replicated_table_schema
             .identity_column_schemas()
-            .all(|column| replicated_names.contains(&column.name))
+            .all(|column| replicated_names.contains(column.name.as_str()))
     );
 
     let decoder_columns: Vec<(&str, Option<Type>)> = replicated_table_schema
@@ -614,8 +616,6 @@ pub fn check_pgoutput_relation_materialization(data: &[u8]) {
             (name, u32::try_from(column.type_id()).ok().map(convert_type_oid_to_type))
         })
         .collect();
-    let mismatch = codec::detect_relation_schema_mismatch(&relation, &replicated_table_schema)
-        .expect("relation names parsed above");
     match mismatch.map(|mismatch| mismatch.kind()) {
         None => assert_eq!(decoder_columns, relation_columns),
         Some(RelationSchemaMismatchKind::ColumnCount) => {
