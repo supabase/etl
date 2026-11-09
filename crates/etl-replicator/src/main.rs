@@ -4,7 +4,7 @@
 //! replication and routes data to configured destinations. Includes telemetry,
 //! error handling, and graceful shutdown capabilities.
 
-use std::process::ExitCode;
+use std::{env::args_os, process::ExitCode};
 
 use ::tracing::{debug, error, info};
 use etl::task::abort_and_join;
@@ -136,7 +136,7 @@ fn try_main() -> ReplicatorResult<()> {
     // Install rustls crypto provider before any TLS operations.
     init::init_crypto();
 
-    let mut arguments = std::env::args_os().skip(1);
+    let mut arguments = args_os().skip(1);
     match (arguments.next(), arguments.next()) {
         (Some(command), None) if command == "migrate" => return migration::run(),
         (None, None) => {}
