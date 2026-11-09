@@ -36,18 +36,25 @@ impl DuckLakePendingInlineSizeSampler {
         table_name: &DuckLakeTableName,
     ) -> EtlResult<DuckLakePendingInlineDataSizes> {
         let sql = pending_inline_data_bytes_query(&self.metadata_schema);
-        let inlined_bytes: i64 = sqlx::query_scalar(AssertSqlSafe(sql))
-            .bind(table_name.schema())
-            .bind(table_name.table())
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|source| {
-                classified_error(
-                    ErrorKind::DestinationQueryFailed,
-                    "DuckLake inline-size sampler query failed",
-                    source,
-                )
-            })?;
+        let inlined_bytes: i64 = async {
+            let mut transaction = self.pool.begin().await?;
+            let result = sqlx::query_scalar(AssertSqlSafe(sql))
+                .persistent(false)
+                .bind(table_name.schema())
+                .bind(table_name.table())
+                .fetch_one(&mut *transaction)
+                .await?;
+            transaction.commit().await?;
+            Ok::<_, sqlx::Error>(result)
+        }
+        .await
+        .map_err(|source| {
+            classified_error(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake inline-size sampler query failed",
+                source,
+            )
+        })?;
         Ok(record_pending_inline_data_sizes(inlined_bytes, &table_name.id()))
     }
 }
