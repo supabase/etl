@@ -58,30 +58,45 @@ static UNMEASURED_CASES: AtomicU64 = AtomicU64::new(0);
 /// One current-state row.
 #[derive(clickhouse::Row, serde::Deserialize)]
 struct CurrentRow {
+    /// Primary key.
     id: i64,
+    /// Nullable text column.
     note: Option<String>,
+    /// Integer column.
     counter: i32,
 }
 
 /// One stored MergeTree row with its CDC position.
 #[derive(clickhouse::Row, serde::Deserialize)]
 struct MergeTreeVersion {
+    /// Primary key.
     id: i64,
+    /// Nullable text column.
     note: Option<String>,
+    /// Integer column.
     counter: i32,
+    /// Change kind: `INSERT`, `UPDATE`, or `DELETE`.
     cdc_operation: String,
+    /// Commit LSN of the change, zero for copied rows.
     cdc_lsn: u64,
+    /// Position of the change within its transaction.
     cdc_tx_ordinal: u64,
 }
 
 /// One stored ReplacingMergeTree row with its version.
 #[derive(clickhouse::Row, serde::Deserialize)]
 struct ReplacingMergeTreeVersion {
+    /// Primary key.
     id: i64,
+    /// Nullable text column.
     note: Option<String>,
+    /// Integer column.
     counter: i32,
+    /// Packed source position, zero for copied rows. Merges keep the highest
+    /// version of each key.
     #[serde(rename = "_etl_version")]
     version: u128,
+    /// `1` when the version deletes the key, otherwise `0`.
     #[serde(rename = "_etl_deleted")]
     deleted: u8,
 }
