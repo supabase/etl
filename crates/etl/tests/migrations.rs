@@ -1287,3 +1287,54 @@ async fn concurrent_source_migrations_bootstrap_a_fresh_database() {
     assert!(source_helper_exists(&database).await);
     assert_eq!(applied_migration_versions(&database).await, source_migration_versions());
 }
+
+/// `etl.describe_table_schema` renders defaults in the caller's session, so it
+/// pins the output settings ETL's connections use. Changing a connection
+/// option without a source migration that updates those pins would render
+/// defaults differently from replicated values.
+#[tokio::test(flavor = "multi_thread")]
+async fn describe_table_schema_pins_etl_connection_output_settings() {
+    init_test_tracing();
+
+    let database = spawn_unmigrated_database().await;
+    run_source_migrations(&database.config).await.unwrap();
+
+    let client = database.client.as_ref().unwrap();
+    let config: Vec<String> = client
+        .query_one(
+            "select proconfig from pg_catalog.pg_proc where oid = \
+             'etl.describe_table_schema(pg_catalog.oid)'::pg_catalog.regprocedure",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    // Postgres stores canonical setting names, such as `DateStyle`.
+    let pinned: BTreeSet<(String, String)> = config
+        .iter()
+        .map(|setting| {
+            let (name, value) = setting.split_once('=').unwrap();
+            (name.to_ascii_lowercase(), value.to_owned())
+        })
+        .collect();
+
+    // Settings that do not change how values render as text. A new connection
+    // option must either be listed here or be pinned by a source migration.
+    let unpinned = [
+        "client_encoding",
+        "statement_timeout",
+        "lock_timeout",
+        "idle_in_transaction_session_timeout",
+        "application_name",
+    ];
+    for (name, value) in TEST_MIGRATION_OPTIONS.to_key_value_pairs() {
+        if unpinned.contains(&name.as_str()) {
+            continue;
+        }
+
+        assert!(
+            pinned.contains(&(name.clone(), value.clone())),
+            "{name}={value} not in {config:?}"
+        );
+    }
+}
