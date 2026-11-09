@@ -154,3 +154,34 @@ pub(crate) async fn run_postgres_store_migrations(
         },
     )
 }
+
+/// Applies store and source migrations without starting replication.
+///
+/// Uses the same migration sets and ordering as replicator startup.
+/// An optional separate store connection follows the normal pipeline setting.
+/// This is intended for stopped pipelines; callers must keep replication
+/// stopped until the upgrade completes. Successful completion does not create
+/// replication slots, read pipeline state, or access a destination.
+pub async fn run_migrations(
+    source_config: &PgConnectionConfig,
+    store_config: Option<&PgConnectionConfig>,
+) -> EtlResult<()> {
+    let in_recovery = source_database_in_recovery(source_config).await.map_err(|err| {
+        etl_error!(
+            ErrorKind::SourceConnectionFailed,
+            "Failed to inspect source database recovery state",
+            source: err
+        )
+    })?;
+
+    if in_recovery {
+        return Err(etl_error!(
+            ErrorKind::SourceError,
+            "Cannot run explicit migrations against a standby source; configure the writable \
+             primary"
+        ));
+    }
+
+    run_postgres_store_migrations(store_config.unwrap_or(source_config)).await?;
+    run_source_migrations(source_config).await
+}

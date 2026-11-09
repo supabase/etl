@@ -240,6 +240,10 @@ pub mod pipeline;
 pub mod postgres;
 #[cfg(not(any(test, feature = "test-utils")))]
 mod postgres;
+pub mod migrations {
+    pub use crate::postgres::migrations::{run_migrations, run_source_migrations};
+}
+
 mod replication;
 mod runtime;
 pub mod schema;

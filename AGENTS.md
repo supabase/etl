@@ -205,6 +205,10 @@ PR text, logs, or generated files.
 Project-specific judgment only; rustfmt/clippy already own formatting and most
 lints.
 
+- Import referenced functions and types in the module's `use` block, then use
+  their short names in code. Keep `crate::` paths in imports, not at call sites.
+  Resolve name conflicts with explicit import aliases; use fully qualified paths
+  only when importing or aliasing cannot make the code clear.
 - Absolute crate imports for shared items (`use crate::metrics::{...}`), not
   `use super::{...}`.
 - SQL keywords and identifiers lowercase unless quoting or an API requires

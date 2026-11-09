@@ -38,6 +38,51 @@ Install SQLx CLI:
 cargo install --version 0.9.0 sqlx-cli --no-default-features --features rustls,postgres --locked
 ```
 
+## Source migrations without replication
+
+Run `etl-replicator migrate` using the image you intend to deploy. It loads
+top-level `pg_connection` and optional `store_pg_connection` through the
+usual base/environment files and `APP_` overrides, applies embedded store and
+source migrations, and exits. No pipeline ID or destination credentials are
+required; it starts no replication workers and creates no replication slots.
+
+Use a migration-specific configuration directory. For example, `base.yaml`:
+
+```yaml
+pg_connection:
+  host: localhost
+  port: 5430
+  name: postgres
+  username: postgres
+  tls:
+    enabled: false
+    trusted_root_certs: ""
+```
+
+Add `dev.yaml` (which may contain `{}`) for environment overrides. Supply the
+password through `APP_PG_CONNECTION__PASSWORD`. An optional top-level
+`store_pg_connection` has the same fields; if omitted, the store uses the source.
+
+Run with that directory:
+
+```bash
+APP_CONFIG_DIR="$PWD/migration-config" APP_ENVIRONMENT=dev \
+  cargo run --locked -p etl-replicator --no-default-features \
+  --bin etl-replicator -- migrate
+```
+
+The source must be a writable primary. Unlike normal replication startup, this
+explicit command fails for a physical standby instead of silently skipping source
+migrations, and checks this before modifying a separate store. Other command-line
+arguments retain their previous behavior; only the exact `migrate` invocation
+selects migration mode.
+
+Keep pipelines using that source stopped during incompatible schema upgrades.
+Errors produce a nonzero exit code; committed migrations remain applied, and
+rerunning resumes from the migration ledger. Check schema compatibility before
+restoring an older image. This explicit command runs source migrations even when
+normal startup has `run_source_migrations` disabled.
+
 ## Replicator
 
 ClickHouse is the default and uses the Docker service from `cargo x init`. No
