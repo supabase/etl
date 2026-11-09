@@ -802,19 +802,21 @@ pub async fn wait_for_sync_slot_removal(
 ) -> Result<(), TestCaseError> {
     tokio::time::timeout(WORKLOAD_TIMEOUT, async {
         loop {
-            let slot_state = database
-                .get_replication_slot_state(sync_slot_name)
-                .await
-                .expect("failed to read the table sync slot state");
+            let slot_state =
+                database.get_replication_slot_state(sync_slot_name).await.map_err(|error| {
+                    TestCaseError::fail(format!(
+                        "failed to read the table sync slot state: {error}"
+                    ))
+                })?;
             if slot_state.is_none() {
-                return;
+                return Ok::<(), TestCaseError>(());
             }
 
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
     .await
-    .map_err(|_| TestCaseError::fail("timed out waiting for the table sync slot removal"))
+    .map_err(|_| TestCaseError::fail("timed out waiting for the table sync slot removal"))?
 }
 
 /// Returns the current transaction ID truncated to pgoutput's 32 bits.
