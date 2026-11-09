@@ -465,19 +465,26 @@ pub(super) async fn query_table_storage_metrics(
         active_delete_files,
         active_delete_bytes,
         deleted_rows,
-    ): (i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(AssertSqlSafe(sql))
-        .bind(table_name.schema())
-        .bind(table_name.table())
-        .fetch_one(metadata_pg_pool)
-        .await
-        .map_err(|source| {
-            classified_error_with_detail(
-                ErrorKind::DestinationQueryFailed,
-                "DuckLake table storage metrics query failed",
-                format!("table={table_name}, metadata_schema={metadata_schema}"),
-                source,
-            )
-        })?;
+    ): (i64, i64, i64, i64, i64, i64, i64) = async {
+        let mut transaction = metadata_pg_pool.begin().await?;
+        let result = sqlx::query_as(AssertSqlSafe(sql))
+            .persistent(false)
+            .bind(table_name.schema())
+            .bind(table_name.table())
+            .fetch_one(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok::<_, sqlx::Error>(result)
+    }
+    .await
+    .map_err(|source| {
+        classified_error_with_detail(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake table storage metrics query failed",
+            format!("table={table_name}, metadata_schema={metadata_schema}"),
+            source,
+        )
+    })?;
 
     Ok(DuckLakeTableStorageMetrics {
         active_data_files,
@@ -505,15 +512,24 @@ pub(super) async fn query_catalog_maintenance_metrics(
         files_scheduled_for_deletion_total,
         files_scheduled_for_deletion_bytes,
         oldest_scheduled_deletion_epoch_ms,
-    ): (i64, i64, Option<i64>, i64, i64, Option<i64>) =
-        sqlx::query_as(AssertSqlSafe(sql)).fetch_one(metadata_pg_pool).await.map_err(|source| {
-            classified_error_with_detail(
-                ErrorKind::DestinationQueryFailed,
-                "DuckLake catalog maintenance metrics query failed",
-                format!("metadata_schema={metadata_schema}"),
-                source,
-            )
-        })?;
+    ): (i64, i64, Option<i64>, i64, i64, Option<i64>) = async {
+        let mut transaction = metadata_pg_pool.begin().await?;
+        let result = sqlx::query_as(AssertSqlSafe(sql))
+            .persistent(false)
+            .fetch_one(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok::<_, sqlx::Error>(result)
+    }
+    .await
+    .map_err(|source| {
+        classified_error_with_detail(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake catalog maintenance metrics query failed",
+            format!("metadata_schema={metadata_schema}"),
+            source,
+        )
+    })?;
 
     Ok(DuckLakeCatalogMaintenanceMetrics {
         active_data_files_total,

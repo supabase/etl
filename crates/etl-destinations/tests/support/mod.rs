@@ -22,3 +22,5 @@ pub(crate) mod iceberg;
     any(feature = "bigquery", feature = "clickhouse", feature = "snowflake")
 ))]
 pub(crate) mod table_name;
+#[cfg(all(feature = "ducklake", feature = "test-utils"))]
+pub(crate) mod transaction_pooler;
