@@ -7,6 +7,12 @@ use etl::{
     schema::TableId,
     store::{StateStore, TableRetryPolicy, TableState, TableStateType},
     test_utils::{
+        cdc_workload::{
+            AfterFaultStep, DeliveryOrder, TxPhase, WORKLOAD_PUBLICATION, WORKLOAD_TIMEOUT,
+            Workload, WorkloadCoverage, WorkloadHistory, WorkloadRunner, WorkloadShape,
+            WorkloadTables, assert_workload_converged, create_workload_tables, read_source_rows,
+            wait_for_notification, workloads,
+        },
         database::{
             WalsenderTermination, replication_slot_state, spawn_source_database,
             terminate_active_walsender, terminate_walsender, wait_for_new_walsender,
@@ -27,12 +33,8 @@ use etl_telemetry::tracing::init_test_tracing;
 use proptest::prelude::*;
 use tokio_postgres::{Client, types::PgLsn};
 
-use crate::support::cdc_workload::{
-    AfterFaultStep, DeliveryOrder, TxPhase, WORKLOAD_PUBLICATION, WORKLOAD_TIMEOUT, Workload,
-    WorkloadCoverage, WorkloadDestination, WorkloadHistory, WorkloadRunner, WorkloadTables,
-    assert_workload_converged, create_workload_tables, read_source_rows, wait_for_notification,
-    workloads,
-};
+/// Destination the walsender roulette property records into.
+type RouletteDestination = TestDestinationWrapper<MemoryDestination<NotifyingStore>>;
 
 /// Returns the current WAL write position of the source.
 async fn current_wal_lsn(client: &Client) -> PgLsn {
@@ -78,7 +80,7 @@ fn walsender_roulette_cases() -> impl Strategy<Value = WalsenderRouletteCase> {
         Just(WriteResponseTiming::ReleaseThenWaitForReconnect),
     ];
 
-    (workloads(), response_timing)
+    (workloads(WorkloadShape::all()), response_timing)
         .prop_map(|(workload, response_timing)| WalsenderRouletteCase { workload, response_timing })
 }
 
@@ -127,7 +129,7 @@ async fn wait_for_apply_reconnect(
 async fn run_roulette_workload(
     database: &PgDatabase<Client>,
     tables: &WorkloadTables,
-    destination: &WorkloadDestination,
+    destination: &RouletteDestination,
     apply_slot_name: &str,
     case: &WalsenderRouletteCase,
 ) -> Result<WorkloadHistory, TestCaseError> {

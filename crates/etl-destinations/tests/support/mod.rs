@@ -2,6 +2,14 @@ pub(crate) mod bigquery;
 #[cfg(all(feature = "clickhouse", feature = "test-utils"))]
 pub(crate) mod clickhouse;
 #[cfg(any(
+    all(
+        feature = "test-utils",
+        any(feature = "bigquery", feature = "clickhouse", feature = "snowflake")
+    ),
+    feature = "ducklake"
+))]
+pub(crate) mod crash_replay;
+#[cfg(any(
     all(feature = "bigquery", feature = "test-utils"),
     all(feature = "clickhouse", feature = "test-utils")
 ))]
