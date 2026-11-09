@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use etl::{
-    schema::PgLsn,
+    schema::{PgLsn, TableName},
     store::{DestinationStore, StateStore, WorkerType},
 };
 use etl_destinations::snowflake::{
@@ -11,8 +11,33 @@ use etl_destinations::snowflake::{
 use futures::FutureExt;
 use sha2::{Digest, Sha256};
 
+/// Returns the physical Snowflake table name of a source table whose name
+/// components neither start nor end with `_`.
+pub fn snowflake_table_name(src_table: &TableName) -> String {
+    let escaped_schema = src_table.schema.replace('_', "__");
+    let escaped_table = src_table.name.replace('_', "__");
+    format!("{escaped_schema}_{escaped_table}").to_uppercase()
+}
+
 pub fn build_auth() -> Arc<AuthManager<HttpExchanger>> {
     Arc::new(AuthManager::new(test_utils::load_test_config()).expect("AuthManager creation failed"))
+}
+
+/// Drops a raw table and the views ETL manages for it, ignoring failures.
+pub async fn drop_table_and_views(sql: &SqlClient<AuthManager<HttpExchanger>>, table: &str) {
+    let config = test_utils::load_test_config();
+    let view = companion_name(table);
+    for name in [&view, &format!("{view}_PENDING")] {
+        let _ = sql
+            .execute_ddl(&format!(
+                "drop view if exists {}.{}.{}",
+                quote(config.database()),
+                quote(config.schema()),
+                quote(name),
+            ))
+            .await;
+    }
+    let _ = sql.drop_table(table).await;
 }
 
 pub async fn with_table_cleanup<F, Fut>(
@@ -21,24 +46,12 @@ pub async fn with_table_cleanup<F, Fut>(
     test_fn: F,
 ) where
     F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = ()>,
+    Fut: Future<Output = ()>,
 {
     let result = std::panic::AssertUnwindSafe(test_fn()).catch_unwind().await;
 
     for table in tables {
-        let config = test_utils::load_test_config();
-        let view = companion_name(table);
-        for name in [&view, &format!("{view}_PENDING")] {
-            let _ = sql
-                .execute_ddl(&format!(
-                    "drop view if exists {}.{}.{}",
-                    quote(config.database()),
-                    quote(config.schema()),
-                    quote(name),
-                ))
-                .await;
-        }
-        let _ = sql.drop_table(table).await;
+        drop_table_and_views(sql, table).await;
     }
 
     if let Err(e) = result {

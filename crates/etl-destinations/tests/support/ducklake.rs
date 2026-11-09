@@ -8,6 +8,8 @@ use std::{
 
 use duckdb::{Config, Connection};
 use etl::config::{PgConnectionConfig, TcpKeepaliveConfig};
+use etl_destinations::ducklake::DuckLakeTableName;
+use etl_maintenance::ducklake::RedactedDuckDbError;
 use etl_postgres::{
     test_utils::{local_tls_config_from_env, test_database_port_from_env},
     tokio::test_utils::PgDatabase,
@@ -156,6 +158,53 @@ pub fn catalog_attach_target(catalog_url: &Url) -> String {
 
 pub fn path_to_file_url(path: &Path) -> Url {
     Url::from_file_path(path).expect("failed to convert path to file url")
+}
+
+/// Opens a DuckLake verification connection using blocking DuckDB APIs.
+///
+/// Production async code must wrap equivalent DuckDB work in
+/// `run_duckdb_blocking`.
+pub fn open_lake_conn(catalog: &Url, data: &Url) -> Connection {
+    let conn = open_verification_connection();
+    let catalog_attach_target = catalog_attach_target(catalog);
+    conn.execute_batch(&format!(
+        "{} attach {} as {} (data_path {}, automatic_migration false);",
+        ducklake_load_sql(),
+        quote_literal(&format!("ducklake:{catalog_attach_target}")),
+        quote_identifier("lake"),
+        quote_literal(data.as_str())
+    ))
+    .map_err(RedactedDuckDbError::from)
+    .unwrap();
+
+    conn
+}
+
+/// Forces DuckLake to checkpoint catalog metadata before cross-connection
+/// verification.
+///
+/// These end-to-end tests shut the destination down and then attach a fresh
+/// DuckDB connection to verify the final lake state. Without an explicit
+/// checkpoint here, that new connection can observe stale catalog metadata for
+/// a short period even though the pipeline shutdown has already completed,
+/// which makes the assertions flaky in CI. Running `checkpoint` makes the final
+/// durable state visible to the verification connection deterministically.
+///
+/// Production async code must wrap equivalent blocking DuckDB work in
+/// `run_duckdb_blocking`.
+pub fn checkpoint_lake(catalog: &Url, data: &Url) {
+    let conn = open_lake_conn(catalog, data);
+    conn.execute_batch("checkpoint").map_err(RedactedDuckDbError::from).unwrap();
+}
+
+/// Returns the quoted `lake.schema.table` name of a DuckLake table.
+pub fn qualified_lake_table_name(table_name: &DuckLakeTableName) -> String {
+    format!(
+        "{}.{}.{}",
+        quote_identifier("lake"),
+        quote_identifier(table_name.schema()),
+        quote_identifier(table_name.table())
+    )
 }
 
 async fn create_catalog_database() -> (PgDatabase<Client>, Url) {

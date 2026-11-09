@@ -1,0 +1,97 @@
+name: BigQuery nightly tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      property-budget-secs:
+        description: Per-property wall-clock budget in seconds.
+        type: string
+        default: '300'
+  schedule:
+    # Run paid property tests once a day, away from the top of the hour.
+    - cron: "47 4 * * *"
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Tests (BigQuery nightly)
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 60
+    env:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_PORT: 5430
+      POSTGRES_HOST: localhost
+      TESTS_DATABASE_HOST: localhost
+      TESTS_DATABASE_PORT: 5430
+      TESTS_DATABASE_USERNAME: postgres
+      TESTS_DATABASE_PASSWORD: postgres
+      TESTS_DATABASE_TLS_ENABLED: "true"
+      TESTS_DATABASE_TLS_ROOT_CERT: ${{ github.workspace }}/target/postgres-tls/root.crt
+    steps:
+      - name: Set up BigQuery credentials
+        env:
+          TESTS_BIGQUERY_PROJECT_ID: ${{ secrets.TESTS_BIGQUERY_PROJECT_ID }}
+          TESTS_BIGQUERY_SA_KEY_JSON: ${{ secrets.TESTS_BIGQUERY_SA_KEY_JSON }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "$TESTS_BIGQUERY_SA_KEY_JSON" || -z "$TESTS_BIGQUERY_PROJECT_ID" ]]; then
+            echo '::error::BigQuery nightly tests require both the project ID and service-account JSON'
+            exit 1
+          fi
+          umask 077
+          printf '%s' "$TESTS_BIGQUERY_SA_KEY_JSON" > "$RUNNER_TEMP/bigquery-sa-key.json"
+          {
+            echo "TESTS_BIGQUERY_SA_KEY_PATH=$RUNNER_TEMP/bigquery-sa-key.json"
+            echo "TESTS_BIGQUERY_PROJECT_ID=$TESTS_BIGQUERY_PROJECT_ID"
+            echo "REQUIRE_BIGQUERY_CREDENTIALS=true"
+          } >> "$GITHUB_ENV"
+
+      - name: Check out source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          rustflags: ''
+          cache-key: test-bigquery-nightly
+          cache-on-failure: false
+          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Start Postgres
+        run: |
+          POSTGRES_IMAGE=postgres:18 \
+          POSTGRES_VERSION=18 \
+            cargo --locked xtask postgres start --shards 1 --source-only
+
+      - name: Install nextest
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-nextest@0.9.148
+
+      # Pull-request CI runs every BigQuery test except the ignored ones,
+      # which make too many paid calls to run on every change. The binary
+      # filter keeps the lib's ignored known-defect tests out of this run.
+      - name: Run ignored BigQuery tests
+        env:
+          PROPERTY_TEST_BUDGET_SECS: ${{ inputs.property-budget-secs || '300' }}
+        run: |
+          cargo --locked nextest run -p etl-destinations --features bigquery,test-utils \
+            --run-ignored only -E 'binary_id(etl-destinations::main) & test(/^bigquery::/)'
+
+      - name: Remove BigQuery credentials
+        if: always()
+        run: rm -f "$RUNNER_TEMP/bigquery-sa-key.json"

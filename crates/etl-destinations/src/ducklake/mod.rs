@@ -1,3 +1,15 @@
+//! DuckLake replication with managed table layouts.
+//!
+//! Explicit sorting and partitioning rules are reconciled at startup, table
+//! creation, source schema changes, and hourly while the destination is
+//! running. The hourly task uses the configuration loaded at startup and never
+//! resets or creates tables. Configuration changes require a new destination
+//! instance. Layout reconciliation preserves historical files; flush and
+//! compaction apply the active sort order according to the configured
+//! maintenance policy.
+//! Failed layout updates on applied tables remain pending for retry without
+//! failing otherwise valid writes. Creation and schema recovery remain strict.
+
 mod batches;
 mod client;
 mod config;

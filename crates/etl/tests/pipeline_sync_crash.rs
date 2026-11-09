@@ -13,6 +13,11 @@ use etl::{
     pipeline::PipelineId,
     store::{PostgresStore, StateStore, TableStateType},
     test_utils::{
+        cdc_workload::{
+            AfterFaultStep, DeliveryOrder, TxPhase, WORKLOAD_PUBLICATION, WORKLOAD_TIMEOUT,
+            Workload, WorkloadCoverage, WorkloadRunner, assert_workload_converged,
+            create_workload_tables, read_source_rows, sync_workloads,
+        },
         database::spawn_source_database,
         faults::{FaultyOp, HoldHandle},
         memory_destination::MemoryDestination,
@@ -26,12 +31,6 @@ use etl_postgres::tokio::test_utils::PgDatabase;
 use etl_telemetry::tracing::init_test_tracing;
 use proptest::prelude::*;
 use tokio_postgres::Client;
-
-use crate::support::cdc_workload::{
-    AfterFaultStep, DeliveryOrder, TxPhase, WORKLOAD_PUBLICATION, WORKLOAD_TIMEOUT, Workload,
-    WorkloadCoverage, WorkloadRunner, assert_workload_converged, create_workload_tables,
-    read_source_rows, sync_workloads,
-};
 
 /// How long the catchup crash waits for an event write before crashing anyway.
 ///
