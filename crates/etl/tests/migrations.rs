@@ -5,6 +5,7 @@ use etl::{
         BatchConfig, IntoConnectOptions, InvalidatedSlotBehavior, MemoryBackpressureConfig,
         PgConnectionConfig, PgConnectionOptions, PipelineConfig, TableSyncCopyConfig,
     },
+    migrations::run_migrations,
     pipeline::Pipeline,
     postgres::migrations::{ETL_SCHEMA_LOCK_ID, run_source_migrations},
     store::{MemoryStore, PostgresStore, StateStore, WorkerType},
@@ -16,6 +17,7 @@ use etl_postgres::{
 };
 use etl_telemetry::tracing::init_test_tracing;
 use sqlx::{Connection, Executor, PgConnection, migrate::Migrator, postgres::PgConnectOptions};
+use tokio::try_join;
 use tokio_postgres::{Client, types::PgLsn};
 use uuid::Uuid;
 
@@ -1305,8 +1307,10 @@ async fn migration_only_upgrades_stopped_sources() {
     .unwrap();
     drop(conn);
 
-    etl::migrations::run_migrations(&database.config, None).await.unwrap();
-    etl::migrations::run_migrations(&database.config, None).await.unwrap();
+    // Startup and an operator Job can reach the same database together.
+    try_join!(run_migrations(&database.config, None), run_migrations(&database.config, None))
+        .unwrap();
+    run_migrations(&database.config, None).await.unwrap();
 
     assert!(source_helper_exists(&database).await);
     assert!(
