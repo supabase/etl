@@ -13,6 +13,12 @@ const GREEN: &str = "\x1b[32m";
 const YELLOW: &str = "\x1b[33m";
 const RESET: &str = "\x1b[0m";
 const SNOWFLAKE_CONNECTION_ENV: &str = "TESTS_SNOWFLAKE_CONNECTION";
+/// Wall-clock budget variable read by the shared property runner.
+const PROPERTY_TEST_BUDGET_ENV: &str = "PROPERTY_TEST_BUDGET_SECS";
+/// Default budget for the credentialed run, whose only property is the
+/// crash-replay suite. A Snowflake case can take minutes to settle, so the
+/// runner's short default would allow about one case.
+const CREDENTIALED_PROPERTY_BUDGET_SECS: &str = "300";
 
 #[derive(Args)]
 pub(crate) struct TestSnowflakeArgs {
@@ -89,7 +95,13 @@ impl TestSnowflakeArgs {
             DefaultFeatureBehavior::CargoDefault,
         )
         .arg("snowflake");
-        with_pg_env(maybe_with_sccache(tests, sccache), &pg_env).run()?;
+        // Only the credentialed run gets the longer budget, so the preset's
+        // unit properties keep their short default.
+        let property_budget = std::env::var(PROPERTY_TEST_BUDGET_ENV)
+            .unwrap_or_else(|_| CREDENTIALED_PROPERTY_BUDGET_SECS.to_owned());
+        with_pg_env(maybe_with_sccache(tests, sccache), &pg_env)
+            .env(PROPERTY_TEST_BUDGET_ENV, property_budget)
+            .run()?;
 
         Ok(())
     }
