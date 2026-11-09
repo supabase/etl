@@ -39,6 +39,7 @@ ducklake = [
     "dep:serde_json",
     "dep:sqlx",
     "dep:tokio-postgres",
+    "dep:tokio-stream",
     "dep:tracing",
     "dep:tokio",
     "dep:url",
@@ -150,6 +151,7 @@ sqlx = { workspace = true, optional = true, features = ["runtime-tokio", "postgr
 thiserror = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["rt", "sync", "time"] }
 tokio-postgres = { workspace = true, optional = true }
+tokio-stream = { workspace = true, optional = true, features = ["time"] }
 tokio-util = { workspace = true }
 tonic = { workspace = true, optional = true }
 tower-service = { workspace = true, optional = true }
