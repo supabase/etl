@@ -291,8 +291,8 @@ fn is_cast_type_name(type_name: &str) -> bool {
 /// converts the result to the column type `typ`.
 ///
 /// Modifiers truncate or round. `bpchar` trims trailing blanks, `"char"` keeps
-/// one byte, `real` loses precision when converted to another type, and
-/// integer casts round fractions for non-integer columns.
+/// one byte, `name` keeps 63 bytes, `real` loses precision when converted to
+/// another type, and integer casts round fractions for non-integer columns.
 ///
 /// Some conversions read settings of the session that evaluates the default,
 /// so the value they store is not fixed. A text-like column stores another
@@ -301,8 +301,10 @@ fn is_cast_type_name(type_name: &str) -> bool {
 /// it only keeps casts to text types and to schema-qualified types. ETL reads
 /// defaults with `search_path = pg_catalog`, so only user-defined types, such
 /// as the enums ETL replicates as text, are qualified. A domain over a
-/// session-dependent type still passes. Conversions to or from `timestamp with
-/// time zone`, and from `time` to `time with time zone`, read `TimeZone`.
+/// session-dependent type still passes. A temporal or interval column parses
+/// text with `DateStyle`, `IntervalStyle`, or `TimeZone`, so it keeps no text
+/// casts. Conversions to or from `timestamp with time zone`, and from `time`
+/// to `time with time zone`, read `TimeZone`.
 fn is_value_preserving_cast(type_name: &str, typ: &Type) -> bool {
     if type_name.contains('(') {
         return false;
@@ -311,7 +313,8 @@ fn is_value_preserving_cast(type_name: &str, typ: &Type) -> bool {
     let type_name = type_name.to_ascii_lowercase();
     if is_text_type(typ) {
         return match type_name.as_str() {
-            "text" | "character varying" | "varchar" | "name" => *typ != Type::CHAR,
+            "text" | "character varying" | "varchar" => *typ != Type::CHAR && *typ != Type::NAME,
+            "name" => *typ == Type::NAME,
             "bpchar" | "character" | "char" => *typ == Type::BPCHAR,
             "\"char\"" => *typ == Type::CHAR,
             user_type => user_type.contains('.'),
@@ -319,6 +322,8 @@ fn is_value_preserving_cast(type_name: &str, typ: &Type) -> bool {
     }
 
     match type_name.as_str() {
+        "text" | "character varying" | "varchar" | "name" => !is_temporal_type(typ),
+        "bpchar" | "character" | "char" | "\"char\"" => false,
         "real" | "float4" => *typ == Type::FLOAT4,
         "timestamp with time zone" | "timestamptz" => *typ == Type::TIMESTAMPTZ,
         "timestamp without time zone" | "timestamp" | "date" => *typ != Type::TIMESTAMPTZ,
@@ -328,6 +333,19 @@ fn is_value_preserving_cast(type_name: &str, typ: &Type) -> bool {
         }
         _ => true,
     }
+}
+
+/// Returns whether a Postgres type parses text with session settings.
+fn is_temporal_type(typ: &Type) -> bool {
+    matches!(
+        typ,
+        &Type::DATE
+            | &Type::TIME
+            | &Type::TIMETZ
+            | &Type::TIMESTAMP
+            | &Type::TIMESTAMPTZ
+            | &Type::INTERVAL
+    )
 }
 
 /// Returns whether a Postgres type is text-like.
@@ -821,6 +839,12 @@ mod tests {
         assert_eq!(parse_default_expression("(1.5)::integer", &Type::NUMERIC, -1), None);
         assert_eq!(parse_default_expression("1.5", &Type::INT4, -1), None);
         assert_eq!(parse_default_expression("'1.5'::numeric", &Type::INT8, -1), None);
+        // `int4("char")` stores the byte code, 53 for `'5'`.
+        assert_eq!(parse_default_expression("('5'::\"char\")::integer", &Type::INT4, -1), None);
+        assert_eq!(parse_default_expression("('5'::bpchar)::integer", &Type::INT4, -1), None);
+        // `name` keeps 63 bytes.
+        let long_name = format!("(('{}'::text)::name)::text", "a".repeat(70));
+        assert_eq!(parse_default_expression(&long_name, &Type::TEXT, -1), None);
         assert_eq!(
             parse_default_expression("'42'::integer", &Type::INT8, -1),
             Some(DefaultExpression::NumericLiteral("42".to_owned()))
@@ -842,6 +866,10 @@ mod tests {
             ("'\\x00ff'::bytea", Type::TEXT),
             ("'2026-01-02 03:04:05+00'::timestamp with time zone", Type::TEXT),
             ("'abc'::text", Type::CHAR),
+            // A temporal or interval column parses text with session settings.
+            ("('01/02/2026'::text)::date", Type::DATE),
+            ("('2026-01-02 03:04:05'::text)::timestamp with time zone", Type::TIMESTAMPTZ),
+            ("('-1 2:00:00'::character varying)::interval", Type::INTERVAL),
         ] {
             assert_eq!(parse_default_expression(expression, &typ, -1), None, "{expression} {typ}");
         }
@@ -855,7 +883,7 @@ mod tests {
             Some(DefaultExpression::TimeTzLiteral("'12:00:00+02'".to_owned()))
         );
         assert_eq!(
-            parse_default_expression("'ab'::name", &Type::TEXT, -1),
+            parse_default_expression("'ab'::character varying", &Type::TEXT, -1),
             Some(DefaultExpression::StringLiteral("'ab'".to_owned()))
         );
         // ETL replicates enums as text, and their output is fixed.
