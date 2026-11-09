@@ -18,12 +18,10 @@ use crate::{
     },
 };
 
-/// Unsynchronized contents and operations of an in-memory store.
+/// Unsynchronized in-memory store contents and operations.
 ///
-/// [`MemoryStore`] guards one instance with a mutex. The test-only notifying
-/// store guards one together with its observers under a single lock, so
-/// observers see every update. Both stores share these operations so their
-/// store semantics cannot drift apart.
+/// Callers supply the lock, so the test notifying store can check its
+/// observers atomically with each update while sharing these semantics.
 #[derive(Debug, Default)]
 pub(crate) struct MemoryStoreData {
     /// Current state for each table.
@@ -207,10 +205,6 @@ pub struct MemoryStore {
 
 impl MemoryStore {
     /// Creates a new empty memory store.
-    ///
-    /// The store initializes with empty collections for all state and schema
-    /// data. As the pipeline runs, it will populate these collections with
-    /// table state and schema information.
     pub fn new() -> Self {
         Self::default()
     }
@@ -281,11 +275,6 @@ impl StateStore for MemoryStore {
 }
 
 impl SchemaStore for MemoryStore {
-    /// Returns the table schema for the given table at the specified snapshot
-    /// point.
-    ///
-    /// Returns the newest schema version at or before the requested snapshot.
-    /// For [`MemoryStore`], this only looks in the in-memory cache.
     async fn get_table_schema(
         &self,
         table_id: &TableId,
