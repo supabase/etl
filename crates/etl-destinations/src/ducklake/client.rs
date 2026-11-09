@@ -1919,7 +1919,11 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    // Paused time fires the watchdog deadline alone before the test wakes.
+    // With a real clock, a runner stall can expire both timers in one driver
+    // turn, and the test then signals before the watchdog observes its
+    // deadline.
+    #[tokio::test(start_paused = true)]
     async fn query_watchdog_signal_order_matrix_does_not_deadlock() {
         use WatchdogSignal::{DropDoneSender, DropInterruptSender, Finish, PublishInterrupt};
 
