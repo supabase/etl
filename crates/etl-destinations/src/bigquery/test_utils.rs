@@ -297,10 +297,11 @@ impl BigQueryDatabase {
 
     /// Runs one uncached query of `columns` from the table's current view.
     ///
-    /// Returns no rows while the table is missing, since a table read right
-    /// after it was created or replaced can report a stale NOT_FOUND. Unlike
-    /// [`BigQueryDatabase::query_table`], it neither waits for rows nor
-    /// retries failures, so callers that expect a particular state poll it.
+    /// Returns a missing table as an error rather than as no rows. A table
+    /// read right after it was created or replaced can report a stale
+    /// NOT_FOUND, so callers that expect a particular state poll this and
+    /// retry errors. Unlike [`BigQueryDatabase::query_table`], it neither
+    /// waits for rows nor retries failures.
     pub async fn query_current_rows(
         &self,
         table_name: &TableName,
@@ -310,11 +311,10 @@ impl BigQueryDatabase {
         let query =
             format!("select {columns} from `{}.{}.{}`", self.project_id, self.dataset_id, table_id);
 
-        match execute_query(&self.client, &self.project_id, uncached_query_request(query)).await {
-            Ok(response) => Ok(response.rows.unwrap_or_default()),
-            Err(error) if is_missing_table_query_error(&error) => Ok(Vec::new()),
-            Err(error) => Err(error),
-        }
+        let response =
+            execute_query(&self.client, &self.project_id, uncached_query_request(query)).await?;
+
+        Ok(response.rows.unwrap_or_default())
     }
 
     /// Polls until a query against the table reports zero visible rows.

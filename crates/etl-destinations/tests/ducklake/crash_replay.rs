@@ -86,11 +86,15 @@ impl CrashReplayTarget for DuckLakeTarget {
         checkpoint_lake(&self.lake.catalog_url, &self.lake.data_url);
         let conn = open_lake_conn(&self.lake.catalog_url, &self.lake.data_url);
 
-        // The destination creates a table on its first write, so a table the
-        // pipeline never wrote to has no rows.
+        // Table sync writes every table at least once, even when its copy is
+        // empty, so a missing table is a destination defect, not an empty one.
         let table = DuckLakeTableName::from_source(table);
         if !lake_table_exists(&conn, &table)? {
-            return Ok(Vec::new());
+            return Err(TestCaseError::fail(format!(
+                "table {}.{} is missing from the lake",
+                table.schema(),
+                table.table()
+            )));
         }
 
         let sql = format!("select id, note, counter from {}", qualified_lake_table_name(&table));

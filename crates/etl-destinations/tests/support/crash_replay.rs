@@ -216,6 +216,9 @@ pub(crate) trait CrashReplayTarget: Sized {
     async fn build_destination(&self, store: PostgresStore) -> Self::Destination;
 
     /// Reads the current rows of the destination table for `table`.
+    ///
+    /// A missing table is an error, not an empty one: table sync writes every
+    /// table at least once, so each synced table must exist.
     async fn current_rows(&self, table: &TableName) -> Result<Vec<WorkloadRecord>, TestCaseError>;
 
     /// Reads every stored version of the destination table for `table`, or
