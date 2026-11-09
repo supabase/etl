@@ -43,6 +43,9 @@ schema-change DDL.
   may fail because the logical and physical schemas have diverged. ClickHouse
   fails the schema change instead when the mapped ClickHouse type changes, or
   between `timestamp` and `timestamptz`.
+  Snowflake checks changes to scalar `json` or `jsonb` before applying the
+  schema plan and rejects them if the existing physical column is not `VARIANT`.
+  This leaves the previous schema and view intact; it does not convert the column.
   Resynchronize the table after changing a replicated column type.
 </Callout>
 

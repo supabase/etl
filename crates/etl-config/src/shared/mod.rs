@@ -1,8 +1,8 @@
 mod base;
 mod connection;
 mod destination;
+mod ducklake;
 mod health;
-mod hybrid_pipeline_id;
 mod pipeline;
 mod replicator;
 mod sentry;
@@ -23,8 +23,11 @@ pub use destination::{
     DuckLakeSortNulls, DuckLakeTableSortConfig, DuckLakeTableSortingConfig, DuckLakeWriterConfig,
     IcebergConfig, IcebergConfigWithoutSecrets,
 };
+pub use ducklake::{
+    DuckLakePartitionColumn, DuckLakePartitionTransform, DuckLakeTablePartitionConfig,
+    DuckLakeTablePartitioningConfig,
+};
 pub use health::ReplicatorHealthConfig;
-pub use hybrid_pipeline_id::HybridPipelineId;
 pub use pipeline::{
     BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PipelineConfig,
     PipelineConfigWithoutSecrets, ReplicationSlotConfig, ReplicationSlotPersistence,

@@ -2,7 +2,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    env, error, fmt,
+    env, fmt,
     path::{Path, PathBuf},
     process,
     str::FromStr,
@@ -784,7 +784,8 @@ fn build_setup_plan_with_strategy(
     Ok(DuckLakeSetupPlan { steps })
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
 struct DuckLakeConnectionError {
     message: String,
 }
@@ -806,14 +807,6 @@ impl DuckLakeConnectionError {
         Self { message: format!("DuckLake DuckDB connection validation failed: {error}") }
     }
 }
-
-impl fmt::Display for DuckLakeConnectionError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        f.write_str(&self.message)
-    }
-}
-
-impl error::Error for DuckLakeConnectionError {}
 
 fn remaining_ms_until(deadline: Instant) -> u64 {
     deadline.checked_duration_since(Instant::now()).unwrap_or(Duration::ZERO).as_millis() as u64
@@ -3168,13 +3161,25 @@ fn record_pending_inline_data_sizes(
     DuckLakePendingInlineDataSizes { inlined_bytes }
 }
 
-fn pending_inline_data_bytes_query(metadata_schema: &str) -> String {
+/// Returns the PostgreSQL query that measures one table's pending inlined size.
+///
+/// `metadata_schema` is the unquoted name of the DuckLake catalog's PostgreSQL
+/// schema and is escaped as both an identifier and a literal. Bind the source
+/// schema name to `$1` and the source table name to `$2`. The query returns one
+/// `BIGINT` containing the total relation size in bytes of the table's
+/// registered inline insert tables and its inline delete table, or zero when
+/// none exist.
+pub fn pending_inline_data_bytes_query(metadata_schema: &str) -> String {
     let metadata_schema_literal = quote_literal(metadata_schema);
     let metadata_schema = quote_identifier(metadata_schema);
     let ducklake_schema = quote_identifier("ducklake_schema");
     let ducklake_table = quote_identifier("ducklake_table");
     let ducklake_inlined_data_tables = quote_identifier("ducklake_inlined_data_tables");
 
+    // DuckLake uses one inlined insert table per (table_id, schema_version),
+    // but one inlined delete table per table_id. We therefore sum every
+    // registered inlined data table for the current table and add the single
+    // deterministic delete-table relation size.
     format!(
         r"WITH target_table AS (
              SELECT t.table_id

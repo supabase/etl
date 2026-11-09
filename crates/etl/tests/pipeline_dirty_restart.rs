@@ -17,7 +17,6 @@ use etl::{
 use etl_postgres::{slots::EtlReplicationSlot, tokio::test_utils::PgDatabase};
 use etl_telemetry::tracing::init_test_tracing;
 use proptest::prelude::*;
-use rand::random;
 use tokio_postgres::Client;
 
 use crate::support::cdc_workload::{
@@ -112,7 +111,7 @@ async fn run_dirty_restart_case(
     let destination_store = NotifyingStore::new();
     let memory_destination = MemoryDestination::new(destination_store);
     let first_destination = TestDestinationWrapper::wrap(memory_destination.clone());
-    let pipeline_id: PipelineId = u64::from(random::<u32>()).into();
+    let pipeline_id: PipelineId = etl::test_utils::pipeline::random_pipeline_id().into();
     let first_store =
         PostgresStore::new(&pipeline_id, database.config.clone()).await.map_err(|error| {
             TestCaseError::fail(format!("failed to create the first Postgres store: {error}"))

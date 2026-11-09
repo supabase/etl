@@ -2,7 +2,9 @@
 //!
 //! This module provides version constants for supported PostgreSQL versions and
 //! macros for ergonomic version comparison. Version numbers follow PostgreSQL's
-//! internal format: `MAJOR * 10000 + MINOR * 100 + PATCH`.
+//! internal format: `MAJOR * 10000 + MINOR` for PostgreSQL 10 and later, and
+//! `MAJOR * 10000 + MINOR * 100 + PATCH` for earlier releases. For example,
+//! PostgreSQL 15.5 is `150005`, while PostgreSQL 9.6.3 is `90603`.
 //!
 //! # Supported Versions
 //!
@@ -71,7 +73,7 @@ mod tests {
 
     #[test]
     fn meets_version_with_some() {
-        let version = NonZeroI32::new(150500);
+        let version = NonZeroI32::new(150005);
         assert!(meets_version(version, POSTGRES_14));
         assert!(meets_version(version, POSTGRES_15));
         assert!(!meets_version(version, POSTGRES_16));
@@ -94,9 +96,18 @@ mod tests {
         assert!(meets_version(version, POSTGRES_15));
     }
 
+    /// Parsed modern versions compare against PostgreSQL minor-release numbers.
+    #[test]
+    fn meets_version_with_parsed_minor_release() {
+        let version = crate::source::extract_server_version("15.5 (Homebrew)");
+        assert!(meets_version(version, 150004));
+        assert!(meets_version(version, 150005));
+        assert!(!meets_version(version, 150006));
+    }
+
     #[test]
     fn requires_version_macro() {
-        let version = NonZeroI32::new(160200);
+        let version = NonZeroI32::new(160002);
         assert!(requires_version!(version, POSTGRES_14));
         assert!(requires_version!(version, POSTGRES_15));
         assert!(requires_version!(version, POSTGRES_16));
@@ -106,7 +117,7 @@ mod tests {
 
     #[test]
     fn below_version_macro() {
-        let version = NonZeroI32::new(140800);
+        let version = NonZeroI32::new(140008);
         assert!(!below_version!(version, POSTGRES_14));
         assert!(below_version!(version, POSTGRES_15));
         assert!(below_version!(version, POSTGRES_16));

@@ -7,7 +7,7 @@ use utoipa::ToSchema;
 
 use crate::{
     clickhouse::ClickHouseUrl,
-    shared::{Validate, ValidationError},
+    shared::{DuckLakeTablePartitioningConfig, Validate, ValidationError},
 };
 
 const fn default_connection_pool_size() -> usize {
@@ -426,6 +426,9 @@ pub struct DuckLakeTableSortConfig {
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DuckLakeSortBy {
+    /// Explicitly remove this table's sort order.
+    None,
+
     /// Use the explicitly configured columns in their listed order.
     Columns {
         /// Ordered sort columns.
@@ -612,6 +615,10 @@ pub enum DestinationConfig {
         /// Optional per-table sort orders applied during DuckLake maintenance.
         #[serde(default, skip_serializing_if = "DuckLakeTableSortingConfig::is_empty")]
         table_sorting: DuckLakeTableSortingConfig,
+        /// Explicit per-table partition specifications; omitted tables are
+        /// preserved.
+        #[serde(default, skip_serializing_if = "DuckLakeTablePartitioningConfig::is_empty")]
+        table_partitioning: DuckLakeTablePartitioningConfig,
     },
     Snowflake {
         /// Snowflake account identifier in "ORGNAME-ACCOUNTNAME" format.
@@ -654,9 +661,12 @@ impl Validate for DestinationConfig {
         match self {
             DestinationConfig::BigQuery { table_options, .. } => table_options.validate(),
             DestinationConfig::Iceberg { config } => config.validate(),
-            DestinationConfig::Ducklake { copy_buffer, table_sorting, .. } => {
+            DestinationConfig::Ducklake {
+                copy_buffer, table_sorting, table_partitioning, ..
+            } => {
                 copy_buffer.validate()?;
-                table_sorting.validate()
+                table_sorting.validate()?;
+                table_partitioning.validate()
             }
             DestinationConfig::ClickHouse { .. } | DestinationConfig::Snowflake { .. } => Ok(()),
         }
@@ -866,6 +876,10 @@ pub enum DestinationConfigWithoutSecrets {
         /// Optional per-table sort orders applied during DuckLake maintenance.
         #[serde(default, skip_serializing_if = "DuckLakeTableSortingConfig::is_empty")]
         table_sorting: DuckLakeTableSortingConfig,
+        /// Explicit per-table partition specifications; omitted tables are
+        /// preserved.
+        #[serde(default, skip_serializing_if = "DuckLakeTablePartitioningConfig::is_empty")]
+        table_partitioning: DuckLakeTablePartitioningConfig,
     },
     Snowflake {
         /// Snowflake account identifier in "ORGNAME-ACCOUNTNAME" format.
@@ -889,9 +903,15 @@ impl Validate for DestinationConfigWithoutSecrets {
                 table_options.validate()
             }
             DestinationConfigWithoutSecrets::Iceberg { config } => config.validate(),
-            DestinationConfigWithoutSecrets::Ducklake { copy_buffer, table_sorting, .. } => {
+            DestinationConfigWithoutSecrets::Ducklake {
+                copy_buffer,
+                table_sorting,
+                table_partitioning,
+                ..
+            } => {
                 copy_buffer.validate()?;
-                table_sorting.validate()
+                table_sorting.validate()?;
+                table_partitioning.validate()
             }
             DestinationConfigWithoutSecrets::ClickHouse { .. }
             | DestinationConfigWithoutSecrets::Snowflake { .. } => Ok(()),
@@ -941,6 +961,7 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 maintenance_mode,
                 copy_buffer,
                 table_sorting,
+                table_partitioning,
             } => DestinationConfigWithoutSecrets::Ducklake {
                 data_path,
                 pool_size,
@@ -956,6 +977,7 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 maintenance_mode,
                 copy_buffer,
                 table_sorting,
+                table_partitioning,
             },
             DestinationConfig::Snowflake {
                 account_id,
@@ -1039,6 +1061,7 @@ mod tests {
             expire_snapshots_older_than: None,
             maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
             copy_buffer: DuckLakeCopyBufferConfig::default(),
+            table_partitioning: DuckLakeTablePartitioningConfig::default(),
             table_sorting: DuckLakeTableSortingConfig {
                 tables: vec![DuckLakeTableSortConfig {
                     schema: "public".to_owned(),

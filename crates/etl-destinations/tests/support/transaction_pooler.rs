@@ -23,8 +23,8 @@ struct ProtocolStats {
     violations: AtomicUsize,
     preparations: AtomicUsize,
     replay_epoch_queries: AtomicUsize,
-    /// Foreground sort-order reads observed on pooled connections.
-    sort_order_queries: AtomicUsize,
+    /// Foreground layout reads observed on pooled connections.
+    layout_queries: AtomicUsize,
 }
 
 /// Rejects untracked startup parameters, named statements, and preparation
@@ -101,9 +101,10 @@ impl TransactionPoolerGuard {
         self.stats.replay_epoch_queries.load(Ordering::Relaxed)
     }
 
-    /// Returns the number of pooled statements accessing foreground sort state.
-    pub fn sort_order_queries(&self) -> usize {
-        self.stats.sort_order_queries.load(Ordering::Relaxed)
+    /// Returns the number of pooled statements accessing foreground layout
+    /// state.
+    pub fn layout_queries(&self) -> usize {
+        self.stats.layout_queries.load(Ordering::Relaxed)
     }
 
     /// Joins all connections and verifies that no query required session state.
@@ -147,8 +148,11 @@ async fn forward_messages(
                 if sql.contains("__etl_replay_epochs") {
                     stats.replay_epoch_queries.fetch_add(1, Ordering::Relaxed);
                 }
-                if sql.contains("ducklake_sort_expression") {
-                    stats.sort_order_queries.fetch_add(1, Ordering::Relaxed);
+                if sql.contains("ducklake_sort_expression")
+                    || sql.contains("sort_on_insert")
+                    || sql.contains("ducklake_partition_column")
+                {
+                    stats.layout_queries.fetch_add(1, Ordering::Relaxed);
                 }
             }
         }

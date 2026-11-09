@@ -1,13 +1,14 @@
 use core::str;
 use std::{
     collections::{HashMap, HashSet},
+    fmt,
     str::FromStr,
 };
 
 use etl_postgres::type_utils::convert_type_oid_to_type;
 use postgres_replication::protocol;
 use serde::Deserialize;
-use tokio_postgres::types::PgLsn;
+use tokio_postgres::types::{PgLsn, Type};
 
 use crate::{
     bail,
@@ -421,6 +422,119 @@ pub(crate) fn parse_replica_identity_column_names(
     };
 
     Ok(column_names)
+}
+
+/// How a relation message disagrees with the decoder built from the stored
+/// table schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RelationSchemaMismatchKind {
+    /// The relation lists a different number of columns.
+    ColumnCount,
+    /// A different column name sits at the same position, so values decode
+    /// into the wrong column.
+    NameOrder,
+    /// A column type differs, but both types decode their text the same way.
+    TextCompatibleType,
+    /// A column type differs and values may decode differently.
+    Type,
+}
+
+impl RelationSchemaMismatchKind {
+    /// Returns the metric label for this kind.
+    pub(crate) fn as_label(self) -> &'static str {
+        match self {
+            Self::ColumnCount => "column_count",
+            Self::NameOrder => "name_order",
+            Self::TextCompatibleType => "text_compatible_type",
+            Self::Type => "type",
+        }
+    }
+}
+
+/// The first position where a relation message disagrees with the decoder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RelationSchemaMismatch {
+    /// How the relation disagrees.
+    kind: RelationSchemaMismatchKind,
+    /// Column names, types, and position of the disagreement.
+    detail: String,
+}
+
+impl RelationSchemaMismatch {
+    /// Returns how the relation disagrees.
+    pub(crate) fn kind(&self) -> RelationSchemaMismatchKind {
+        self.kind
+    }
+}
+
+impl fmt::Display for RelationSchemaMismatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.detail)
+    }
+}
+
+/// Returns whether ETL's text codec decodes both types to the same value.
+fn decodes_as_same_text(left: &Type, right: &Type) -> bool {
+    const STRING_TYPES: [Type; 4] = [Type::TEXT, Type::VARCHAR, Type::BPCHAR, Type::NAME];
+    STRING_TYPES.contains(left) && STRING_TYPES.contains(right)
+}
+
+/// Returns where a relation message stops matching the decoder's column order
+/// and types, if it does.
+///
+/// Masks are built by name, but tuples are decoded by position. A stored
+/// snapshot that is stale relative to the relation, for example after a
+/// column rename-swap or a type change that emitted no DDL message, can pass
+/// the name check while decoding values into the wrong column or with the
+/// wrong type. Types are compared after the same OID mapping used for stored
+/// schemas, so types ETL decodes as text still agree.
+pub(crate) fn detect_relation_schema_mismatch(
+    relation_body: &protocol::RelationBody,
+    replicated_table_schema: &ReplicatedTableSchema,
+) -> EtlResult<Option<RelationSchemaMismatch>> {
+    let relation_columns = relation_body.columns();
+    let decoder_columns = replicated_table_schema.column_schemas();
+    if relation_columns.len() != decoder_columns.len() {
+        return Ok(Some(RelationSchemaMismatch {
+            kind: RelationSchemaMismatchKind::ColumnCount,
+            detail: format!(
+                "relation lists {} columns, but the stored schema replicates {}",
+                relation_columns.len(),
+                decoder_columns.len()
+            ),
+        }));
+    }
+
+    for (index, (relation_column, decoder_column)) in
+        relation_columns.iter().zip(decoder_columns).enumerate()
+    {
+        let name = relation_column.name()?;
+        let typ = u32::try_from(relation_column.type_id()).ok().map(convert_type_oid_to_type);
+        let kind = if name != decoder_column.name {
+            RelationSchemaMismatchKind::NameOrder
+        } else if typ.as_ref() == Some(&decoder_column.typ) {
+            continue;
+        } else if typ.as_ref().is_some_and(|typ| decodes_as_same_text(typ, &decoder_column.typ)) {
+            RelationSchemaMismatchKind::TextCompatibleType
+        } else {
+            RelationSchemaMismatchKind::Type
+        };
+
+        return Ok(Some(RelationSchemaMismatch {
+            kind,
+            detail: format!(
+                "relation column {} is '{}' with type OID {}, but the stored schema has '{}' of \
+                 type {}",
+                index + 1,
+                name,
+                relation_column.type_id(),
+                decoder_column.name,
+                decoder_column.typ
+            ),
+        }));
+    }
+
+    Ok(None)
 }
 
 /// Converts a Postgres insert message into an [`InsertEvent`].
@@ -1546,6 +1660,29 @@ mod tests {
     }
 
     #[test]
+    fn build_identity_for_default_without_primary_key_is_empty() {
+        let table_schema = TableSchema::new(
+            TableId::new(42),
+            TableName::new("public".to_owned(), "test".to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false),
+                ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 2, false),
+            ],
+        );
+        let replication_mask = ReplicationMask::from_bytes(vec![1, 1]);
+        let identity = IdentityMessage {
+            primary_key_attnums: Vec::new(),
+            primary_key_condeferrable: false,
+            relreplident: "d".to_owned(),
+            replica_identity_index_attnums: Vec::new(),
+        };
+
+        let identity_mask = identity.build_identity_mask(&table_schema, &replication_mask).unwrap();
+
+        assert_eq!(identity_mask.as_slice(), &[0, 0]);
+    }
+
+    #[test]
     fn convert_tuple_to_row_rejects_missing_non_nullable_columns_for_full_rows() {
         let column_schemas = [
             ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
@@ -1632,6 +1769,34 @@ mod tests {
                 Cell::String("toast".to_owned())
             ]))
         );
+    }
+
+    #[test]
+    fn normalize_key_tuple_to_row_rejects_a_schema_without_identity_columns() {
+        // This is the failure behind #1118. A keyless partitioned root
+        // published with `publish_via_partition_root` yields an empty identity
+        // mask, while PostgreSQL enforces the leaf's replica identity, accepts
+        // the update, and emits a key image against the root. There is no
+        // column to map that image onto.
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "part_root".to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false),
+                ColumnSchema::new("value".to_owned(), Type::TEXT, -1, 2, false),
+            ],
+        ));
+        let replicated_table_schema = ReplicatedTableSchema::from_masks(
+            Arc::clone(&table_schema),
+            ReplicatedTableSchema::all(Arc::clone(&table_schema)).replication_mask().clone(),
+            crate::schema::IdentityMask::from_bytes(vec![0, 0]),
+        );
+        let tuple_data =
+            [TupleData::Text(b"1".to_vec().into()), TupleData::Text(b"after".to_vec().into())];
+
+        let error = normalize_key_tuple_to_row(&replicated_table_schema, &tuple_data).unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::ConversionError);
     }
 
     #[test]

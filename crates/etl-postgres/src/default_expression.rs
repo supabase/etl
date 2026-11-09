@@ -47,7 +47,9 @@ pub fn parse_default_expression(
         return None;
     }
 
-    if is_unsupported_portability_boundary(expression) {
+    // A lone string literal's contents are data, not SQL, so text such as
+    // `'select ::'` must not trip the expression checks.
+    if !is_string_literal(expression) && is_unsupported_portability_boundary(expression) {
         return None;
     }
 
@@ -719,6 +721,10 @@ mod tests {
             None
         );
         assert_eq!(
+            parse_default_expression("nextval('users_id_seq'::regclass)", &Type::INT8, -1),
+            None
+        );
+        assert_eq!(
             parse_default_expression("array['a', 'b']::text[]", &Type::TEXT_ARRAY, -1),
             None
         );
@@ -726,6 +732,18 @@ mod tests {
 
         for expression in ["'", "('", "(('a'", "'a", "'a'::", "((1 + 2"] {
             assert_eq!(parse_default_expression(expression, &Type::TEXT, -1), None);
+        }
+    }
+
+    #[test]
+    fn string_literals_may_contain_expression_keywords() {
+        for value in ["::", "a::b", "select 1", "nextval(x)", "array[1]", "array x"] {
+            let default = format!("'{value}'::text");
+            assert_eq!(
+                parse_default_expression(&default, &Type::TEXT, -1),
+                Some(DefaultExpression::StringLiteral(format!("'{value}'"))),
+                "{default}"
+            );
         }
     }
 

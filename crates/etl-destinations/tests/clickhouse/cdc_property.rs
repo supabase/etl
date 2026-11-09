@@ -758,15 +758,6 @@ fn postgres_text_default(value: &str) -> String {
     format!("'{}'::text", value.replace('\'', "''"))
 }
 
-/// Returns whether the shared default parser drops `value` as non-portable.
-///
-/// The parser skips defaults containing `::` or `select ` even inside a
-/// string literal, so ClickHouse evaluates the column's type default instead.
-/// That loss is a deliberate conservative choice, not a quoting defect.
-fn default_dropped_by_design(value: &str) -> bool {
-    value.contains("::") || value.to_ascii_lowercase().contains("select ")
-}
-
 /// User-column values of one row read back in column position order.
 #[derive(Debug, clickhouse::Row, serde::Deserialize)]
 struct QuotedRow {
@@ -863,9 +854,7 @@ async fn quoted_names_and_defaults_roundtrip(engine: ClickHouseEngine) {
                 prop_assert_eq!(&rows[0].quoted_values, &written);
                 prop_assert_eq!(rows[1].id, 2);
                 for ((name, default), stored) in columns.iter().zip(&rows[1].quoted_values) {
-                    if !(stored == default
-                        || default_dropped_by_design(default) && stored.is_empty())
-                    {
+                    if stored != default {
                         return Err(TestCaseError::fail(format!(
                             "column {name:?} default {default:?} evaluated to {stored:?}"
                         )));

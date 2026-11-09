@@ -20,7 +20,7 @@ use etl::{
     destination::{DestinationWriteStatus, WriteEventsDurability},
     error::ErrorKind,
     event::{Event, EventType, InsertEvent},
-    pipeline::LegacyPipelineId,
+    pipeline::PipelineId,
     schema::{ColumnSchema, PgLsn, ReplicatedTableSchema, TableId, TableName, TableSchema, Type},
     store::{SchemaStore, TableStateType},
     test_utils::{
@@ -28,7 +28,7 @@ use etl::{
         destination::{write_events, write_table_rows},
         event::EventCondition,
         notifying_store::NotifyingStore,
-        pipeline::create_pipeline,
+        pipeline::{create_pipeline, random_pipeline_id},
         test_destination_wrapper::TestDestinationWrapper,
     },
 };
@@ -36,7 +36,7 @@ use etl_destinations::snowflake::{
     AuthManager, CdcMeta, CdcOperation, ChannelStatusResponse, Client, Destination, Error,
     HttpExchanger, InsertRowsResponse, OffsetToken, OpenChannelResponse, RestStreamClient, Result,
     RowBatch, RowBatchBuilder, SnowpipeError, SqlClient, StreamClient,
-    test_utils::{load_test_config, query_rows},
+    test_utils::{load_test_config, query_rows, random_text, structured_text},
 };
 use sha2::{Digest, Sha256};
 
@@ -128,15 +128,12 @@ struct Harness {
 
 impl Harness {
     fn new(store: NotifyingStore) -> Self {
-        Self::with_legacy_pipeline_id(store, 1)
+        Self::with_pipeline_id(store, "1".into())
     }
 
     /// Constructs a harness with a distinct identity for a real source
     /// pipeline.
-    fn with_legacy_pipeline_id(
-        store: NotifyingStore,
-        legacy_pipeline_id: LegacyPipelineId,
-    ) -> Self {
+    fn with_pipeline_id(store: NotifyingStore, pipeline_id: PipelineId) -> Self {
         let config = load_test_config().clone_without_credentials();
         let auth = build_auth();
         let http = reqwest::Client::new();
@@ -154,7 +151,7 @@ impl Harness {
             Arc::clone(&stream),
             config.database().to_owned(),
             config.schema().to_owned(),
-            legacy_pipeline_id,
+            pipeline_id,
         );
         let destination = Destination::new(client, store.clone());
         Self {
@@ -236,39 +233,6 @@ fn insert_event(schema: &ReplicatedTableSchema, lsn: u64, ordinal: u64, row: Tab
         replicated_table_schema: schema.clone(),
         table_row: row,
     })
-}
-
-fn random_text(len: usize, seed: u64) -> String {
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    let mut state = seed;
-    (0..len)
-        .map(|_| {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            ALPHABET[((state >> 33) % 62) as usize] as char
-        })
-        .collect()
-}
-
-/// 256-byte records, each with `random_len` random letters and fixed
-/// structure. 88 random letters compress about 3.8x, 40 about 6x.
-fn structured_text(len: usize, seed: u64, random_len: usize) -> String {
-    let random = random_text((len / 256 + 1) * random_len, seed);
-    let mut payload = String::with_capacity(len + 256);
-    for chunk in random.as_bytes().chunks_exact(random_len) {
-        let start = payload.len();
-        payload.push_str("{\"token\":\"");
-        payload.push_str(std::str::from_utf8(chunk).unwrap());
-        payload.push_str("\",\"padding\":\"");
-        while payload.len() < start + 253 {
-            payload.push('0');
-        }
-        payload.push_str("\"}\n");
-        if payload.len() >= len {
-            break;
-        }
-    }
-    payload.truncate(len);
-    payload
 }
 
 fn sha256_hex(payload: &str) -> String {
@@ -468,14 +432,14 @@ async fn large_rows_survive_copy_insert_and_full_replica_identity_update() {
     .await
     .unwrap();
 
-    let legacy_pipeline_id = rand::random::<u64>();
-    let harness = Harness::with_legacy_pipeline_id(NotifyingStore::new(), legacy_pipeline_id);
+    let pipeline_id: PipelineId = random_pipeline_id().into();
+    let harness = Harness::with_pipeline_id(NotifyingStore::new(), pipeline_id.clone());
     let sf_table = snowflake_table_name(&name.schema, &name.name);
     with_table_cleanup(&harness.sql, &[&sf_table], || async {
         let destination = TestDestinationWrapper::wrap(harness.destination.clone());
         let mut pipeline = create_pipeline(
             &database.config,
-            legacy_pipeline_id,
+            pipeline_id,
             publication.into(),
             harness.store.clone(),
             destination.clone(),

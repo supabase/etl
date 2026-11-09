@@ -19,7 +19,7 @@ use crate::{
 };
 
 /// Inner state of [`MemoryStore`].
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct Inner {
     /// Current table state for each table - this is the authoritative source of
     /// truth for table states. Every table being replicated must have an entry
@@ -48,7 +48,7 @@ struct Inner {
 /// All state information, including table states, schema definitions, and
 /// destination table metadata are stored in memory and will be lost on process
 /// restart.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct MemoryStore {
     inner: Arc<Mutex<Inner>>,
 }
@@ -60,21 +60,7 @@ impl MemoryStore {
     /// data. As the pipeline runs, it will populate these collections with
     /// table state and schema information.
     pub fn new() -> Self {
-        let inner = Inner {
-            table_states: Arc::new(BTreeMap::new()),
-            table_state_history: HashMap::new(),
-            table_schemas: Arc::new(TableSchemaSnapshots::default()),
-            destination_tables_metadata: Arc::new(BTreeMap::new()),
-            replication_checkpoints: HashMap::new(),
-        };
-
-        Self { inner: Arc::new(Mutex::new(inner)) }
-    }
-}
-
-impl Default for MemoryStore {
-    fn default() -> Self {
-        Self::new()
+        Self::default()
     }
 }
 
@@ -248,18 +234,9 @@ impl TableStateLifecycleStore for MemoryStore {
                 let inner = &mut *guard;
 
                 let states = Arc::make_mut(&mut inner.table_states);
-                let table_ids = states.keys().copied().collect::<Vec<_>>();
-
-                for table_id in table_ids {
-                    if let Some(current_state) = states.get(&table_id).cloned() {
-                        inner
-                            .table_state_history
-                            .entry(table_id)
-                            .or_insert_with(Vec::new)
-                            .push(current_state);
-                    }
-
-                    states.insert(table_id, TableState::Init);
+                for (&table_id, state) in states.iter_mut() {
+                    let previous = std::mem::replace(state, TableState::Init);
+                    inner.table_state_history.entry(table_id).or_default().push(previous);
                 }
 
                 inner.replication_checkpoints.remove(&WorkerType::Apply);

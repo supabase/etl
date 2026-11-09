@@ -177,7 +177,7 @@ async fn state_store_operations() {
     init_test_tracing();
 
     let database = spawn_source_database().await;
-    let pipeline_id = 1;
+    let pipeline_id = "1";
     let table_id = TableId::new(12345);
 
     let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
@@ -235,7 +235,7 @@ async fn state_store_rollback() {
     init_test_tracing();
 
     let database = spawn_source_database().await;
-    let pipeline_id = 1;
+    let pipeline_id = "1";
     let table_id = TableId::new(12345);
 
     let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
@@ -253,9 +253,9 @@ async fn state_store_rollback() {
         .await
         .expect("Failed to connect to source database with sqlx");
     let count_before: i64 = sqlx::query_scalar(
-        "select count(*) from etl.replication_state where pipeline_id = $1 and table_id = $2",
+        "select count(*) from etl.replication_state where pipeline_id_v2 = $1 and table_id = $2",
     )
-    .bind(pipeline_id as i64)
+    .bind(pipeline_id)
     .bind(SqlxTableId(table_id.into_inner()))
     .fetch_one(&pool)
     .await
@@ -276,9 +276,9 @@ async fn state_store_rollback() {
 
     // Verify the rolled-from row was deleted to avoid buildup
     let count_after: i64 = sqlx::query_scalar(
-        "select count(*) from etl.replication_state where pipeline_id = $1 and table_id = $2",
+        "select count(*) from etl.replication_state where pipeline_id_v2 = $1 and table_id = $2",
     )
-    .bind(pipeline_id as i64)
+    .bind(pipeline_id)
     .bind(SqlxTableId(table_id.into_inner()))
     .fetch_one(&pool)
     .await
@@ -295,10 +295,10 @@ async fn state_store_rollback() {
 #[tokio::test(flavor = "multi_thread")]
 async fn state_store_replication_checkpoint_is_monotonic_and_cached() {
     let database = spawn_source_database().await;
-    let store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    let store = PostgresStore::new("1", database.config.clone()).await.unwrap();
     store.load_cache().await.unwrap();
 
-    let other_pipeline = PostgresStore::new(2, database.config.clone()).await.unwrap();
+    let other_pipeline = PostgresStore::new("2", database.config.clone()).await.unwrap();
     other_pipeline
         .upsert_replication_checkpoint(WorkerType::Apply, PgLsn::from(999))
         .await
@@ -336,7 +336,7 @@ async fn state_store_replication_checkpoint_is_monotonic_and_cached() {
     drop(cloned_store);
     drop(store);
 
-    let store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    let store = PostgresStore::new("1", database.config.clone()).await.unwrap();
     assert_eq!(
         store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(),
         Some(PgLsn::from(120))
@@ -363,7 +363,7 @@ async fn state_store_replication_checkpoint_is_monotonic_and_cached() {
 #[tokio::test(flavor = "multi_thread")]
 async fn checkpoint_cache_recovers_after_rejected_mutations() {
     let database = spawn_source_database().await;
-    let store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    let store = PostgresStore::new("1", database.config.clone()).await.unwrap();
     let saved = PgLsn::from(100u64);
     store.upsert_replication_checkpoint(WorkerType::Apply, saved).await.unwrap();
     let client = database.client.as_ref().unwrap();
@@ -406,7 +406,7 @@ async fn checkpoint_cache_recovers_after_rejected_mutations() {
 async fn cancelled_checkpoint_delete_reloads_before_cache_access() {
     for (commit, reject) in [(false, false), (true, false), (true, true)] {
         let database = spawn_source_database().await;
-        let store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+        let store = PostgresStore::new("1", database.config.clone()).await.unwrap();
         let client = database.client.as_ref().unwrap();
 
         store.upsert_replication_checkpoint(WorkerType::Apply, PgLsn::from(100)).await.unwrap();
@@ -448,7 +448,7 @@ async fn cancelled_checkpoint_delete_reloads_before_cache_access() {
         // interrupted transaction, then interrupt that reload as well.
         // Successful COMMIT also exercises a replacement owner's recovery.
         let reader = if commit && !reject {
-            PostgresStore::new(1, database.config.clone()).await.unwrap()
+            PostgresStore::new("1", database.config.clone()).await.unwrap()
         } else {
             store.clone()
         };
@@ -462,7 +462,7 @@ async fn cancelled_checkpoint_delete_reloads_before_cache_access() {
         assert!(read.await.unwrap_err().is_cancelled());
 
         // Another pipeline is not blocked by this pipeline's recovery.
-        let other = PostgresStore::new(2, database.config.clone()).await.unwrap();
+        let other = PostgresStore::new("2", database.config.clone()).await.unwrap();
         tokio::time::timeout(
             INDEPENDENT_PIPELINE_TIMEOUT,
             other.upsert_replication_checkpoint(WorkerType::Apply, PgLsn::from(999)),
@@ -517,7 +517,7 @@ async fn cancelled_schema_commit_finishes_before_pruning() {
             .await
             .unwrap();
 
-        let store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+        let store = PostgresStore::new("1", database.config.clone()).await.unwrap();
         let schema = create_sample_table_schema();
         let boundaries = BTreeMap::from([(schema.id, test_snapshot_id(200, 200))]);
 
@@ -588,7 +588,7 @@ async fn cancelled_schema_commit_finishes_before_pruning() {
 #[tokio::test(flavor = "multi_thread")]
 async fn cancelled_table_delete_refreshes_all_caches() {
     let database = spawn_source_database().await;
-    let store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    let store = PostgresStore::new("1", database.config.clone()).await.unwrap();
     let client = database.client.as_ref().unwrap();
     let schema = create_sample_table_schema();
     let worker = WorkerType::TableSync { table_id: schema.id };
@@ -655,7 +655,7 @@ async fn cancelled_table_delete_refreshes_all_caches() {
 /// Healthy reads and genuine missing entries then remain in memory.
 #[tokio::test(flavor = "multi_thread")]
 async fn cache_preparation_loads_every_domain() {
-    for (explicit_load, pipeline_id) in [(false, 1_u64), (true, u64::MAX)] {
+    for (explicit_load, pipeline_id) in [(false, "1"), (true, "03dg2o5teb2eucxr9ggh3uie6")] {
         let database = spawn_source_database().await;
         let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
         let client = database.client.as_ref().unwrap();
@@ -680,14 +680,14 @@ async fn cache_preparation_loads_every_domain() {
         let identities_match: bool = client
             .query_one(
                 "select count(*) = 5 and bool_and(
-                 pipeline_id_v2 is not null and pipeline_id_v2 = $1 and pipeline_id = $2
+                 pipeline_id_v2 = $1
              ) from (
-                 select pipeline_id, pipeline_id_v2 from etl.replication_state
-                 union all select pipeline_id, pipeline_id_v2 from etl.table_schemas
-                 union all select pipeline_id, pipeline_id_v2 from etl.destination_tables_metadata
-                 union all select pipeline_id, pipeline_id_v2 from etl.replication_progress
+                 select pipeline_id_v2 from etl.replication_state
+                 union all select pipeline_id_v2 from etl.table_schemas
+                 union all select pipeline_id_v2 from etl.destination_tables_metadata
+                 union all select pipeline_id_v2 from etl.replication_progress
              ) as state",
-                &[&pipeline_id.to_string(), &(pipeline_id as i64)],
+                &[&pipeline_id],
             )
             .await
             .unwrap()
@@ -749,7 +749,7 @@ async fn cache_preparation_loads_every_domain() {
 #[tokio::test(flavor = "multi_thread")]
 async fn cancelled_cache_reload_retries_every_domain() {
     let database = spawn_source_database().await;
-    let store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    let store = PostgresStore::new("1", database.config.clone()).await.unwrap();
     let client = database.client.as_ref().unwrap();
     let schema = create_sample_table_schema();
 
@@ -804,7 +804,7 @@ async fn cancelled_cache_reload_retries_every_domain() {
 #[tokio::test(flavor = "multi_thread")]
 async fn failed_cache_reload_retries_every_domain() {
     let database = spawn_source_database().await;
-    let store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    let store = PostgresStore::new("1", database.config.clone()).await.unwrap();
     let pool = connect_to_source_database(&database.config, 0, 1, None).await.unwrap();
     track_schema_prune_queries(&pool).await;
     let schema = create_sample_table_schema();
@@ -851,7 +851,7 @@ async fn failed_cache_reload_retries_every_domain() {
 #[tokio::test(flavor = "multi_thread")]
 async fn terminated_mutation_recovers_through_full_reload() {
     let database = spawn_source_database().await;
-    let store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    let store = PostgresStore::new("1", database.config.clone()).await.unwrap();
     let client = database.client.as_ref().unwrap();
     store.upsert_replication_checkpoint(WorkerType::Apply, PgLsn::from(100)).await.unwrap();
 
@@ -889,7 +889,7 @@ async fn terminated_mutation_recovers_through_full_reload() {
 #[tokio::test(flavor = "multi_thread")]
 async fn schema_store_upsert_replaces_columns_atomically_in_batches() {
     let database = spawn_source_database().await;
-    let store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    let store = PostgresStore::new("1", database.config.clone()).await.unwrap();
     let pool = connect_to_source_database(&database.config, 0, 1, None).await.unwrap();
     let original = create_sample_table_schema();
     store.store_table_schema(original.clone()).await.unwrap();
@@ -922,19 +922,19 @@ async fn schema_store_upsert_replaces_columns_atomically_in_batches() {
         *store.get_table_schema(&original.id, SnapshotId::max()).await.unwrap().unwrap(),
         original
     );
-    let loaded = etl_postgres::store::schema::load_table_schemas(&pool, 1).await.unwrap();
+    let loaded = etl_postgres::store::schema::load_table_schemas(&pool, "1").await.unwrap();
     assert_eq!(loaded, [original]);
 
     store.store_table_schema(wide.clone()).await.unwrap();
 
     assert_eq!(*store.get_table_schema(&wide.id, SnapshotId::max()).await.unwrap().unwrap(), wide);
-    let loaded = etl_postgres::store::schema::load_table_schemas(&pool, 1).await.unwrap();
+    let loaded = etl_postgres::store::schema::load_table_schemas(&pool, "1").await.unwrap();
     assert_eq!(loaded.as_slice(), std::slice::from_ref(&wide));
 
     wide.column_schemas.clear();
     store.store_table_schema(wide.clone()).await.unwrap();
 
-    let loaded = etl_postgres::store::schema::load_table_schemas(&pool, 1).await.unwrap();
+    let loaded = etl_postgres::store::schema::load_table_schemas(&pool, "1").await.unwrap();
     assert_eq!(loaded, [wide]);
     let counts: (i64, i64) = sqlx::query_as(
         "select (select count(*) from etl.table_schemas), (select count(*) from etl.table_columns)",
@@ -950,7 +950,7 @@ async fn schema_store_operations() {
     init_test_tracing();
 
     let database = spawn_source_database().await;
-    let pipeline_id = 1;
+    let pipeline_id = "1";
 
     let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
     let table_schema = create_sample_table_schema();
@@ -989,7 +989,7 @@ async fn schema_store_versioning() {
     init_test_tracing();
 
     let database = spawn_source_database().await;
-    let pipeline_id = 1;
+    let pipeline_id = "1";
 
     let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
     let mut table_schema = create_sample_table_schema();
@@ -1038,7 +1038,7 @@ async fn schema_store_orders_composite_snapshots_by_commit_then_message_lsn() {
     init_test_tracing();
 
     let database = spawn_source_database().await;
-    let pipeline_id = 1;
+    let pipeline_id = "1";
     let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
     let mut table_schema = create_sample_table_schema();
     let table_id = table_schema.id;
@@ -1113,7 +1113,7 @@ async fn schema_store_exclusive_checkpoint_preserves_replayed_transaction_schema
     init_test_tracing();
 
     let database = spawn_source_database().await;
-    let pipeline_id = 1;
+    let pipeline_id = "1";
     let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
     let mut table_schema = create_sample_table_schema();
     let table_id = table_schema.id;
@@ -1187,7 +1187,7 @@ async fn schema_store_exclusive_checkpoint_preserves_replayed_transaction_schema
 #[tokio::test(flavor = "multi_thread")]
 async fn schema_store_loads_retained_schemas_once() {
     let database = spawn_source_database().await;
-    let store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    let store = PostgresStore::new("1", database.config.clone()).await.unwrap();
     let schemas = [create_sample_table_schema(), create_another_table_schema()];
 
     for schema in &schemas {
@@ -1195,7 +1195,7 @@ async fn schema_store_loads_retained_schemas_once() {
     }
     drop(store);
 
-    let store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    let store = PostgresStore::new("1", database.config.clone()).await.unwrap();
     store.load_cache().await.unwrap();
     assert_eq!(store.get_table_schemas().await.unwrap().len(), 6);
 
@@ -1224,7 +1224,7 @@ async fn schema_store_prunes_obsolete_versions_from_database_and_cache() {
     init_test_tracing();
 
     let database = spawn_source_database().await;
-    let pipeline_id = 1;
+    let pipeline_id = "1";
 
     let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
     let table_id = TableId::new(12345);
@@ -1277,7 +1277,7 @@ async fn schema_store_prunes_obsolete_versions_from_database_and_cache() {
         r#"
         select id
         from etl.table_schemas
-        where pipeline_id = $1
+        where pipeline_id_v2 = $1
           and (
               (
                   table_id = $2
@@ -1302,7 +1302,7 @@ async fn schema_store_prunes_obsolete_versions_from_database_and_cache() {
           )
         "#,
     )
-    .bind(pipeline_id as i64)
+    .bind(pipeline_id)
     .bind(SqlxTableId(table_id.into_inner()))
     .bind(test_snapshot_id(200u64, 200u64).to_string())
     .bind(SqlxTableId(other_table_id.into_inner()))
@@ -1351,9 +1351,9 @@ async fn schema_store_prunes_obsolete_versions_from_database_and_cache() {
     assert_eq!(untouched_table_snapshots.len(), 2);
 
     let schema_count: i64 = sqlx::query_scalar(
-        "select count(*) from etl.table_schemas where pipeline_id = $1 and table_id = $2",
+        "select count(*) from etl.table_schemas where pipeline_id_v2 = $1 and table_id = $2",
     )
-    .bind(pipeline_id as i64)
+    .bind(pipeline_id)
     .bind(SqlxTableId(table_id.into_inner()))
     .fetch_one(&pool)
     .await
@@ -1361,9 +1361,9 @@ async fn schema_store_prunes_obsolete_versions_from_database_and_cache() {
     assert_eq!(schema_count, 2);
 
     let untouched_schema_count: i64 = sqlx::query_scalar(
-        "select count(*) from etl.table_schemas where pipeline_id = $1 and table_id = $2",
+        "select count(*) from etl.table_schemas where pipeline_id_v2 = $1 and table_id = $2",
     )
-    .bind(pipeline_id as i64)
+    .bind(pipeline_id)
     .bind(SqlxTableId(untouched_table_id.into_inner()))
     .fetch_one(&pool)
     .await
@@ -1395,7 +1395,7 @@ async fn schema_store_prunes_obsolete_versions_from_database_and_cache() {
 #[tokio::test(flavor = "multi_thread")]
 async fn schema_store_skips_successful_prune_boundaries_across_clones() {
     let database = spawn_source_database().await;
-    let store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    let store = PostgresStore::new("1", database.config.clone()).await.unwrap();
     let pool = connect_to_source_database(&database.config, 0, 1, None).await.unwrap();
     track_schema_prune_queries(&pool).await;
     let first = create_sample_table_schema();
@@ -1463,7 +1463,7 @@ async fn schema_store_skips_successful_prune_boundaries_across_clones() {
 #[tokio::test(flavor = "multi_thread")]
 async fn schema_store_retries_failed_prune_boundaries() {
     let database = spawn_source_database().await;
-    let store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    let store = PostgresStore::new("1", database.config.clone()).await.unwrap();
     let pool = connect_to_source_database(&database.config, 0, 1, None).await.unwrap();
     track_schema_prune_queries(&pool).await;
     let schema = create_sample_table_schema();
@@ -1490,7 +1490,7 @@ async fn schema_store_retries_failed_prune_boundaries() {
 #[tokio::test(flavor = "multi_thread")]
 async fn schema_store_invalidates_prune_boundaries_for_older_schema_writes() {
     let database = spawn_source_database().await;
-    let store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    let store = PostgresStore::new("1", database.config.clone()).await.unwrap();
     let pool = connect_to_source_database(&database.config, 0, 1, None).await.unwrap();
     track_schema_prune_queries(&pool).await;
     let schema = create_sample_table_schema();
@@ -1535,7 +1535,7 @@ async fn schema_store_invalidates_prune_boundaries_for_older_schema_writes() {
 #[tokio::test(flavor = "multi_thread")]
 async fn schema_store_reloads_and_restarts_retry_pruning() {
     let database = spawn_source_database().await;
-    let store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    let store = PostgresStore::new("1", database.config.clone()).await.unwrap();
     let pool = connect_to_source_database(&database.config, 0, 1, None).await.unwrap();
     track_schema_prune_queries(&pool).await;
     let schema = create_sample_table_schema();
@@ -1547,7 +1547,7 @@ async fn schema_store_reloads_and_restarts_retry_pruning() {
     assert_eq!(store.prune_table_schemas(boundaries.clone()).await.unwrap(), 0);
     assert_eq!(schema_prune_query_count(&pool).await, 2);
 
-    let restarted = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    let restarted = PostgresStore::new("1", database.config.clone()).await.unwrap();
     restarted.load_cache().await.unwrap();
     assert_eq!(restarted.prune_table_schemas(boundaries).await.unwrap(), 0);
     assert_eq!(schema_prune_query_count(&pool).await, 3);
@@ -1565,7 +1565,7 @@ async fn schema_store_reloads_and_restarts_retry_pruning() {
 #[tokio::test(flavor = "multi_thread")]
 async fn schema_store_lifecycle_changes_invalidate_prune_boundaries() {
     let database = spawn_source_database().await;
-    let store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    let store = PostgresStore::new("1", database.config.clone()).await.unwrap();
     let pool = connect_to_source_database(&database.config, 0, 1, None).await.unwrap();
     track_schema_prune_queries(&pool).await;
     let schema = create_sample_table_schema();
@@ -1591,89 +1591,91 @@ async fn schema_store_lifecycle_changes_invalidate_prune_boundaries() {
 async fn multiple_pipelines_isolation() {
     init_test_tracing();
 
-    let database = spawn_source_database().await;
-    let pipeline_id1 = 1;
-    let pipeline_id2 = 2;
-    let table_id = TableId::new(12345);
+    for pipeline_id2 in ["03dg2o5teb2eucxr9ggh3uie6", "00150"] {
+        let database = spawn_source_database().await;
+        let pipeline_id1 = "150";
+        let table_id = TableId::new(12345);
 
-    let store1 = PostgresStore::new(pipeline_id1, database.config.clone()).await.unwrap();
-    let store2 = PostgresStore::new(pipeline_id2, database.config.clone()).await.unwrap();
+        let store1 = PostgresStore::new(pipeline_id1, database.config.clone()).await.unwrap();
+        let store2 = PostgresStore::new(pipeline_id2, database.config.clone()).await.unwrap();
 
-    // Test state isolation
-    let init_state = TableState::Init;
-    store1.update_table_state(table_id, init_state.clone()).await.unwrap();
+        // Test state isolation
+        let init_state = TableState::Init;
+        store1.update_table_state(table_id, init_state.clone()).await.unwrap();
 
-    let data_sync_state = TableState::DataSync;
-    store2.update_table_state(table_id, data_sync_state.clone()).await.unwrap();
+        let data_sync_state = TableState::DataSync;
+        store2.update_table_state(table_id, data_sync_state.clone()).await.unwrap();
 
-    assert_eq!(store1.get_table_state(table_id).await.unwrap(), Some(init_state));
-    assert_eq!(store2.get_table_state(table_id).await.unwrap(), Some(data_sync_state));
+        assert_eq!(store1.get_table_state(table_id).await.unwrap(), Some(init_state));
+        assert_eq!(store2.get_table_state(table_id).await.unwrap(), Some(data_sync_state));
 
-    // Test schema isolation
-    let table_schema1 = create_sample_table_schema();
-    let table_schema2 = create_another_table_schema();
+        // Test schema isolation
+        let table_schema1 = create_sample_table_schema();
+        let table_schema2 = create_another_table_schema();
 
-    store1.store_table_schema(table_schema1.clone()).await.unwrap();
-    store2.store_table_schema(table_schema2.clone()).await.unwrap();
+        store1.store_table_schema(table_schema1.clone()).await.unwrap();
+        store2.store_table_schema(table_schema2.clone()).await.unwrap();
 
-    let schemas1 = store1.get_table_schemas().await.unwrap();
-    assert_eq!(schemas1.len(), 1);
-    assert_eq!(schemas1[0].id, table_schema1.id);
+        let schemas1 = store1.get_table_schemas().await.unwrap();
+        assert_eq!(schemas1.len(), 1);
+        assert_eq!(schemas1[0].id, table_schema1.id);
 
-    let schemas2 = store2.get_table_schemas().await.unwrap();
-    assert_eq!(schemas2.len(), 1);
-    assert_eq!(schemas2[0].id, table_schema2.id);
+        let schemas2 = store2.get_table_schemas().await.unwrap();
+        assert_eq!(schemas2.len(), 1);
+        assert_eq!(schemas2[0].id, table_schema2.id);
 
-    // Test destination table metadata isolation.
-    let metadata1 = DestinationTableMetadata::new_applied(
-        "pipeline1_table".to_owned(),
-        SnapshotId::initial(),
-        ReplicationMask::from_bytes(vec![1, 1, 1]),
-    );
-    let metadata2 = DestinationTableMetadata::new_applied(
-        "pipeline2_table".to_owned(),
-        SnapshotId::initial(),
-        ReplicationMask::from_bytes(vec![1, 1, 1]),
-    );
+        // Test destination table metadata isolation.
+        let metadata1 = DestinationTableMetadata::new_applied(
+            "pipeline1_table".to_owned(),
+            SnapshotId::initial(),
+            ReplicationMask::from_bytes(vec![1, 1, 1]),
+        );
+        let metadata2 = DestinationTableMetadata::new_applied(
+            "pipeline2_table".to_owned(),
+            SnapshotId::initial(),
+            ReplicationMask::from_bytes(vec![1, 1, 1]),
+        );
 
-    store1.store_destination_table_metadata(table_id, metadata1.clone()).await.unwrap();
-    store2.store_destination_table_metadata(table_id, metadata2.clone()).await.unwrap();
+        store1.store_destination_table_metadata(table_id, metadata1.clone()).await.unwrap();
+        store2.store_destination_table_metadata(table_id, metadata2.clone()).await.unwrap();
 
-    assert_eq!(
-        store1
-            .get_destination_table_metadata(table_id)
-            .await
-            .unwrap()
-            .map(|m| m.table_id().to_owned()),
-        Some("pipeline1_table".to_owned())
-    );
-    assert_eq!(
-        store2
-            .get_destination_table_metadata(table_id)
-            .await
-            .unwrap()
-            .map(|m| m.table_id().to_owned()),
-        Some("pipeline2_table".to_owned())
-    );
+        assert_eq!(
+            store1
+                .get_destination_table_metadata(table_id)
+                .await
+                .unwrap()
+                .map(|m| m.table_id().to_owned()),
+            Some("pipeline1_table".to_owned())
+        );
+        assert_eq!(
+            store2
+                .get_destination_table_metadata(table_id)
+                .await
+                .unwrap()
+                .map(|m| m.table_id().to_owned()),
+            Some("pipeline2_table".to_owned())
+        );
 
-    // Verify isolation persists after loading from database
-    let new_store1 = PostgresStore::new(pipeline_id1, database.config.clone()).await.unwrap();
-    new_store1.load_cache().await.unwrap();
-    assert_eq!(
-        new_store1
-            .get_destination_table_metadata(table_id)
-            .await
-            .unwrap()
-            .map(|m| m.table_id().to_owned()),
-        Some("pipeline1_table".to_owned())
-    );
+        // Verify isolation persists after loading from database
+        let new_store1 = PostgresStore::new(pipeline_id1, database.config.clone()).await.unwrap();
+        new_store1.load_cache().await.unwrap();
+        assert_eq!(
+            new_store1
+                .get_destination_table_metadata(table_id)
+                .await
+                .unwrap()
+                .map(|m| m.table_id().to_owned()),
+            Some("pipeline1_table".to_owned())
+        );
 
-    // Deleting one pipeline's state must preserve the other pipeline's state.
-    store1.delete_table_state(table_id).await.unwrap();
+        // Deleting one pipeline's state must preserve the other pipeline's
+        // state.
+        store1.delete_table_state(table_id).await.unwrap();
 
-    let new_store2 = PostgresStore::new(pipeline_id2, database.config.clone()).await.unwrap();
-    new_store2.load_cache().await.unwrap();
-    assert_eq!(new_store2.get_table_state(table_id).await.unwrap(), Some(TableState::DataSync));
+        let new_store2 = PostgresStore::new(pipeline_id2, database.config.clone()).await.unwrap();
+        new_store2.load_cache().await.unwrap();
+        assert_eq!(new_store2.get_table_state(table_id).await.unwrap(), Some(TableState::DataSync));
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1681,7 +1683,7 @@ async fn errored_state_with_different_retry_policies() {
     init_test_tracing();
 
     let database = spawn_source_database().await;
-    let pipeline_id = 1;
+    let pipeline_id = "1";
     let table_id = TableId::new(12345);
 
     let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
@@ -1717,7 +1719,7 @@ async fn state_transitions_and_history() {
     init_test_tracing();
 
     let database = spawn_source_database().await;
-    let pipeline_id = 1;
+    let pipeline_id = "1";
     let table_id = TableId::new(12345);
 
     let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
@@ -1766,7 +1768,7 @@ async fn delete_table_state_deletes_state_schema_metadata_and_progress_for_table
     init_test_tracing();
 
     let database = spawn_source_database().await;
-    let pipeline_id = 1;
+    let pipeline_id = "1";
 
     let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
 
@@ -1888,7 +1890,7 @@ async fn prepare_table_state_for_copy_preserves_state_and_deletes_copy_data() {
     init_test_tracing();
 
     let database = spawn_source_database().await;
-    let pipeline_id = 1;
+    let pipeline_id = "1";
 
     let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
 
@@ -1968,7 +1970,7 @@ async fn reset_table_states_for_resync_resets_states_and_apply_checkpoint_only()
     init_test_tracing();
 
     let database = spawn_source_database().await;
-    let pipeline_id = 1;
+    let pipeline_id = "1";
 
     let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
 
@@ -2065,7 +2067,7 @@ async fn replication_mask_loads_correctly_from_string_bytea() {
     init_test_tracing();
 
     let database = spawn_source_database().await;
-    let pipeline_id = 1;
+    let pipeline_id = "1";
     let table_id = TableId::new(12345);
     let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
 
@@ -2081,7 +2083,7 @@ async fn replication_mask_loads_correctly_from_string_bytea() {
     sqlx::query(
         r#"
         INSERT INTO etl.destination_tables_metadata
-            (pipeline_id, table_id, destination_table_id, snapshot_id, schema_status, replication_mask)
+            (pipeline_id_v2, table_id, destination_table_id, snapshot_id, schema_status, replication_mask)
         VALUES (
             $1,
             $2,
@@ -2092,7 +2094,7 @@ async fn replication_mask_loads_correctly_from_string_bytea() {
         )
         "#,
     )
-    .bind(pipeline_id as i64)
+    .bind(pipeline_id)
     .bind(SqlxTableId(table_id.into_inner()))
     .bind(&expected_mask_bytes)
     .execute(&pool)
@@ -2142,7 +2144,7 @@ async fn destination_metadata_loads_creating_and_rejects_incomplete_applying() {
     init_test_tracing();
 
     let database = spawn_source_database().await;
-    let pipeline_id = 1;
+    let pipeline_id = "1";
     let table_id = TableId::new(12346);
     // Initialize the store to run the migrations.
     PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
@@ -2151,12 +2153,12 @@ async fn destination_metadata_loads_creating_and_rejects_incomplete_applying() {
     sqlx::query(
         r#"
         insert into etl.destination_tables_metadata
-            (pipeline_id, table_id, destination_table_id, snapshot_id,
+            (pipeline_id_v2, table_id, destination_table_id, snapshot_id,
              schema_status, replication_mask)
         values ($1, $2, 'test_dest_table', '20:21', 'creating', $3::bytea)
         "#,
     )
-    .bind(i64::try_from(pipeline_id).unwrap())
+    .bind(pipeline_id)
     .bind(SqlxTableId(table_id.into_inner()))
     .bind(vec![1_u8, 1])
     .execute(&pool)
@@ -2173,10 +2175,10 @@ async fn destination_metadata_loads_creating_and_rejects_incomplete_applying() {
         r#"
         update etl.destination_tables_metadata
         set schema_status = 'applying', previous_snapshot_id = '10:11'
-        where pipeline_id = $1 and table_id = $2
+        where pipeline_id_v2 = $1 and table_id = $2
         "#,
     )
-    .bind(i64::try_from(pipeline_id).unwrap())
+    .bind(pipeline_id)
     .bind(SqlxTableId(table_id.into_inner()))
     .execute(&pool)
     .await
@@ -2193,7 +2195,7 @@ async fn replication_mask_various_patterns() {
     init_test_tracing();
 
     let database = spawn_source_database().await;
-    let pipeline_id = 1;
+    let pipeline_id = "1";
     let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
 
     let pool = connect_to_source_database(&database.config, 0, 1, None)
@@ -2225,7 +2227,7 @@ async fn replication_mask_various_patterns() {
         sqlx::query(
             r#"
             INSERT INTO etl.destination_tables_metadata
-                (pipeline_id, table_id, destination_table_id, snapshot_id, schema_status, replication_mask)
+                (pipeline_id_v2, table_id, destination_table_id, snapshot_id, schema_status, replication_mask)
             VALUES (
                 $1,
                 $2,
@@ -2236,7 +2238,7 @@ async fn replication_mask_various_patterns() {
             )
             "#,
         )
-        .bind(pipeline_id as i64)
+        .bind(pipeline_id)
         .bind(SqlxTableId(table_id.into_inner()))
         .bind(*dest_name)
         .bind(mask_bytes)
@@ -2273,7 +2275,7 @@ async fn destination_metadata_roundtrip_preserves_composite_snapshot_and_replica
     init_test_tracing();
 
     let database = spawn_source_database().await;
-    let pipeline_id = 1;
+    let pipeline_id = "1";
     let table_id = TableId::new(54321);
 
     // Store metadata with a composite snapshot ID and a specific mask.
@@ -2312,7 +2314,7 @@ async fn destination_metadata_roundtrip_preserves_previous_logical_endpoint() {
     init_test_tracing();
 
     let database = spawn_source_database().await;
-    let pipeline_id = 1;
+    let pipeline_id = "1";
     let table_id = TableId::new(54322);
     let target_snapshot_id = SnapshotId::new(PgLsn::from(300), PgLsn::from(150));
     let target_mask = ReplicationMask::from_bytes(vec![1, 1, 1]);

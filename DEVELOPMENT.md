@@ -178,13 +178,14 @@ direct endpoint.
 Destination replay-epoch reads and transitions keep using `catalog_url`, with
 autocommit and normal prepared-statement caching. This avoids adding explicit
 transaction round trips to copy batches and streaming replay checks. Each
-transition remains atomic as a single SQL statement. Foreground sort-order
-reconciliation also uses the direct pool so table creation, schema changes, and
-DDL recovery do not depend on pooler availability. Postgres maintenance
-coordination shares this direct SQLx pool because its migrations and prepared
-queries rely on session state. The direct pool is capped at one connection per
-destination. Background metadata uses its own one-connection pool when a pooler
-is configured; otherwise it shares the direct pool and its connection limit.
+transition remains atomic as a single SQL statement. Foreground sort-order and
+partition reconciliation also use the direct pool so table creation, schema
+changes, and DDL recovery do not depend on pooler availability. Postgres
+maintenance coordination shares this direct SQLx pool because its migrations
+and prepared queries rely on session state. The direct pool is capped at one
+connection per destination. Background metadata uses its own one-connection
+pool when a pooler is configured; otherwise it shares the direct pool and its
+connection limit.
 The maintenance runner's replay-state discovery remains pooled.
 
 DuckDB writes, initial-copy flushes, checkpoints, and file maintenance continue
@@ -197,10 +198,14 @@ The regular
 `catalog_metadata_pins_backend_and_keeps_replay_and_coordination_direct` test
 uses a protocol guard that rejects named statements, preparation outside an
 explicit transaction, and the `extra_float_digits` startup parameter. It verifies
-that destination replay bookkeeping and sort-order reconciliation bypass the
+that destination replay bookkeeping and layout reconciliation bypass the
 pooler while background reads and maintenance discovery reach it. It also
 exercises post-commit retries, replay reset, restart, checkpoints, and direct
 coordination migrations.
+
+The `catalog_metadata_without_coordination_waits_for_metrics_sampler` test covers
+the pooled-writer experiment's metadata path with coordination disabled. It
+allows the metrics sampler's first 30-second tick before asserting pooled reads.
 
 The ignored `transaction_pooler_catalog_roundtrip` runs the same checks against
 a real transaction pooler. Point

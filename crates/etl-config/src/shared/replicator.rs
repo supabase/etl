@@ -128,7 +128,7 @@ mod tests {
 
     fn pipeline_config() -> PipelineConfig {
         PipelineConfig {
-            id: 1.into(),
+            id: "1".into(),
             publication_name: "example_publication".to_owned(),
             replication_slot: Default::default(),
             pg_connection: PgConnectionConfig {

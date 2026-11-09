@@ -1,6 +1,6 @@
 use etl::error::{ErrorKind, EtlResult};
+use etl_maintenance::ducklake::pending_inline_data_bytes_query;
 use metrics::gauge;
-use pg_escape::{quote_identifier, quote_literal};
 use sqlx::{AssertSqlSafe, PgPool};
 
 use crate::{
@@ -68,67 +68,6 @@ fn record_pending_inline_data_sizes(
     gauge!(ETL_DUCKLAKE_TABLE_ACTIVE_INLINED_DATA_BYTES, TABLE_LABEL => table_name.to_owned())
         .set(inlined_bytes as f64);
     DuckLakePendingInlineDataSizes { inlined_bytes }
-}
-
-/// Returns the PostgreSQL query that measures one table's pending inlined size.
-fn pending_inline_data_bytes_query(metadata_schema: &str) -> String {
-    let metadata_schema_literal = quote_literal(metadata_schema);
-    let metadata_schema = quote_identifier(metadata_schema);
-    let ducklake_schema = quote_identifier("ducklake_schema");
-    let ducklake_table = quote_identifier("ducklake_table");
-    let ducklake_inlined_data_tables = quote_identifier("ducklake_inlined_data_tables");
-
-    // DuckLake uses one inlined insert table per (table_id, schema_version),
-    // but one inlined delete table per table_id. We therefore sum every
-    // registered inlined data table for the current table and add the single
-    // deterministic delete-table relation size.
-    format!(
-        r"WITH target_table AS (
-             SELECT t.table_id
-             FROM {metadata_schema}.{ducklake_table} AS t
-             JOIN {metadata_schema}.{ducklake_schema} AS s ON s.schema_id = t.schema_id
-             WHERE t.end_snapshot IS NULL
-               AND s.end_snapshot IS NULL
-               AND s.schema_name = $1
-               AND t.table_name = $2
-             LIMIT 1
-         ),
-         target_inline_tables AS (
-             SELECT DISTINCT table_name
-             FROM {metadata_schema}.{ducklake_inlined_data_tables}
-             WHERE table_id = (SELECT table_id FROM target_table)
-         ),
-         inline_data_bytes AS (
-             SELECT COALESCE(
-                 SUM(
-                     pg_total_relation_size(
-                         to_regclass(
-                             format('%I.%I', {metadata_schema_literal}, table_name)
-                         )
-                     )
-                 ),
-                 0
-             )::BIGINT AS total_bytes
-             FROM target_inline_tables
-         ),
-         inline_delete_bytes AS (
-             SELECT COALESCE(
-                 pg_total_relation_size(
-                     to_regclass(
-                         format(
-                             '%I.%I',
-                             {metadata_schema_literal},
-                             format('ducklake_inlined_delete_%s', (SELECT table_id FROM target_table))
-                         )
-                     )
-                 ),
-                 0
-             )::BIGINT AS total_bytes
-         )
-         SELECT
-             (SELECT total_bytes FROM inline_data_bytes)
-             + (SELECT total_bytes FROM inline_delete_bytes);"
-    )
 }
 
 #[cfg(test)]

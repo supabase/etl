@@ -36,6 +36,7 @@ use etl::{
         notifying_store::NotifyingStore,
         pipeline::{
             PipelineBuilder, create_database_and_sync_done_pipeline_with_table, create_pipeline,
+            random_pipeline_id,
         },
         schema::{
             assert_columns_names_types, assert_replicated_schema_column_names_types,
@@ -76,6 +77,27 @@ const FEEDBACK_TEST_WAL_SENDER_TIMEOUT: Duration = Duration::from_secs(2);
 /// instead of hanging it until the CI job times out.
 const IDLE_DURABILITY_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Suspends every task reaching `name` until the returned sender is dropped.
+///
+/// `fail`'s `pause` action blocks a Tokio worker thread together with its LIFO
+/// slot, which other workers cannot steal. A task woken just before the
+/// failpoint, such as one waiting on state the paused task just stored, would
+/// starve until release. [`tokio::task::block_in_place`] first hands the
+/// worker's queued tasks to another thread.
+fn pause_failpoint(name: &str) -> std::sync::mpsc::Sender<()> {
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = Mutex::new(release_rx);
+    fail::cfg_callback(name, move || {
+        tokio::task::block_in_place(|| {
+            // Disconnection releases this and every later hit.
+            let _ = release_rx.lock().unwrap().recv();
+        });
+    })
+    .unwrap();
+
+    release_tx
+}
+
 /// Reads a single main apply-worker durability age from exported metrics.
 fn durability_age(rendered: &str, pipeline_id: PipelineId) -> f64 {
     rendered
@@ -95,7 +117,9 @@ fn durability_age(rendered: &str, pipeline_id: PipelineId) -> f64 {
 
 /// Relevant streaming write observed by [`DeferredEventsDestination`].
 enum DeferredEventsWrite {
-    /// Target-table event batch held before reporting its write status.
+    /// Target-table event batch held before reporting its write status,
+    /// including a commit-only batch that completes a split target
+    /// transaction.
     Batch { commit_end_lsn: PgLsn, durability: WriteEventsDurability, result: WriteEventsResult },
     /// Target-table changes sent before their transaction commit was decoded.
     PartialBatch { durability: WriteEventsDurability, result: WriteEventsResult },
@@ -120,6 +144,11 @@ struct DeferredEventsDestination {
     writes_tx: mpsc::UnboundedSender<DeferredEventsWrite>,
     /// Highest commit end LSN received in any batch.
     received_end_lsn: Arc<Mutex<Option<PgLsn>>>,
+    /// Commit LSN of a target transaction whose commit has not been written.
+    ///
+    /// A split transaction's final batch can hold only its commit, so the
+    /// destination must recognize that batch without a target-table insert.
+    open_target_commit_lsn: Arc<Mutex<Option<PgLsn>>>,
     /// Optional table-specific copy hold for mixed copy/CDC tests.
     copy_gate: Arc<Mutex<Option<(TableId, HoldGate)>>>,
 }
@@ -134,6 +163,7 @@ impl DeferredEventsDestination {
                 table_id,
                 writes_tx,
                 received_end_lsn: Arc::default(),
+                open_target_commit_lsn: Arc::default(),
                 copy_gate: Arc::default(),
             },
             writes_rx,
@@ -203,12 +233,23 @@ impl Destination for DeferredEventsDestination {
             *received_end_lsn = (*received_end_lsn).max(batch_end_lsn);
         }
 
-        let target_commit_lsn = events.iter().rev().find_map(|event| match event {
-            Event::Insert(insert) if insert.replicated_table_schema.id() == self.table_id => {
-                Some(insert.commit_lsn)
-            }
-            _ => None,
-        });
+        let mut open_target_commit_lsn = self.open_target_commit_lsn.lock().unwrap();
+        let target_commit_lsn = events
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                Event::Insert(insert) if insert.replicated_table_schema.id() == self.table_id => {
+                    Some(insert.commit_lsn)
+                }
+                _ => None,
+            })
+            .or_else(|| {
+                open_target_commit_lsn.filter(|open_commit_lsn| {
+                    events.iter().any(|event| {
+                        matches!(event, Event::Commit(commit) if commit.commit_lsn == *open_commit_lsn)
+                    })
+                })
+            });
 
         if let Some(target_commit_lsn) = target_commit_lsn {
             // A batch may also hold unrelated transactions, so report the
@@ -221,14 +262,19 @@ impl Destination for DeferredEventsDestination {
             });
             let write = match commit_end_lsn {
                 Some(commit_end_lsn) => {
+                    *open_target_commit_lsn = None;
                     DeferredEventsWrite::Batch { commit_end_lsn, durability, result: async_result }
                 }
-                None => DeferredEventsWrite::PartialBatch { durability, result: async_result },
+                None => {
+                    *open_target_commit_lsn = Some(target_commit_lsn);
+                    DeferredEventsWrite::PartialBatch { durability, result: async_result }
+                }
             };
             assert!(self.writes_tx.send(write).is_ok());
 
             return Ok(());
         }
+        drop(open_target_commit_lsn);
 
         if events.is_empty() {
             assert_eq!(durability, WriteEventsDurability::RequireDurable);
@@ -258,7 +304,7 @@ async fn wait_for_apply_worker_to_reach(
     target_lsn: PgLsn,
 ) -> PgLsn {
     let apply_slot_name: String =
-        EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
+        EtlReplicationSlot::for_apply_worker(&pipeline_id).try_into().unwrap();
     let client = database.client.as_ref().unwrap();
 
     wait_for_replication_slot_flush_lsn(client, &apply_slot_name, target_lsn).await
@@ -418,10 +464,10 @@ async fn run_table_copy_timed_retry_scenario(failpoint: &str) {
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     // We start the pipeline from scratch.
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -473,10 +519,10 @@ async fn table_sync_worker_panic_marks_table_errored() {
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     // We start the pipeline from scratch.
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -527,10 +573,10 @@ async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     // We start the pipeline from scratch.
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -583,10 +629,10 @@ async fn table_copy_fails_after_timed_retry_exceeded_max_attempts() {
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     // We start the pipeline from scratch.
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -635,7 +681,7 @@ async fn table_copy_is_consistent_during_data_sync_threw_an_error_with_timed_ret
 #[tokio::test(flavor = "multi_thread")]
 async fn table_sync_handover_preserves_decoder_across_post_handoff_noop_ddl() {
     let _scenario = FailScenario::setup();
-    fail::cfg(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP, "pause").unwrap();
+    let finished_copy_pause = pause_failpoint(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
 
     init_test_tracing();
 
@@ -651,10 +697,10 @@ async fn table_sync_handover_preserves_decoder_across_post_handoff_noop_ddl() {
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -701,7 +747,7 @@ async fn table_sync_handover_preserves_decoder_across_post_handoff_noop_ddl() {
         store.notify_on_table_state_type(table_id, TableStateType::SyncDone).await;
     let ready_notify = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
 
-    fail::remove(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
+    drop(finished_copy_pause);
 
     all_rows_notify.notified().await;
     sync_done_notify.notified().await;
@@ -850,10 +896,10 @@ async fn tx_ordinals_follow_wal_order_across_table_sync_and_apply_workers() {
         assert_eq!(orders_insert.tx_ordinal, 2);
     };
 
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = PipelineBuilder::new(
         database.config.clone(),
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -942,7 +988,7 @@ async fn tx_ordinals_follow_wal_order_across_table_sync_and_apply_workers() {
 #[tokio::test(flavor = "multi_thread")]
 async fn table_sync_ddl_without_relation_fails_before_persisting_sync_done() {
     let _scenario = FailScenario::setup();
-    fail::cfg(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP, "pause").unwrap();
+    let finished_copy_pause = pause_failpoint(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
 
     init_test_tracing();
 
@@ -953,10 +999,10 @@ async fn table_sync_ddl_without_relation_fails_before_persisting_sync_done() {
 
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -980,10 +1026,10 @@ async fn table_sync_ddl_without_relation_fails_before_persisting_sync_done() {
         .await
         .unwrap();
     let target_lsn = database.current_wal_flush_lsn().await.unwrap();
-    wait_for_apply_worker_to_reach(&database, pipeline_id.into(), target_lsn).await;
+    wait_for_apply_worker_to_reach(&database, pipeline_id.as_str().into(), target_lsn).await;
 
     let errored_notify = store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
-    fail::remove(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
+    drop(finished_copy_pause);
 
     errored_notify.notified().await;
 
@@ -1018,7 +1064,7 @@ async fn table_sync_ddl_without_relation_fails_before_persisting_sync_done() {
 #[tokio::test(flavor = "multi_thread")]
 async fn table_sync_quiescent_handover_does_not_persist_received_progress() {
     let _scenario = FailScenario::setup();
-    fail::cfg(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP, "pause").unwrap();
+    let finished_copy_pause = pause_failpoint(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
 
     init_test_tracing();
 
@@ -1041,10 +1087,10 @@ async fn table_sync_quiescent_handover_does_not_persist_received_progress() {
     let store = NotifyingStore::new();
     let (destination, mut writes_rx) = DeferredEventsDestination::new(table_id);
 
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -1073,12 +1119,12 @@ async fn table_sync_quiescent_handover_does_not_persist_received_progress() {
     // The sender's next idle keepalive must advertise at least this post-commit
     // cluster WAL frontier even though the transaction emitted no event batch.
     let target_lsn = database.current_wal_flush_lsn().await.unwrap();
-    wait_for_apply_worker_to_reach(&database, pipeline_id.into(), target_lsn).await;
+    wait_for_apply_worker_to_reach(&database, pipeline_id.as_str().into(), target_lsn).await;
 
     let table_sync_done_notify =
         store.notify_on_table_state_type(table_id, TableStateType::SyncDone).await;
 
-    fail::remove(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
+    drop(finished_copy_pause);
 
     // Accepted(A) must be followed by the empty barrier because no event batch
     // exists at the later catchup target T to settle A's durability debt.
@@ -1133,7 +1179,7 @@ async fn table_sync_quiescent_handover_does_not_persist_received_progress() {
     // persist that received LSN as an apply checkpoint.
     other_database.insert_values(other_database_table, &["value"], &[&2_i32]).await.unwrap();
     let target_lsn = database.current_wal_flush_lsn().await.unwrap();
-    wait_for_apply_worker_to_reach(&database, pipeline_id.into(), target_lsn).await;
+    wait_for_apply_worker_to_reach(&database, pipeline_id.as_str().into(), target_lsn).await;
 
     let persisted_checkpoint_lsn =
         store.get_replication_checkpoint(WorkerType::Apply).await.unwrap();
@@ -1228,7 +1274,7 @@ async fn assert_apply_feedback_during_stall(
     pipeline_id: PipelineId,
     first_held_dml_commit_lsn: Option<PgLsn>,
 ) {
-    let slot_name: String = EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
+    let slot_name: String = EtlReplicationSlot::for_apply_worker(&pipeline_id).try_into().unwrap();
     let client = database.client.as_ref().unwrap();
     let statement = client
         .prepare(
@@ -1295,10 +1341,10 @@ async fn feedback_continues_during_destination_dispatch() {
         first_held_dml_commit_lsn: Arc::clone(&first_held_dml_commit_lsn),
     });
 
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -1326,13 +1372,13 @@ async fn feedback_continues_during_destination_dispatch() {
     let first_held_dml_commit_lsn = first_held_dml_commit_lsn.lock().unwrap().unwrap();
     assert_apply_feedback_during_stall(
         &database,
-        pipeline_id.into(),
+        pipeline_id.as_str().into(),
         Some(first_held_dml_commit_lsn),
     )
     .await;
 
     assert_eq!(activity::snapshot()[0].last_observed_at(), observed_at);
-    assert!(durability_age(&metrics.render(), pipeline_id.into()) > 1.0);
+    assert!(durability_age(&metrics.render(), pipeline_id.as_str().into()) > 1.0);
 
     assert!(!inner.events().await.iter().any(|event| matches!(event, Event::Insert(_))));
 
@@ -1380,10 +1426,10 @@ async fn apply_feedback_continues_during_table_sync_catchup() {
     let store = NotifyingStore::new();
     let destination = MemoryDestination::new(store.clone());
 
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination,
@@ -1397,7 +1443,7 @@ async fn apply_feedback_continues_during_table_sync_catchup() {
 
     // The failpoint is reached only after apply requests catchup and waits for
     // this worker. Keep it suspended across multiple PostgreSQL timeouts.
-    assert_apply_feedback_during_stall(&database, pipeline_id.into(), None).await;
+    assert_apply_feedback_during_stall(&database, pipeline_id.as_str().into(), None).await;
 
     release_tx.send(()).unwrap();
 
@@ -1427,10 +1473,10 @@ async fn table_sync_catchup_error_does_not_block_apply_worker() {
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -1514,12 +1560,12 @@ async fn persisted_checkpoint_prevents_replay_when_status_updates_are_skipped() 
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let apply_slot_name: String =
-        EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
+        EtlReplicationSlot::for_apply_worker(&pipeline_id).try_into().unwrap();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -1566,7 +1612,7 @@ async fn persisted_checkpoint_prevents_replay_when_status_updates_are_skipped() 
 
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -2162,10 +2208,10 @@ async fn publication_schema_snapshots_replay_before_each_table_first_relation() 
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name.clone(),
         store.clone(),
         destination.clone(),
@@ -2266,7 +2312,7 @@ async fn publication_schema_snapshots_replay_before_each_table_first_relation() 
 
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name.clone(),
         store.clone(),
         destination.clone(),
@@ -2360,10 +2406,10 @@ async fn table_and_publication_schema_changes_replay_after_restart() {
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name.clone(),
         store.clone(),
         destination.clone(),
@@ -2588,7 +2634,7 @@ async fn table_and_publication_schema_changes_replay_after_restart() {
     // received no progress feedback.
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name.clone(),
         store.clone(),
         destination.clone(),
@@ -2621,7 +2667,7 @@ async fn table_and_publication_schema_changes_replay_after_restart() {
 #[tokio::test(flavor = "multi_thread")]
 async fn worker_connections_are_tagged_with_per_worker_application_names() {
     let _scenario = FailScenario::setup();
-    fail::cfg(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP, "pause").unwrap();
+    let finished_copy_pause = pause_failpoint(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
 
     init_test_tracing();
 
@@ -2636,10 +2682,10 @@ async fn worker_connections_are_tagged_with_per_worker_application_names() {
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -2658,10 +2704,10 @@ async fn worker_connections_are_tagged_with_per_worker_application_names() {
     // Names are computed with the same helpers used by the workers because the
     // random test pipeline ids can be long enough to clamp the base name.
     let apply_name =
-        apply_worker_application_name("supabase_etl_replicator_replication", pipeline_id);
+        apply_worker_application_name("supabase_etl_replicator_replication", &pipeline_id);
     let table_sync_name = table_sync_worker_application_name(
         "supabase_etl_replicator_replication",
-        pipeline_id,
+        &pipeline_id,
         table_id,
     );
 
@@ -2690,7 +2736,7 @@ async fn worker_connections_are_tagged_with_per_worker_application_names() {
 
     let sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
-    fail::remove(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
+    drop(finished_copy_pause);
 
     sync_complete_notify.notified().await;
 
@@ -2764,11 +2810,11 @@ impl IdleDurabilityTest {
         let store = NotifyingStore::new();
         let (destination, writes_rx) = DeferredEventsDestination::new(table_id);
         let received_end_lsn = destination.received_end_lsn();
-        let pipeline_id = random::<u64>();
-        let slot_name = EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
+        let pipeline_id = random_pipeline_id();
+        let slot_name = EtlReplicationSlot::for_apply_worker(&pipeline_id).try_into().unwrap();
         let mut builder = PipelineBuilder::new(
             database.config.clone(),
-            pipeline_id,
+            pipeline_id.as_str(),
             publication_name.to_owned(),
             store.clone(),
             destination,
@@ -2964,7 +3010,7 @@ async fn apply_retry_replays_dispatched_write_without_checkpointing() {
 #[tokio::test(flavor = "multi_thread")]
 async fn catchup_retry_recopies_after_dispatched_write() {
     let _scenario = FailScenario::setup();
-    fail::cfg(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP, "pause").unwrap();
+    let finished_copy_pause = pause_failpoint(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
     init_test_tracing();
 
     let mut database = spawn_source_database().await;
@@ -2978,10 +3024,10 @@ async fn catchup_retry_recopies_after_dispatched_write() {
     let store = NotifyingStore::new();
     let (destination, mut writes_rx) = DeferredEventsDestination::new(table_id);
     let destination = TestDestinationWrapper::wrap(destination);
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         schema.publication_name(),
         store.clone(),
         destination.clone(),
@@ -3002,13 +3048,13 @@ async fn catchup_retry_recopies_after_dispatched_write() {
     other_database.create_table(other_table.clone(), true, &[("value", "int4")]).await.unwrap();
     other_database.insert_values(other_table, &["value"], &[&1_i32]).await.unwrap();
     let target_lsn = database.current_wal_flush_lsn().await.unwrap();
-    wait_for_apply_worker_to_reach(&database, pipeline_id.into(), target_lsn).await;
+    wait_for_apply_worker_to_reach(&database, pipeline_id.as_str().into(), target_lsn).await;
     let errored = store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
     let copied_again =
         store.notify_on_table_state_type(table_id, TableStateType::FinishedCopy).await;
     let synced = store.notify_on_table_sync_complete(table_id).await;
     fail::cfg(APPLY_LOOP_AFTER_EVENT_BATCH_DISPATCH_FP, "1*return(table_sync)").unwrap();
-    fail::remove(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
+    drop(finished_copy_pause);
 
     let write = writes_rx.recv().await.unwrap();
     let DeferredEventsWrite::Batch { result, .. } = write else {
@@ -3253,10 +3299,10 @@ async fn durability_age_observes_cdc_while_another_table_is_copying() {
         panic!("FaultAction::hold must produce a hold gate");
     };
     *destination.copy_gate.lock().unwrap() = Some((copying_id, copy_gate));
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = PipelineBuilder::new(
         database.config.clone(),
-        pipeline_id,
+        pipeline_id.as_str(),
         publication.to_owned(),
         store.clone(),
         destination,
@@ -3281,7 +3327,7 @@ async fn durability_age_observes_cdc_while_another_table_is_copying() {
     };
 
     tokio::time::timeout(Duration::from_secs(10), async {
-        while durability_age(&metrics.render(), pipeline_id.into()) < 1.0 {
+        while durability_age(&metrics.render(), pipeline_id.as_str().into()) < 1.0 {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
@@ -3292,7 +3338,7 @@ async fn durability_age_observes_cdc_while_another_table_is_copying() {
     result.send(Ok(DestinationWriteStatus::Durable));
     copy_hold.release_ok();
     pipeline.shutdown_and_wait().await.unwrap();
-    assert_eq!(durability_age(&metrics.render(), pipeline_id.into()), -1.0);
+    assert_eq!(durability_age(&metrics.render(), pipeline_id.as_str().into()), -1.0);
 }
 
 /// A single accepted batch settles without another source write.

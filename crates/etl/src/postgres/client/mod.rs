@@ -1,6 +1,7 @@
 mod child;
 mod query;
 mod raw;
+mod slot_creation;
 mod transaction;
 mod types;
 mod utils;
@@ -13,6 +14,7 @@ pub(crate) use child::ChildPgReplicationClient;
 pub use raw::PgReplicationClient;
 #[cfg(not(any(test, feature = "test-utils")))]
 pub(crate) use raw::PgReplicationClient;
+pub(crate) use slot_creation::SlotCreationMonitor;
 #[cfg(any(test, feature = "test-utils"))]
 pub use transaction::{PgChildReplicationTransaction, PgReplicationTransaction};
 #[cfg(not(any(test, feature = "test-utils")))]

@@ -107,7 +107,7 @@ destination:
     database: default
 
 pipeline:
-  id: 1
+  id: "03dg2o5teb2eucxr9ggh3uie6"
   publication_name: seed_pub
   pg_connection:
     host: localhost
@@ -318,6 +318,34 @@ Retries retain the original age until a durable replay commit covers the prior a
 Zero means no **observed** outstanding work in this process. Negative values mean observation is unavailable, including before the main apply loop starts and after the sampling task stops. Process restarts lose the in-memory age; missing metrics, a stopped process, or a new process exporting zero do not prove previous work became durable. Old images do not export this metric.
 
 Recommended alerts are age above 300 seconds for 120 seconds and above 1,200 seconds for 60 seconds, independently per pipeline. Scrape, evaluation, and notification delays are additional. Keep separate scrape/workload health checks for absent series. This measures outstanding CDC durability, not a complete source-to-query freshness SLO or a single provider request's latency. Use WAL lag and source retention alongside it.
+
+### Replication slot creation
+
+`etl_replication_slot_creation_duration_seconds` records client elapsed time for
+each `CREATE_REPLICATION_SLOT` command. It includes PostgreSQL waiting for older
+transactions, but excludes connection setup, table-lock acquisition, deleting
+the previous slot, committing the surrounding transaction, and copying rows.
+Reusing an existing slot emits no creation sample. Labels identify `pipeline_id`,
+`worker_type` (`apply` or `table_sync`), and `outcome` (`success`, `error`, or
+`cancelled`). Each retry is a separate attempt. Cancellation means the client
+stopped awaiting the command, not that PostgreSQL has confirmed its termination.
+
+`etl_replication_slot_creation_age_seconds` reports the oldest active command
+for each pipeline and worker type. An independent task updates it every second,
+so a pending command does not freeze its own age. Concurrent table-sync attempts
+aggregate by oldest age, not by summing their ages. Completing or canceling one
+attempt leaves the other attempts observable. Zero means idle; **-1** means the
+sampler has stopped and must be filtered out. Retries and process restarts reset
+age. Missing telemetry or zero age does not prove slot creation succeeded.
+
+Duration is published only when an attempt ends; use live age to see ongoing
+waits. The duration's exported `_sum / _count` gives an observation-weighted
+mean over the process lifetime, including attempts completed before the first
+scrape. A `rate(_sum) / rate(_count)` query instead measures recent observations
+but can miss startup completions before the first scrape. Keep worker types and
+outcomes separate, and show gaps when there are no observations. Summary
+quantiles cannot be pooled across processes: a maximum p99 is the worst reported
+per-process p99, not a global percentile.
 
 ### Replication lag
 

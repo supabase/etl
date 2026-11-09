@@ -8,6 +8,8 @@
 pub mod bigquery;
 #[cfg(feature = "clickhouse")]
 pub mod clickhouse;
+#[cfg(all(test, any(feature = "bigquery", feature = "ducklake", feature = "snowflake")))]
+mod default_literals;
 #[cfg(feature = "ducklake")]
 pub mod ducklake;
 #[cfg(feature = "iceberg")]

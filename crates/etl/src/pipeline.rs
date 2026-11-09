@@ -29,7 +29,10 @@ use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
     observability::register_metrics,
-    postgres::{client::PgReplicationClient, migrations},
+    postgres::{
+        client::{PgReplicationClient, SlotCreationMonitor},
+        migrations,
+    },
     replication::{DurabilityMonitor, ReplicationLagMonitor, state::TableState},
     runtime::{ApplyWorker, ApplyWorkerHandle, MemoryMonitor, TableSyncWorkerPool},
     schema::TableId,
@@ -39,7 +42,8 @@ use crate::{
 
 mod identity;
 
-pub use identity::{LegacyPipelineId, PipelineId};
+pub use etl_postgres::slots::{PipelineIdError, validate_pipeline_id};
+pub use identity::PipelineId;
 
 /// Task ownership transferred together so a failed or cancelled wait drops
 /// every remaining pipeline-owned handle.
@@ -55,6 +59,8 @@ struct PipelineTasks {
     replication_lag_sampler_task: AbortOnDropHandle<()>,
     /// Independent observer of pending main apply-worker destination work.
     durability_metrics_task: AbortOnDropHandle<()>,
+    /// Independent observer of pending main and table-sync slot creation.
+    slot_creation_metrics_task: AbortOnDropHandle<()>,
 }
 
 /// Internal state tracking for pipeline lifecycle.
@@ -145,15 +151,20 @@ where
     /// store cache, creates the table synchronization worker pool, and starts
     /// the apply worker for processing replication stream events.
     ///
-    /// Invalid copy concurrency, an unsupported retry delay, a zero monitor
-    /// interval, invalid slot options, or a blank trust bundle with source TLS
-    /// enabled returns [`ErrorKind::ConfigError`] before any startup work.
+    /// An invalid pipeline ID, invalid copy concurrency, an unsupported retry
+    /// delay, a zero monitor interval, invalid slot options, or a blank trust
+    /// bundle with source TLS enabled returns [`ErrorKind::ConfigError`]
+    /// before any startup work.
     /// After this method succeeds, subsequent calls return
     /// [`ErrorKind::InvalidState`] without performing any startup work.
     pub async fn start(&mut self) -> EtlResult<()> {
         if !matches!(&self.state, PipelineState::NotStarted) {
             bail!(ErrorKind::InvalidState, "Pipeline has already been started");
         }
+
+        validate_pipeline_id(self.pipeline_id.as_str()).map_err(
+            |err| etl_error!(ErrorKind::ConfigError, "Invalid pipeline ID", source: err),
+        )?;
 
         validate_copy_concurrency(
             self.config.max_table_sync_workers,
@@ -245,6 +256,8 @@ where
 
         let durability_monitor = DurabilityMonitor::new(self.pipeline_id.clone());
         let durability_metrics_task = durability_monitor.spawn_durability_metrics_task();
+        let slot_creation_monitor = SlotCreationMonitor::new(self.pipeline_id.clone());
+        let slot_creation_metrics_task = slot_creation_monitor.spawn_slot_creation_metrics_task();
 
         // We create and start the apply worker.
         let apply_worker = ApplyWorker::new(
@@ -255,6 +268,7 @@ where
             self.destination.clone(),
             replication_lag_monitor,
             durability_monitor,
+            slot_creation_monitor,
             self.shutdown_token.clone(),
             table_sync_worker_permits,
             memory_monitor,
@@ -268,6 +282,7 @@ where
                 memory_monitor_task,
                 replication_lag_sampler_task,
                 durability_metrics_task,
+                slot_creation_metrics_task,
             })),
         };
 
@@ -308,6 +323,7 @@ where
             memory_monitor_task,
             replication_lag_sampler_task,
             durability_metrics_task,
+            slot_creation_metrics_task,
         }) = tasks.lock().await.take()
         else {
             bail!(ErrorKind::InvalidState, "Pipeline wait has already been called");
@@ -361,6 +377,7 @@ where
         for (task_name, task) in [
             ("replication lag sampler", replication_lag_sampler_task),
             ("durability monitor", durability_metrics_task),
+            ("slot creation monitor", slot_creation_metrics_task),
             ("memory monitor", memory_monitor_task),
         ] {
             debug!(task_name, "stopping optional background task");
@@ -534,7 +551,7 @@ mod tests {
         let store = NotifyingStore::new();
         let pipeline = PipelineBuilder::new(
             config,
-            1,
+            "1",
             "test".to_owned(),
             store.clone(),
             MemoryDestination::new(store),

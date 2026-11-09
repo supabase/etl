@@ -1,7 +1,8 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
 use etl::{
     data::{Cell, TableRow},
+    error::ErrorKind,
     event::{Event, EventType},
     schema::{TableId, TableName},
     test_utils::{
@@ -9,7 +10,10 @@ use etl::{
         event::{EventCondition, group_events_by_type_and_table_id},
         memory_destination::MemoryDestination,
         notifying_store::NotifyingStore,
-        pipeline::{PipelineBuilder, create_pipeline, create_pipeline_with_table_sync_copy_config},
+        pipeline::{
+            PipelineBuilder, create_pipeline, create_pipeline_with_table_sync_copy_config,
+            random_pipeline_id,
+        },
         test_destination_wrapper::TestDestinationWrapper,
         test_schema::create_partitioned_table,
     },
@@ -18,7 +22,6 @@ use etl_config::shared::TableSyncCopyConfig;
 use etl_postgres::{below_version, version::POSTGRES_15};
 use etl_telemetry::tracing::init_test_tracing;
 use pg_escape::quote_identifier;
-use rand::random;
 use tokio_postgres::types::Type;
 
 use crate::support::partition::{create_nested_partition_hierarchy, partition_table_name};
@@ -107,10 +110,10 @@ async fn assert_selective_partition_initial_copy_case(
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline_with_table_sync_copy_config(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name,
         state_store.clone(),
         destination.clone(),
@@ -222,10 +225,10 @@ async fn assert_nested_partition_pipeline_case(
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name,
         state_store.clone(),
         destination.clone(),
@@ -347,10 +350,10 @@ async fn assert_nested_partition_pipeline_row_filter_case(
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = PipelineBuilder::new(
         database.config.clone(),
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name,
         state_store.clone(),
         destination.clone(),
@@ -408,7 +411,7 @@ async fn assert_partition_identity_row_filter(publish_via_partition_root: bool) 
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
     let mut pipeline = create_pipeline(
         &database.config,
-        random::<u64>(),
+        random_pipeline_id(),
         "filtered_partition_pub".to_owned(),
         store.clone(),
         destination.clone(),
@@ -515,10 +518,10 @@ async fn partitioned_table_copy_replicates_existing_data() {
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name,
         state_store.clone(),
         destination.clone(),
@@ -627,10 +630,10 @@ async fn partitioned_table_copy_and_streams_new_data_from_new_partition() {
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name,
         state_store.clone(),
         destination.clone(),
@@ -721,10 +724,10 @@ async fn new_partition_with_leaf_identity_is_discovered_after_restart() {
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name.clone(),
         state_store.clone(),
         destination.clone(),
@@ -793,7 +796,7 @@ async fn new_partition_with_leaf_identity_is_discovered_after_restart() {
 
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name,
         state_store.clone(),
         destination.clone(),
@@ -844,10 +847,10 @@ async fn partition_drop_does_not_emit_delete_or_truncate() {
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name,
         state_store.clone(),
         destination.clone(),
@@ -939,10 +942,10 @@ async fn parent_table_truncate_does_emit_truncate_event() {
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name,
         state_store.clone(),
         destination.clone(),
@@ -1008,10 +1011,10 @@ async fn child_table_truncate_does_not_emit_truncate_event() {
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name,
         state_store.clone(),
         destination.clone(),
@@ -1092,10 +1095,10 @@ async fn partition_detach_with_explicit_publication_does_not_replicate_detached_
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name.clone(),
         state_store.clone(),
         destination.clone(),
@@ -1202,10 +1205,10 @@ async fn partition_detach_with_all_tables_publication_does_not_replicate_detache
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name.clone(),
         state_store.clone(),
         destination.clone(),
@@ -1323,10 +1326,10 @@ async fn partition_detach_with_all_tables_publication_does_replicate_detached_in
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name.clone(),
         state_store.clone(),
         destination.clone(),
@@ -1373,7 +1376,7 @@ async fn partition_detach_with_all_tables_publication_does_replicate_detached_in
     // new table.
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name.clone(),
         state_store.clone(),
         destination.clone(),
@@ -1441,10 +1444,10 @@ async fn partition_detach_with_schema_publication_does_not_replicate_detached_in
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name.clone(),
         state_store.clone(),
         destination.clone(),
@@ -1576,10 +1579,10 @@ async fn partition_detach_with_schema_publication_does_replicate_detached_insert
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name.clone(),
         state_store.clone(),
         destination.clone(),
@@ -1626,7 +1629,7 @@ async fn partition_detach_with_schema_publication_does_replicate_detached_insert
     // new table.
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name.clone(),
         state_store.clone(),
         destination.clone(),
@@ -1773,4 +1776,65 @@ async fn nested_pipeline_leaf_with_partition_root_respects_row_filter_during_ser
         TableCopyMode::Serial,
     )
     .await;
+}
+
+/// A keyless partitioned root published via the root cannot decode an update
+/// its leaf accepts, and the apply worker stops the pipeline.
+///
+/// PostgreSQL enforces the leaf's replica identity, so the `UPDATE` succeeds
+/// and pgoutput emits it against the root. ETL resolves identity from the
+/// published relation, which is the root, so the identity mask is empty and the
+/// arriving key image has no column to map onto.
+///
+/// This drives the real PostgreSQL setup rather than constructing the mask
+/// directly, which is what the codec unit test does. The timeout is only a
+/// safeguard: the assertion is on the error the pipeline returns.
+#[tokio::test(flavor = "multi_thread")]
+async fn keyless_partitioned_root_fails_to_decode_leaf_update() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let client = database.client.as_ref().unwrap();
+    client
+        .batch_execute(
+            "create table test.decode_root (id integer, value text not null)
+                 partition by range (id);
+             create table test.decode_leaf partition of test.decode_root
+                 for values from (0) to (1000);
+             alter table test.decode_leaf replica identity full;
+             create publication decode_pub for table test.decode_root
+                 with (publish_via_partition_root = true);
+             insert into test.decode_root values (1, 'before');",
+        )
+        .await
+        .unwrap();
+
+    let root_id: TableId =
+        client.query_one("select 'test.decode_root'::regclass::oid", &[]).await.unwrap().get(0);
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+    let pipeline_id = random_pipeline_id();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id.as_str(),
+        "decode_pub".to_owned(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let sync_complete = store.notify_on_table_sync_complete(root_id).await;
+
+    pipeline.start().await.unwrap();
+    sync_complete.notified().await;
+
+    // The leaf can identify the row, so PostgreSQL accepts this.
+    client.batch_execute("update test.decode_root set value = 'after' where id = 1").await.unwrap();
+
+    let error = tokio::time::timeout(Duration::from_secs(60), pipeline.wait())
+        .await
+        .expect("pipeline should fail to decode the update instead of hanging")
+        .unwrap_err();
+
+    assert_eq!(error.kind(), ErrorKind::ConversionError);
 }
