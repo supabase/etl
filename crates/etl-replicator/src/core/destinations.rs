@@ -345,6 +345,7 @@ mod ducklake {
     ) -> ReplicatorResult<Pipeline<ReplicatorStore, impl PipelineDestination>> {
         let DestinationConfig::Ducklake {
             catalog_url,
+            catalog_pooler_url,
             data_path,
             pool_size,
             s3_access_key_id,
@@ -401,6 +402,13 @@ mod ducklake {
             parse_ducklake_s3_data_path(data_path).map_err(ReplicatorError::config)?,
             *pool_size,
             store.clone(),
+        )
+        .catalog_pooler_url(
+            catalog_pooler_url
+                .as_ref()
+                .map(|url| parse_ducklake_url(url.expose_secret()))
+                .transpose()
+                .map_err(ReplicatorError::config)?,
         )
         .s3(s3_config)
         .metadata_schema(metadata_schema.clone())
