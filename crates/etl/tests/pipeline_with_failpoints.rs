@@ -1192,6 +1192,82 @@ async fn table_sync_quiescent_handover_does_not_persist_received_progress() {
     pipeline.shutdown_and_wait().await.unwrap();
 }
 
+/// `Ready` waits for a persisted apply checkpoint that covers `SyncDone`.
+///
+/// Apply checkpoint writes are dropped across the handover. The apply
+/// connection still crosses `SyncDone` and materializes the table decoder
+/// from a post-handover row, so only the missing durable checkpoint can keep
+/// the table in `SyncDone`. Restoring checkpoint writes lets a later
+/// evaluation store `Ready`.
+#[tokio::test(flavor = "multi_thread")]
+async fn ready_waits_for_persisted_apply_checkpoint() {
+    let _scenario = FailScenario::setup();
+    fail::cfg(STORE_REPLICATION_CHECKPOINT_FP, "return(apply)").unwrap();
+
+    init_test_tracing();
+
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let users_schema = database_schema.users_schema();
+    let table_id = users_schema.id;
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+
+    let pipeline_id = random_pipeline_id();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id.as_str(),
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let sync_done_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::SyncDone).await;
+
+    pipeline.start().await.unwrap();
+
+    sync_done_notify.notified().await;
+
+    // An apply-owned row materializes the decoder on the apply connection.
+    // Confirmed WAL past the row proves its flush and the readiness
+    // evaluation that follows the flush completed.
+    let apply_row_notify = destination
+        .wait_for_all_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
+        .await;
+
+    insert_users_data(&mut database, &users_schema.name, 1..=1).await;
+
+    apply_row_notify.notified().await;
+    let target_lsn = database.current_wal_flush_lsn().await.unwrap();
+    wait_for_apply_worker_to_reach(&database, pipeline_id.as_str().into(), target_lsn).await;
+
+    let Some(TableState::SyncDone { lsn: sync_done_lsn, .. }) =
+        store.get_table_state(table_id).await.unwrap()
+    else {
+        panic!("table must stay in SyncDone without a durable checkpoint at its boundary");
+    };
+    let persisted_checkpoint_lsn =
+        store.get_replication_checkpoint(WorkerType::Apply).await.unwrap();
+    assert!(persisted_checkpoint_lsn.is_none_or(|checkpoint| checkpoint < sync_done_lsn));
+
+    // Once checkpoint writes resume, a flush persists a checkpoint past
+    // `SyncDone`, and a later evaluation stores `Ready`.
+    let ready_notify = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+
+    fail::remove(STORE_REPLICATION_CHECKPOINT_FP);
+
+    insert_users_data(&mut database, &users_schema.name, 2..=2).await;
+    let target_lsn = database.current_wal_flush_lsn().await.unwrap();
+    wait_for_apply_worker_to_reach(&database, pipeline_id.as_str().into(), target_lsn).await;
+    insert_users_data(&mut database, &users_schema.name, 3..=3).await;
+
+    ready_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+}
+
 /// Holds the first dispatch containing a data modification (DML) event.
 ///
 /// Holding dispatch proves feedback continues while the apply loop awaits the

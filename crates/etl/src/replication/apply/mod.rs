@@ -3486,6 +3486,15 @@ mod apply_worker {
         AlreadyInCatchup,
     }
 
+    /// Proof that the apply worker cleared its decoding state for a table.
+    ///
+    /// Building a table-sync worker requires it, so no worker starts while
+    /// the apply loop still holds a decoder from before the copy.
+    struct DecoderReset {
+        /// Table whose apply-side decoding state was cleared.
+        table_id: TableId,
+    }
+
     /// Clears apply-side decoding state before a table-sync worker starts.
     ///
     /// While table sync owns the table, the apply worker skips its DDL,
@@ -3503,7 +3512,7 @@ mod apply_worker {
     fn reset_table_decoding_state_for_sync(
         table_decoding_states: &mut HashMap<TableId, TableDecodingState>,
         table_id: TableId,
-    ) {
+    ) -> DecoderReset {
         if table_decoding_states.remove(&table_id).is_some() {
             debug!(
                 worker_type = %WorkerType::Apply,
@@ -3511,6 +3520,8 @@ mod apply_worker {
                 "cleared apply decoding state before starting table sync worker",
             );
         }
+
+        DecoderReset { table_id }
     }
 
     /// Determines whether changes should be applied for a given table.
@@ -3799,8 +3810,9 @@ mod apply_worker {
     /// Executes the handoff action for a table whose worker is running.
     ///
     /// Returns an exit intent when shutdown interrupts a catchup wait.
-    async fn execute_active_action<S, D>(
-        ctx: &ApplyWorkerContext<S, D>,
+    async fn execute_active_action<S>(
+        store: &S,
+        shutdown_token: &CancellationToken,
         activity_handle: &ActivityHandle,
         table: ActiveTable,
         action: ActiveAction,
@@ -3817,18 +3829,18 @@ mod apply_worker {
                     "transitioning sync_wait -> catchup",
                 );
 
-                table.start_catchup(catchup_lsn, &ctx.store).await?
+                table.start_catchup(catchup_lsn, store).await?
             }
             ActiveAction::AwaitCatchup { catchup_lsn } => table.await_catchup(catchup_lsn),
             ActiveAction::PromoteToReady(proof) => {
-                table.promote_to_ready(proof, &ctx.store).await?;
+                table.promote_to_ready(proof, store).await?;
 
                 return Ok(None);
             }
             ActiveAction::Keep => return Ok(None),
         };
 
-        Ok(catchup_wait.wait(&ctx.shutdown_token, activity_handle).await)
+        Ok(catchup_wait.wait(shutdown_token, activity_handle).await)
     }
 
     /// Executes the handoff action for a table without a running worker.
@@ -3849,8 +3861,9 @@ mod apply_worker {
                 ctx.store.update_table_state(table_id, TableState::Ready).await
             }
             IdleAction::SpawnWorker => {
-                reset_table_decoding_state_for_sync(table_decoding_states, table_id);
-                let table_sync_worker = build_table_sync_worker(ctx, table_id);
+                let decoder_reset =
+                    reset_table_decoding_state_for_sync(table_decoding_states, table_id);
+                let table_sync_worker = build_table_sync_worker(ctx, decoder_reset);
                 if let Err(err) =
                     start_table_sync_worker(Arc::clone(&ctx.pool), table_sync_worker).await
                 {
@@ -3896,7 +3909,14 @@ mod apply_worker {
                         &action,
                     );
 
-                    execute_active_action(ctx, activity_handle, table, action).await?
+                    execute_active_action(
+                        &ctx.store,
+                        &ctx.shutdown_token,
+                        activity_handle,
+                        table,
+                        action,
+                    )
+                    .await?
                 }
                 ObservedTable::Idle(table_state) => {
                     let action = handoff::idle_after_commit(&table_state);
@@ -4025,7 +4045,14 @@ mod apply_worker {
                     let action = handoff::active_when_quiescent(&table_state, &readiness);
                     log_handoff_decision("quiescent", current_lsn, table_id, &table_state, &action);
 
-                    execute_active_action(ctx, activity_handle, table, action).await?
+                    execute_active_action(
+                        &ctx.store,
+                        &ctx.shutdown_token,
+                        activity_handle,
+                        table,
+                        action,
+                    )
+                    .await?
                 }
                 ObservedTable::Idle(table_state) => {
                     let action = handoff::idle_after_flush(&table_state, &readiness);
@@ -4044,15 +4071,17 @@ mod apply_worker {
         Ok(None)
     }
 
-    /// Creates a new table sync worker for the specified table.
+    /// Creates a new table sync worker for a table whose apply decoder was
+    /// cleared.
     fn build_table_sync_worker<S, D>(
         ctx: &ApplyWorkerContext<S, D>,
-        table_id: TableId,
+        decoder_reset: DecoderReset,
     ) -> TableSyncWorker<S, D>
     where
         S: Clone,
         D: Clone,
     {
+        let table_id = decoder_reset.table_id;
         info!(table_id = table_id.0, "creating table sync worker");
 
         TableSyncWorker::new(
@@ -4091,6 +4120,143 @@ mod apply_worker {
         D: PipelineDestination,
     {
         Box::pin(async move { worker.spawn_into_pool(&pool).await })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::{pin::pin, time::Duration};
+
+        use futures::FutureExt;
+        use tokio_postgres::types::PgLsn;
+        use tokio_util::sync::CancellationToken;
+
+        use crate::{
+            activity::{ActivityKind, ActivityRegistration},
+            error::ErrorKind,
+            etl_error,
+            replication::{
+                apply::{
+                    ExitIntent,
+                    apply_worker::{ActiveTable, execute_active_action},
+                    handoff::{ActiveAction, ReadinessInputs},
+                },
+                state::{TableRetryPolicy, TableState},
+            },
+            runtime::TableSyncWorkerState,
+            schema::TableId,
+            store::{MemoryStore, StateStore},
+        };
+
+        /// Registers apply activity whose handle a catchup wait can suspend.
+        fn apply_activity() -> ActivityRegistration {
+            ActivityRegistration::register(ActivityKind::WalApply {
+                wal_sender_timeout: Duration::from_secs(60),
+            })
+        }
+
+        #[tokio::test]
+        async fn catchup_blocks_until_table_sync_hands_back_without_holding_the_lock() {
+            let store = MemoryStore::new();
+            let shutdown_token = CancellationToken::new();
+            let activity = apply_activity();
+            let activity_handle = activity.handle();
+            let table_id = TableId::new(1);
+            let catchup_lsn = PgLsn::from(20);
+            let final_states = [
+                TableState::SyncDone { lsn: catchup_lsn, table_decoding_state: None },
+                TableState::Errored {
+                    reason: "copy failed".to_owned(),
+                    solution: None,
+                    retry_policy: TableRetryPolicy::ManualRetry,
+                    source_err: etl_error!(ErrorKind::Unknown, "Copy failed"),
+                },
+            ];
+
+            for final_state in final_states {
+                let worker_state = TableSyncWorkerState::new(
+                    table_id,
+                    TableState::SyncWait { lsn: PgLsn::from(10) },
+                );
+                let table = ActiveTable::lock(table_id, worker_state.clone()).await;
+                let mut handoff = pin!(execute_active_action(
+                    &store,
+                    &shutdown_token,
+                    &activity_handle,
+                    table,
+                    ActiveAction::StartCatchup { catchup_lsn },
+                ));
+
+                assert!(handoff.as_mut().now_or_never().is_none());
+
+                // The table-sync worker must be able to take its state lock
+                // while the apply worker waits.
+                let mut worker = tokio::time::timeout(Duration::from_secs(5), worker_state.lock())
+                    .await
+                    .unwrap();
+                assert_eq!(worker.table_state(), TableState::Catchup { lsn: catchup_lsn });
+                worker.set(final_state);
+                drop(worker);
+
+                assert!(handoff.await.unwrap().is_none());
+            }
+        }
+
+        #[tokio::test]
+        async fn catchup_wait_pauses_when_shutdown_interrupts_it() {
+            let store = MemoryStore::new();
+            let shutdown_token = CancellationToken::new();
+            let activity = apply_activity();
+            let activity_handle = activity.handle();
+            let table_id = TableId::new(1);
+            let catchup_lsn = PgLsn::from(20);
+            let worker_state =
+                TableSyncWorkerState::new(table_id, TableState::Catchup { lsn: catchup_lsn });
+            let table = ActiveTable::lock(table_id, worker_state).await;
+            let mut handoff = pin!(execute_active_action(
+                &store,
+                &shutdown_token,
+                &activity_handle,
+                table,
+                ActiveAction::AwaitCatchup { catchup_lsn },
+            ));
+
+            assert!(handoff.as_mut().now_or_never().is_none());
+
+            shutdown_token.cancel();
+
+            assert!(matches!(handoff.await.unwrap(), Some(ExitIntent::Pause)));
+        }
+
+        #[tokio::test]
+        async fn promotion_stores_ready_durably_and_for_waiters() {
+            let store = MemoryStore::new();
+            let shutdown_token = CancellationToken::new();
+            let activity = apply_activity();
+            let table_id = TableId::new(1);
+            let sync_done_lsn = PgLsn::from(10);
+            let worker_state = TableSyncWorkerState::new(
+                table_id,
+                TableState::SyncDone { lsn: sync_done_lsn, table_decoding_state: None },
+            );
+            let proof = ReadinessInputs::new(sync_done_lsn, Some(sync_done_lsn), true)
+                .ready_proof(sync_done_lsn)
+                .unwrap();
+            let table = ActiveTable::lock(table_id, worker_state.clone()).await;
+
+            let exit_intent = execute_active_action(
+                &store,
+                &shutdown_token,
+                &activity.handle(),
+                table,
+                ActiveAction::PromoteToReady(proof),
+            )
+            .await
+            .unwrap();
+
+            assert!(exit_intent.is_none());
+            assert_eq!(store.get_table_state(table_id).await.unwrap(), Some(TableState::Ready));
+            assert_eq!(worker_state.lock().await.table_state(), TableState::Ready);
+        }
     }
 }
 

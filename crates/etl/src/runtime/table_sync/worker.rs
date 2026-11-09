@@ -198,7 +198,7 @@ impl TableSyncWorkerState {
     /// This constructor initializes the state management structure with the
     /// specified table ID and table state. It sets up the notification
     /// mechanism for coordinating state changes between workers.
-    fn new(table_id: TableId, table_state: TableState) -> Self {
+    pub(crate) fn new(table_id: TableId, table_state: TableState) -> Self {
         let inner = TableSyncWorkerStateInner {
             table_id,
             table_state,
