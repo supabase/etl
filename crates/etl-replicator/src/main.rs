@@ -4,11 +4,7 @@
 //! replication and routes data to configured destinations. Includes telemetry,
 //! error handling, and graceful shutdown capabilities.
 
-use std::{
-    env::args_os,
-    io::{Error as IoError, ErrorKind},
-    process::ExitCode,
-};
+use std::{env::args_os, process::ExitCode};
 
 use ::tracing::{debug, error, info};
 use etl::task::abort_and_join;
@@ -141,15 +137,10 @@ fn try_main() -> ReplicatorResult<()> {
     init::init_crypto();
 
     let mut arguments = args_os().skip(1);
-    match (arguments.next(), arguments.next()) {
-        (Some(command), None) if command == "migrate" => return migration::run(),
-        (None, None) => {}
-        _ => {
-            return Err(ReplicatorError::config(IoError::new(
-                ErrorKind::InvalidInput,
-                "Usage: etl-replicator [migrate]",
-            )));
-        }
+    if let (Some(command), None) = (arguments.next(), arguments.next())
+        && command == "migrate"
+    {
+        return migration::run();
     }
 
     // Load the replicator config.

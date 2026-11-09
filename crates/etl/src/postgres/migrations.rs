@@ -166,6 +166,22 @@ pub async fn run_migrations(
     source_config: &PgConnectionConfig,
     store_config: Option<&PgConnectionConfig>,
 ) -> EtlResult<()> {
+    let in_recovery = source_database_in_recovery(source_config).await.map_err(|err| {
+        etl_error!(
+            ErrorKind::SourceConnectionFailed,
+            "Failed to inspect source database recovery state",
+            source: err
+        )
+    })?;
+
+    if in_recovery {
+        return Err(etl_error!(
+            ErrorKind::SourceError,
+            "Cannot run explicit migrations against a standby source; configure the writable \
+             primary"
+        ));
+    }
+
     run_postgres_store_migrations(store_config.unwrap_or(source_config)).await?;
     run_source_migrations(source_config).await
 }

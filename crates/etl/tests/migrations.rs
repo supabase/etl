@@ -12,7 +12,9 @@ use etl::{
     test_utils::memory_destination::MemoryDestination,
 };
 use etl_postgres::{
-    test_utils::{local_tls_config_from_env, test_database_port_from_env},
+    test_utils::{
+        local_tls_config_from_env, test_database_port_from_env, test_database_replica_port_from_env,
+    },
     tokio::test_utils::PgDatabase,
 };
 use etl_telemetry::tracing::init_test_tracing;
@@ -1337,4 +1339,20 @@ async fn migration_only_upgrades_stopped_sources() {
         applied_migration_versions(&database).await.into_iter().collect::<BTreeSet<_>>(),
         expected
     );
+}
+
+/// Explicit upgrades reject a standby before changing a separate writable
+/// store.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires a physical standby on TESTS_DATABASE_REPLICA_PORT or source port plus 1000"]
+async fn migration_only_rejects_standby_before_upgrading_store() {
+    let store = spawn_unmigrated_database().await;
+    let mut source = local_pg_connection_config();
+    source.port = test_database_replica_port_from_env().unwrap_or(source.port + 1000);
+    source.name = "postgres".to_owned();
+
+    let error = run_migrations(&source, Some(&store.config)).await.unwrap_err();
+
+    assert!(error.to_string().contains("standby source"));
+    assert!(!postgres_store_table_exists(&store).await);
 }

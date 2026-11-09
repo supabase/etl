@@ -54,6 +54,12 @@ APP_CONFIG_DIR="$PWD/crates/etl-replicator/configuration" APP_ENVIRONMENT=dev \
   --bin etl-replicator -- migrate
 ```
 
+The source must be a writable primary. Unlike normal replication startup, this
+explicit command fails for a physical standby instead of silently skipping source
+migrations, and checks this before modifying a separate store. Other command-line
+arguments retain their previous behavior; only the exact `migrate` invocation
+selects migration mode.
+
 Keep pipelines using that source stopped during incompatible schema upgrades.
 Errors produce a nonzero exit code; committed migrations remain applied, and
 rerunning resumes from the migration ledger. Check schema compatibility before
