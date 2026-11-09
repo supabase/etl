@@ -369,6 +369,64 @@ This status applies to the managed service, not local or self-hosted use.
 DuckLake writes through DuckDB to a file or PostgreSQL catalog and local or
 object storage.
 
+### Per-table sorting and partitioning
+
+Configure layouts using source schema, table, and column names. ETL escapes
+identifiers; partition transforms are typed values, not SQL expressions.
+
+```yaml
+destination:
+  ducklake:
+    # Catalog and storage settings omitted.
+    table_sorting:
+      tables:
+        - schema: public
+          table: events
+          sort_by:
+            kind: columns
+            columns:
+              - name: created_at
+                direction: asc
+                nulls: last
+    table_partitioning:
+      tables:
+        - schema: public
+          table: events
+          partition_by:
+            - column: created_at
+              transform:
+                kind: year
+            - column: created_at
+              transform:
+                kind: month
+            - column: account_id
+              transform:
+                kind: bucket
+                count: 16
+```
+
+Supported transforms are `identity`, `year`, `month`, `day`, `hour`, and
+`bucket`. Calendar transforms require a replicated `date`, `timestamp`, or
+`timestamp with time zone` column; `hour` requires a timestamp. `month`, `day`,
+and `hour` extract calendar components, so combine them with broader components
+when separate year/month/day partitions are needed. A bucket count must be
+between 1 and 2147483647. Duplicate keys and missing columns are rejected.
+
+Omitted tables leave their catalog layouts unmanaged. To clear partitioning,
+retain the table entry with `partition_by: []`. To clear sorting, retain the
+table entry with `sort_by: { kind: none }`. Existing configurations without
+these fields continue to work. Sorting also accepts `kind: primary_key` and
+requires external maintenance to be enabled.
+
+ETL reconciles explicit rules on table creation, schema changes, and startup,
+using the same table-write and maintenance coordination as other destination
+mutations. Updating the configuration requires restarting the replicator.
+Changing rules does not rewrite historical files or reset replication progress.
+Partition changes affect subsequent files; sorting is applied by maintenance
+rather than foreground inserts. Rebuilding a table from its source requires an
+explicit table reset and enabled initial sync. A reset recopies that table;
+other tables keep their replication progress.
+
 ### Limitations
 
 - Data storage URLs currently support `file`, `s3`, and `gs` schemes.
