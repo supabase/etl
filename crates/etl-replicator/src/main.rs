@@ -66,6 +66,7 @@ mod health;
 mod init;
 #[cfg(feature = "any-destination")]
 mod metrics;
+mod migration;
 mod sentry;
 
 /// Main async entry point that starts the replicator pipeline.
@@ -134,6 +135,18 @@ fn try_main() -> ReplicatorResult<()> {
 
     // Install rustls crypto provider before any TLS operations.
     init::init_crypto();
+
+    let mut arguments = std::env::args_os().skip(1);
+    match (arguments.next(), arguments.next()) {
+        (Some(command), None) if command == "migrate" => return migration::run(),
+        (None, None) => {}
+        _ => {
+            return Err(ReplicatorError::config(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Usage: etl-replicator [migrate]",
+            )));
+        }
+    }
 
     // Load the replicator config.
     let replicator_config = init::init_config()?;

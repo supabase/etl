@@ -1287,3 +1287,50 @@ async fn concurrent_source_migrations_bootstrap_a_fresh_database() {
     assert!(source_helper_exists(&database).await);
     assert_eq!(applied_migration_versions(&database).await, source_migration_versions());
 }
+
+/// One-shot upgrades preserve legacy progress without starting replication.
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_only_upgrades_stopped_sources() {
+    let database = spawn_unmigrated_database().await;
+    let mut conn = migration_connection(&database.config).await;
+    postgres_store_migrator()
+        .run_direct(Some(POSTGRES_STORE_PRE_PIPELINE_ID_V2_VERSION), &mut conn, false)
+        .await
+        .unwrap();
+    conn.execute(
+        "insert into etl.replication_progress (pipeline_id, worker_type, flush_lsn)
+         values (150, 'apply', '0/A')",
+    )
+    .await
+    .unwrap();
+    drop(conn);
+
+    etl::migrations::run_migrations(&database.config, None).await.unwrap();
+    etl::migrations::run_migrations(&database.config, None).await.unwrap();
+
+    assert!(source_helper_exists(&database).await);
+    assert!(
+        query_bool(
+            &database,
+            "select pipeline_id_v2 = '150' and flush_lsn = '0/A'::pg_lsn from \
+             etl.replication_progress"
+        )
+        .await
+    );
+    assert!(
+        query_bool(
+            &database,
+            "select not exists (select 1 from pg_replication_slots where database = \
+             current_database())"
+        )
+        .await
+    );
+    let expected: BTreeSet<_> = source_migration_versions()
+        .into_iter()
+        .chain(postgres_store_migration_versions())
+        .collect();
+    assert_eq!(
+        applied_migration_versions(&database).await.into_iter().collect::<BTreeSet<_>>(),
+        expected
+    );
+}
