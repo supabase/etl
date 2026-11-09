@@ -108,11 +108,10 @@ use crate::{
     retry::{classified_error, classified_error_with_detail},
 };
 
-/// Shared Postgres metadata pool size for DuckLake background samplers.
-///
-/// One connection is enough because inline-size sampling and metrics sampling
-/// are both best-effort background reads and can safely serialize.
-const DUCKLAKE_METADATA_PG_POOL_SIZE: u32 = 1;
+/// Maximum SQLx connections per catalog endpoint. Replay bookkeeping and
+/// coordination share one direct connection; background metadata reads can
+/// serialize on one pooler connection.
+const DUCKLAKE_CATALOG_PG_POOL_SIZE: u32 = 1;
 /// Prefix for ETL-owned tombstone columns that keep same-name replacement DDL
 /// replay-safe.
 pub(super) const DUCKLAKE_DROPPED_COLUMN_PREFIX: &str = "supabase_etl_ducklake_dropped_";
@@ -198,22 +197,48 @@ fn validate_ducklake_table_shape(schema: &ReplicatedTableSchema) -> EtlResult<()
     validate_ducklake_schema_capabilities(schema)
 }
 
-/// Builds the shared Postgres metadata pool used by background samplers.
-fn build_ducklake_metadata_pg_pool(catalog_url: &Url) -> EtlResult<PgPool> {
+/// Builds a bounded SQLx pool for one catalog endpoint.
+fn build_ducklake_catalog_pg_pool(catalog_url: &Url) -> EtlResult<PgPool> {
     let options = ducklake_catalog_metadata_connect_options(catalog_url).map_err(|source| {
         classified_error(
             ErrorKind::ConfigError,
-            "DuckLake metadata pool configuration failed",
+            "DuckLake catalog pool configuration failed",
             source,
         )
     })?;
 
     Ok(PgPoolOptions::new()
-        .max_connections(DUCKLAKE_METADATA_PG_POOL_SIZE)
+        .max_connections(DUCKLAKE_CATALOG_PG_POOL_SIZE)
         .min_connections(0)
         .acquire_timeout(std::time::Duration::from_secs(5))
         .idle_timeout(Some(std::time::Duration::from_secs(30)))
         .connect_lazy_with(options))
+}
+
+/// Routes background metadata reads through the pooler when configured,
+/// otherwise sharing the direct pool and its connection limit.
+///
+/// Metadata queries use unnamed statements inside explicit transactions to
+/// keep preparation and execution on the same transaction-pooler backend.
+fn build_ducklake_metadata_pg_pool(
+    direct_pg_pool: &PgPool,
+    catalog_pooler_url: Option<&Url>,
+) -> EtlResult<PgPool> {
+    match catalog_pooler_url {
+        Some(url) => {
+            let options = ducklake_catalog_metadata_connect_options(url).map_err(|source| {
+                classified_error(
+                    ErrorKind::ConfigError,
+                    "DuckLake catalog pool configuration failed",
+                    source,
+                )
+            })?;
+            // PgBouncer rejects untracked startup parameters by default.
+            let options = options.extra_float_digits(None);
+            Ok(direct_pg_pool.options().clone().connect_lazy_with(options))
+        }
+        None => Ok(direct_pg_pool.clone()),
+    }
 }
 
 /// Returns whether a DuckLake DDL error indicates another transaction already
@@ -592,6 +617,10 @@ pub struct DuckLakeDestination<S> {
     metrics_sampler: Arc<Option<DuckLakeMetricsSampler>>,
     metadata_schema: Arc<str>,
     expire_snapshots_older_than: Arc<str>,
+    /// Direct connection shared by foreground catalog queries and Postgres
+    /// coordination.
+    direct_pg_pool: PgPool,
+    /// Pooler connection for background metadata reads, or the direct pool.
     metadata_pg_pool: PgPool,
     /// Desired per-table sort orders indexed by source schema and table.
     table_sorting: Arc<HashMap<DuckLakeTableName, DuckLakeSortBy>>,
@@ -640,8 +669,11 @@ pub struct DuckLakeDestination<S> {
 /// policies start with their existing defaults and can be configured without
 /// adding another constructor for each combination.
 pub struct DuckLakeDestinationBuilder<S> {
-    /// DuckLake PostgreSQL catalog URL.
+    /// Direct catalog URL for DuckDB writes, foreground catalog queries, and
+    /// coordination.
     catalog_url: Url,
+    /// Optional transaction-pooler URL for background SQLx metadata queries.
+    catalog_pooler_url: Option<Url>,
     /// Parquet data path.
     data_path: Url,
     /// Number of warm DuckDB connections per pool.
@@ -676,6 +708,7 @@ impl<S> DuckLakeDestinationBuilder<S> {
     fn new(catalog_url: Url, data_path: Url, pool_size: u32, store: S) -> Self {
         Self {
             catalog_url,
+            catalog_pooler_url: None,
             data_path,
             pool_size,
             s3: None,
@@ -690,6 +723,13 @@ impl<S> DuckLakeDestinationBuilder<S> {
             external_maintenance: DuckLakeExternalMaintenanceConfig::default(),
             store,
         }
+    }
+
+    /// Routes background SQLx metadata queries through a transaction pooler.
+    /// DuckDB writes, foreground catalog queries, and coordination stay direct.
+    pub fn catalog_pooler_url(mut self, catalog_pooler_url: Option<Url>) -> Self {
+        self.catalog_pooler_url = catalog_pooler_url;
+        self
     }
 
     /// Sets optional S3 credentials and endpoint configuration.
@@ -782,6 +822,7 @@ where
         );
         DuckLakeDestination::new_inner(
             self.catalog_url,
+            self.catalog_pooler_url,
             self.data_path,
             self.pool_size,
             self.s3,
@@ -1831,6 +1872,7 @@ where
     ) -> EtlResult<Self> {
         Self::new_inner(
             catalog_url,
+            None,
             data_path,
             pool_size,
             s3,
@@ -1900,6 +1942,7 @@ where
     #[expect(clippy::too_many_arguments)]
     async fn new_inner(
         catalog_url: Url,
+        catalog_pooler_url: Option<Url>,
         data_path: Url,
         pool_size: u32,
         s3: Option<S3Config>,
@@ -2067,8 +2110,12 @@ where
             }
         };
         let metadata_schema = Arc::<str>::from(metadata_schema);
-        let metadata_pg_pool = build_ducklake_metadata_pg_pool(&catalog_url)?;
-        ensure_replay_epoch_table_exists(&metadata_pg_pool, metadata_schema.as_ref()).await?;
+        let direct_pg_pool = build_ducklake_catalog_pg_pool(&catalog_url)?;
+        let metadata_pg_pool =
+            build_ducklake_metadata_pg_pool(&direct_pg_pool, catalog_pooler_url.as_ref())?;
+        // Bound the size of the enclosing startup future.
+        Box::pin(ensure_replay_epoch_table_exists(&direct_pg_pool, metadata_schema.as_ref()))
+            .await?;
         let table_creation_slots = Arc::new(Semaphore::new(1));
         let applied_batches_table_created = Arc::new(AtomicBool::new(false));
         let streaming_progress_table_created = Arc::new(AtomicBool::new(false));
@@ -2136,6 +2183,7 @@ where
             metrics_sampler: Arc::new(None),
             metadata_schema: Arc::clone(&metadata_schema),
             expire_snapshots_older_than: Arc::clone(&expire_snapshots_older_than),
+            direct_pg_pool: direct_pg_pool.clone(),
             metadata_pg_pool: metadata_pg_pool.clone(),
             table_sorting,
             table_partitioning,
@@ -2191,7 +2239,10 @@ where
                 use crate::ducklake::external_maintenance::run_postgres_external_maintenance_watcher;
 
                 let watcher_destination = destination.clone();
-                let maintenance_pool = metadata_pg_pool.clone();
+                // Migrations use session state; store queries cache prepared
+                // statements. Share the direct replay pool to bound
+                // connections.
+                let maintenance_pool = direct_pg_pool.clone();
                 let pipeline_id = external_maintenance.pipeline_id;
                 destination
                     .tasks
@@ -3058,10 +3109,11 @@ where
             quote_postgres_identifier(self.metadata_schema.as_ref()),
             quote_postgres_identifier("ducklake_schema")
         );
+        // Foreground DDL must remain available when the metadata pooler is not.
         let active: Vec<(String, String, String)> = sqlx::query_as(AssertSqlSafe(sql))
             .bind(table_name.schema())
             .bind(table_name.table())
-            .fetch_all(&self.metadata_pg_pool)
+            .fetch_all(&self.direct_pg_pool)
             .await
             .map_err(|source| {
                 classified_error_with_detail(
@@ -3099,7 +3151,7 @@ where
                 )))
                 .bind(table_name.schema())
                 .bind(table_name.table())
-                .fetch_one(&self.metadata_pg_pool)
+                .fetch_one(&self.direct_pg_pool)
                 .await
                 .map_err(|source| {
                     classified_error(
@@ -3210,7 +3262,7 @@ where
         let active: Vec<(String, String)> = sqlx::query_as(AssertSqlSafe(sql))
             .bind(table_name.schema())
             .bind(table_name.table())
-            .fetch_all(&self.metadata_pg_pool)
+            .fetch_all(&self.direct_pg_pool)
             .await
             .map_err(|source| {
                 classified_error(
@@ -4418,7 +4470,7 @@ where
     }
 
     async fn read_table_replay_epoch(&self, table_name: &DuckLakeTableName) -> EtlResult<String> {
-        read_table_replay_epoch(&self.metadata_pg_pool, self.metadata_schema.as_ref(), table_name)
+        read_table_replay_epoch(&self.direct_pg_pool, self.metadata_schema.as_ref(), table_name)
             .await
     }
 
@@ -4428,7 +4480,7 @@ where
         table_name: &DuckLakeTableName,
     ) -> EtlResult<String> {
         begin_table_replay_epoch_transition(
-            &self.metadata_pg_pool,
+            &self.direct_pg_pool,
             self.metadata_schema.as_ref(),
             table_name,
         )
@@ -4442,7 +4494,7 @@ where
         pending_replay_epoch: &str,
     ) -> EtlResult<()> {
         complete_table_replay_epoch_transition(
-            &self.metadata_pg_pool,
+            &self.direct_pg_pool,
             self.metadata_schema.as_ref(),
             table_name,
             pending_replay_epoch,
@@ -4583,17 +4635,24 @@ where
             quote_postgres_identifier(self.metadata_schema.as_ref()),
             quote_postgres_identifier("ducklake_schema")
         );
-        let rows: Vec<(String, String)> = sqlx::query_as(AssertSqlSafe(sql))
-            .fetch_all(&self.metadata_pg_pool)
-            .await
-            .map_err(|source| {
-                classified_error_with_detail(
-                    ErrorKind::DestinationQueryFailed,
-                    "DuckLake table list query failed",
-                    format!("metadata_schema={}", self.metadata_schema.as_ref()),
-                    source,
-                )
-            })?;
+        let rows: Vec<(String, String)> = async {
+            let mut transaction = self.metadata_pg_pool.begin().await?;
+            let result = sqlx::query_as(AssertSqlSafe(sql))
+                .persistent(false)
+                .fetch_all(&mut *transaction)
+                .await?;
+            transaction.commit().await?;
+            Ok::<_, sqlx::Error>(result)
+        }
+        .await
+        .map_err(|source| {
+            classified_error_with_detail(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake table list query failed",
+                format!("metadata_schema={}", self.metadata_schema.as_ref()),
+                source,
+            )
+        })?;
         Ok(rows
             .into_iter()
             .map(|(schema_name, table_name)| DuckLakeTableName::new(schema_name, table_name))
@@ -4848,6 +4907,34 @@ mod tests {
     };
 
     const POSTGRES_SCANNER_EXTENSION_FILE: &str = "postgres_scanner.duckdb_extension";
+
+    /// Pooler routing must preserve its independent identity and connection
+    /// options.
+    #[tokio::test]
+    async fn metadata_pool_prefers_pooler_and_preserves_direct_fallback() {
+        let direct = Url::parse("postgres://direct@direct.example.com:5432/catalog").unwrap();
+        let pooler =
+            Url::parse("postgres://reader.tenant@pooler.example.com:6543/catalog?sslmode=require")
+                .unwrap();
+        let direct_pool = build_ducklake_catalog_pg_pool(&direct).unwrap();
+        let pool = build_ducklake_metadata_pg_pool(&direct_pool, Some(&pooler)).unwrap();
+        let options = pool.connect_options();
+        assert_eq!(options.get_host(), "pooler.example.com");
+        assert_eq!(options.get_port(), 6543);
+        assert_eq!(options.get_username(), "reader.tenant");
+        assert!(matches!(options.get_ssl_mode(), sqlx::postgres::PgSslMode::Require));
+        pool.close().await;
+
+        assert!(!direct_pool.is_closed(), "pooler must have an independent connection limit");
+        let pool = build_ducklake_metadata_pg_pool(&direct_pool, None).unwrap();
+        assert_eq!(pool.connect_options().get_host(), "direct.example.com");
+        assert_eq!(pool.connect_options().get_port(), 5432);
+        pool.close().await;
+
+        let invalid = Url::parse("file:///tmp/catalog").unwrap();
+        assert!(direct_pool.is_closed(), "direct fallback must share the existing pool");
+        assert!(build_ducklake_metadata_pg_pool(&direct_pool, Some(&invalid)).is_err());
+    }
 
     /// Returns a unique table-copy batch ID for direct unit-test calls.
     fn test_table_copy_batch_id() -> TableCopyBatchId {
@@ -6207,7 +6294,7 @@ mod tests {
                 format!("select pending_replay_epoch from {epochs_table} where table_name = $1;");
             let pending_replay_epoch = sqlx::query_scalar::<_, Option<String>>(AssertSqlSafe(sql))
                 .bind(table_name.id())
-                .fetch_one(&destination.metadata_pg_pool)
+                .fetch_one(&destination.direct_pg_pool)
                 .await
                 .expect("failed to read pending replay epoch");
             assert_eq!(pending_replay_epoch, None);
@@ -6258,7 +6345,7 @@ mod tests {
             let metadata_schema = resolve_ducklake_metadata_schema_blocking(&conn)
                 .expect("failed to resolve metadata schema");
             let metadata_pg_pool =
-                build_ducklake_metadata_pg_pool(&catalog).expect("failed to create metadata pool");
+                build_ducklake_catalog_pg_pool(&catalog).expect("failed to create metadata pool");
             let _rows_flushed =
                 flush_table_inlined_data(&conn, table_name.schema(), table_name.table())
                     .expect("failed to materialize inlined rows for storage metrics test");
@@ -6329,7 +6416,7 @@ mod tests {
             let metadata_schema = resolve_ducklake_metadata_schema_blocking(&conn)
                 .expect("failed to resolve metadata schema");
             let metadata_pg_pool =
-                build_ducklake_metadata_pg_pool(&catalog).expect("failed to create metadata pool");
+                build_ducklake_catalog_pg_pool(&catalog).expect("failed to create metadata pool");
             let _rows_flushed =
                 flush_table_inlined_data(&conn, table_name.schema(), table_name.table())
                     .expect("failed to materialize inlined rows for catalog metrics test");
@@ -6401,7 +6488,7 @@ mod tests {
             let metadata_schema = resolve_ducklake_metadata_schema_blocking(&conn)
                 .expect("failed to resolve metadata schema");
             let metadata_pg_pool =
-                build_ducklake_metadata_pg_pool(&catalog).expect("failed to create metadata pool");
+                build_ducklake_catalog_pg_pool(&catalog).expect("failed to create metadata pool");
             let metrics = query_catalog_maintenance_metrics(&metadata_pg_pool, &metadata_schema)
                 .await
                 .expect("failed to query catalog maintenance metrics");
