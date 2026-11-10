@@ -12,13 +12,10 @@ pub mod clickhouse;
 mod default_literals;
 #[cfg(feature = "ducklake")]
 pub mod ducklake;
-#[cfg(feature = "iceberg")]
-pub mod iceberg;
 #[cfg(any(
     feature = "bigquery",
     feature = "clickhouse",
     feature = "ducklake",
-    feature = "iceberg",
     feature = "snowflake"
 ))]
 mod recovery;
@@ -26,7 +23,6 @@ mod recovery;
     feature = "bigquery",
     feature = "clickhouse",
     feature = "ducklake",
-    feature = "iceberg",
     feature = "snowflake"
 ))]
 mod retry;
@@ -34,10 +30,5 @@ mod retry;
 pub mod snowflake;
 #[cfg(any(feature = "ducklake", feature = "snowflake"))]
 mod sql;
-#[cfg(any(
-    feature = "bigquery",
-    feature = "clickhouse",
-    feature = "iceberg",
-    feature = "snowflake"
-))]
+#[cfg(any(feature = "bigquery", feature = "clickhouse", feature = "snowflake"))]
 mod table_name;
