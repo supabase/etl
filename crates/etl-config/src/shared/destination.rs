@@ -1238,17 +1238,49 @@ mod tests {
         }
     }
 
-    /// Unsupported destination configurations must fail before a pipeline can
-    /// start.
+    /// Retired destination configurations must fail before a pipeline can start.
     #[test]
-    fn unsupported_destination_configs_are_rejected() {
-        let value = serde_json::json!({ "unsupported": {} });
-        let error = serde_json::from_value::<DestinationConfig>(value.clone()).unwrap_err();
-        assert!(error.to_string().contains("unknown variant `unsupported`"));
-        let error = serde_json::from_value::<DestinationConfigWithoutSecrets>(value).unwrap_err();
-        assert!(error.to_string().contains("unknown variant `unsupported`"));
-        let error = serde_json::from_str::<DestinationKind>("\"unsupported\"").unwrap_err();
-        assert!(error.to_string().contains("unknown variant `unsupported`"));
+    fn retired_destination_configs_are_rejected() {
+        for value in [
+            serde_json::json!({
+                "iceberg": {
+                    "rest": {
+                        "catalog_uri": "https://example.com/catalog",
+                        "warehouse_name": "example-warehouse",
+                        "namespace": "public",
+                        "s3_access_key_id": "placeholder-access-key",
+                        "s3_secret_access_key": "placeholder-secret-key",
+                        "s3_endpoint": "https://example.com/storage"
+                    }
+                }
+            }),
+            serde_json::json!({
+                "iceberg": {
+                    "supabase": {
+                        "project_ref": "example-project",
+                        "warehouse_name": "example-warehouse",
+                        "namespace": "public",
+                        "catalog_token": "placeholder-token",
+                        "s3_access_key_id": "placeholder-access-key",
+                        "s3_secret_access_key": "placeholder-secret-key",
+                        "s3_region": "example-region"
+                    }
+                }
+            }),
+        ] {
+            let error = serde_json::from_value::<DestinationConfig>(value.clone()).unwrap_err();
+            assert!(error.to_string().contains("unknown variant `iceberg`"));
+            let error =
+                serde_json::from_value::<DestinationConfigWithoutSecrets>(value).unwrap_err();
+            assert!(error.to_string().contains("unknown variant `iceberg`"));
+        }
+    }
+
+    /// Retired destination names cannot select a pipeline destination.
+    #[test]
+    fn retired_destination_kind_is_rejected() {
+        let error = serde_json::from_str::<DestinationKind>("\"iceberg\"").unwrap_err();
+        assert!(error.to_string().contains("unknown variant `iceberg`"));
     }
 
     #[test]
