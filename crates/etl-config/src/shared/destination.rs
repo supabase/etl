@@ -1238,7 +1238,8 @@ mod tests {
         }
     }
 
-    /// Retired destination configurations must fail before a pipeline can start.
+    /// Retired destination configurations must fail before a pipeline can
+    /// start.
     #[test]
     fn retired_destination_configs_are_rejected() {
         for value in [
