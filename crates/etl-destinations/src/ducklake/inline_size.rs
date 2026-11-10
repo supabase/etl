@@ -42,6 +42,7 @@ impl DuckLakePendingInlineSizeSampler {
                 .persistent(false)
                 .bind(table_name.schema())
                 .bind(table_name.table())
+                .bind(table_name.namespace())
                 .fetch_one(&mut *transaction)
                 .await?;
             transaction.commit().await?;

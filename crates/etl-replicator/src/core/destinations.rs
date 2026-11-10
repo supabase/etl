@@ -338,6 +338,7 @@ mod ducklake {
             s3_url_style,
             s3_use_ssl,
             metadata_schema,
+            table_namespace,
             maintenance_target_file_size,
             parquet_row_group_size_bytes,
             parquet_row_group_size,
@@ -395,6 +396,7 @@ mod ducklake {
         )
         .s3(s3_config)
         .metadata_schema(metadata_schema.clone())
+        .table_namespace(table_namespace.clone())
         .maintenance_target_file_size(maintenance_target_file_size.clone())
         .parquet_row_group_size_bytes(parquet_row_group_size_bytes.clone())
         .parquet_row_group_size(parquet_row_group_size.clone())

@@ -13,7 +13,10 @@ use tracing::warn;
 
 use crate::ducklake::{
     DuckLakeTableName, LAKE_CATALOG,
-    sql::{qualified_lake_schema_name, qualified_lake_table_name, quote_identifier},
+    sql::{
+        qualified_lake_schema_name, qualified_lake_schema_path, qualified_lake_table_name,
+        quote_identifier,
+    },
 };
 
 /// Returns the DuckLake SQL type string for a given Postgres scalar type.
@@ -230,7 +233,13 @@ pub(super) fn build_create_table_sql_ducklake(
     table_name: &DuckLakeTableName,
     column_schemas: &[ColumnSchema],
 ) -> String {
-    let schema_name = qualified_lake_schema_name(table_name.schema());
+    let schema_name = qualified_lake_schema_path(table_name);
+    let parent = table_name
+        .namespace()
+        .map(|namespace| {
+            format!("create schema if not exists {};\n", qualified_lake_schema_name(namespace))
+        })
+        .unwrap_or_default();
     let table_name = qualified_lake_table_name(table_name);
     let col_defs: Vec<String> = column_schemas
         .iter()
@@ -238,7 +247,8 @@ pub(super) fn build_create_table_sql_ducklake(
         .collect();
 
     format!(
-        "create schema if not exists {schema_name};\ncreate table if not exists {table_name} ({})",
+        "{parent}create schema if not exists {schema_name};\ncreate table if not exists \
+         {table_name} ({})",
         col_defs.join(",\n")
     )
 }
@@ -306,7 +316,7 @@ pub(super) fn build_disable_sort_on_insert_sql_ducklake(table_name: &DuckLakeTab
     format!(
         "call {}.set_option('sort_on_insert', false, schema => {}, table_name => {})",
         quote_identifier(LAKE_CATALOG),
-        quote_literal(table_name.schema()),
+        quote_literal(&table_name.schema_path()),
         quote_literal(table_name.table())
     )
 }

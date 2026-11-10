@@ -366,6 +366,15 @@ This status applies to the managed service, not local or self-hosted use.
 DuckLake writes through DuckDB to a file or PostgreSQL catalog and local or
 object storage.
 
+The optional `table_namespace` places replicated tables under
+`namespace.source_schema.table` and requires DuckLake catalog format `1.1`.
+ASCII letters in the namespace must be lowercase: DuckDB treats quoted schema
+names case-insensitively, so `ProjectA` is rejected instead of aliasing `projecta`.
+Other identifier characters, including dots and quotes, remain literal. The
+namespace is immutable once persisted; ETL never silently lowercases it. Omit
+`table_namespace` to preserve an existing pipeline's flat `source_schema.table`
+layout.
+
 ### Per-table sorting and partitioning
 
 Configure layouts using source schema, table, and column names. ETL escapes
