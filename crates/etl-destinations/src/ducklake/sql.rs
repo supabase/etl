@@ -20,17 +20,25 @@ pub(super) fn qualified_lake_schema_name(schema_name: &str) -> String {
     format!("{}.{}", quote_identifier(LAKE_CATALOG), quote_identifier(schema_name))
 }
 
+/// Qualifies each component of the destination schema path independently.
+pub(super) fn qualified_lake_schema_path(table: &DuckLakeTableName) -> String {
+    match table.namespace() {
+        None => qualified_lake_schema_name(table.schema()),
+        Some(namespace) => format!(
+            "{}.{}",
+            qualified_lake_schema_name(namespace),
+            quote_identifier(table.schema())
+        ),
+    }
+}
+
 /// Quotes a DuckLake table reference and qualifies it with the DuckLake
 /// catalog.
 ///
 /// Each identifier part is quoted separately so names containing dots are
 /// treated as one identifier, not as extra path components.
 pub(super) fn qualified_lake_table_name(table_name: &DuckLakeTableName) -> String {
-    format!(
-        "{}.{}",
-        qualified_lake_schema_name(table_name.schema()),
-        quote_identifier(table_name.table())
-    )
+    format!("{}.{}", qualified_lake_schema_path(table_name), quote_identifier(table_name.table()))
 }
 
 #[cfg(test)]

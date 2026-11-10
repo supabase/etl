@@ -7,7 +7,10 @@ use utoipa::ToSchema;
 
 use crate::{
     clickhouse::ClickHouseUrl,
-    shared::{DuckLakeTablePartitioningConfig, Validate, ValidationError},
+    shared::{
+        DuckLakeTablePartitioningConfig, Validate, ValidationError,
+        validate_ducklake_table_namespace,
+    },
 };
 
 const fn default_connection_pool_size() -> usize {
@@ -513,6 +516,10 @@ impl DestinationKind {
 /// leaking secrets in the config into serialized forms.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "One configuration is stored per pipeline; keep the existing unboxed config API"
+)]
 pub enum DestinationConfig {
     /// Google BigQuery destination configuration.
     ///
@@ -598,6 +605,10 @@ pub enum DestinationConfig {
         s3_use_ssl: Option<bool>,
         /// Optional metadata schema for DuckLake metadata tables.
         metadata_schema: Option<String>,
+        /// Immutable source namespace above each replicated schema.
+        /// ASCII letters must be lowercase; omission preserves the flat layout.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        table_namespace: Option<String>,
         /// Optional DuckLake maintenance target file size.
         maintenance_target_file_size: Option<String>,
         /// Optional Parquet row-group byte limit.
@@ -662,9 +673,14 @@ impl Validate for DestinationConfig {
             DestinationConfig::BigQuery { table_options, .. } => table_options.validate(),
             DestinationConfig::Iceberg { config } => config.validate(),
             DestinationConfig::Ducklake {
-                copy_buffer, table_sorting, table_partitioning, ..
+                copy_buffer,
+                table_sorting,
+                table_partitioning,
+                table_namespace,
+                ..
             } => {
                 copy_buffer.validate()?;
+                validate_ducklake_table_namespace(table_namespace.as_deref())?;
                 table_sorting.validate()?;
                 table_partitioning.validate()
             }
@@ -859,6 +875,10 @@ pub enum DestinationConfigWithoutSecrets {
         s3_use_ssl: Option<bool>,
         /// Optional metadata schema for DuckLake metadata tables.
         metadata_schema: Option<String>,
+        /// Immutable source namespace above each replicated schema.
+        /// ASCII letters must be lowercase; omission preserves the flat layout.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        table_namespace: Option<String>,
         /// Optional DuckLake maintenance target file size.
         maintenance_target_file_size: Option<String>,
         /// Optional Parquet row-group byte limit.
@@ -907,9 +927,11 @@ impl Validate for DestinationConfigWithoutSecrets {
                 copy_buffer,
                 table_sorting,
                 table_partitioning,
+                table_namespace,
                 ..
             } => {
                 copy_buffer.validate()?;
+                validate_ducklake_table_namespace(table_namespace.as_deref())?;
                 table_sorting.validate()?;
                 table_partitioning.validate()
             }
@@ -954,6 +976,7 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
+                table_namespace,
                 maintenance_target_file_size,
                 parquet_row_group_size_bytes,
                 parquet_row_group_size,
@@ -970,6 +993,7 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
+                table_namespace,
                 maintenance_target_file_size,
                 parquet_row_group_size_bytes,
                 parquet_row_group_size,
@@ -1000,7 +1024,30 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::{from_value, json};
+
     use super::*;
+
+    /// Both public configuration forms reject namespace case aliases.
+    #[test]
+    fn ducklake_configs_validate_namespace_case() {
+        for namespace in [None, Some("projecta"), Some("ProjectA")] {
+            let config: DestinationConfig = from_value(json!({
+                "ducklake": {
+                    "catalog_url": "postgres://placeholder@catalog.example.com/catalog",
+                    "data_path": "s3://example-bucket/",
+                    "table_namespace": namespace
+                }
+            }))
+            .unwrap();
+            let expected_valid = namespace != Some("ProjectA");
+            assert_eq!(config.validate().is_ok(), expected_valid);
+            assert_eq!(
+                DestinationConfigWithoutSecrets::from(config).validate().is_ok(),
+                expected_valid
+            );
+        }
+    }
 
     #[test]
     fn ducklake_writer_config_resolves_defaults_and_overrides() {
@@ -1055,6 +1102,7 @@ mod tests {
             s3_url_style: None,
             s3_use_ssl: None,
             metadata_schema: None,
+            table_namespace: None,
             maintenance_target_file_size: None,
             parquet_row_group_size_bytes: None,
             parquet_row_group_size: None,
