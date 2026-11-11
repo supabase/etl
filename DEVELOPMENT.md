@@ -211,8 +211,14 @@ statements inside explicit transactions. SQLx prepares and executes in separate
 protocol exchanges; the transaction pins both to the same backend. Disabling
 statement persistence alone does not prevent backend reassignment. Pooler
 connections omit the `extra_float_digits` startup parameter for PgBouncer
-compatibility. A configured pooler failure does not silently fall back to the
-direct endpoint.
+compatibility. If a pooled metadata read fails, the reader logs a warning with
+the operation, error category, and database error code, then retries the entire
+read through `catalog_url`. Provider error text and connection strings are
+omitted from this warning. The reader and its clones use the direct pool for
+the rest of that destination or maintenance run; recreating the destination or
+starting another maintenance run tries the configured pooler again. If the
+direct retry also fails, its error is returned normally. Only read-only catalog
+operations use this fallback.
 
 Destination replay-epoch reads and transitions keep using `catalog_url`, with
 autocommit and normal prepared-statement caching. This avoids adding explicit

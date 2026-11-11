@@ -26,7 +26,7 @@ use etl_config::{
 };
 use metrics::{gauge, histogram};
 use pg_escape::{quote_identifier, quote_literal};
-use sqlx::{AssertSqlSafe, PgPool, postgres::PgPoolOptions};
+use sqlx::{AssertSqlSafe, postgres::PgPoolOptions};
 use tokio::{
     sync::{Semaphore, oneshot},
     time::Instant,
@@ -40,7 +40,7 @@ use tracing::{debug, info, trace, warn};
 use url::Url;
 
 use crate::ducklake::{
-    DataFileRewriteReason, RedactedDuckDbError, duckdb_version_check_sql,
+    DataFileRewriteReason, DuckLakeMetadataPool, RedactedDuckDbError, duckdb_version_check_sql,
     namespace_version_check_sql, namespaced_tables_query, table_namespace_filter,
 };
 
@@ -1658,22 +1658,28 @@ pub async fn run_maintenance_once(
         metadata_schema = %metadata_schema,
         "ducklake external maintenance metadata schema resolved"
     );
-    let mut metadata_options = ducklake_catalog_metadata_connect_options(
-        config.catalog_pooler_url.as_ref().unwrap_or(&config.catalog_url),
-    )
-    .map_err(|source| {
-        etl_error!(
-            ErrorKind::ConfigError,
-            "Invalid DuckLake PostgreSQL catalog URL",
-            source: source
-        )
-    })?;
-    if config.catalog_pooler_url.is_some() {
-        // PgBouncer rejects untracked startup parameters by default.
-        metadata_options = metadata_options.extra_float_digits(None);
-    }
+    let metadata_options =
+        ducklake_catalog_metadata_connect_options(&config.catalog_url).map_err(|source| {
+            etl_error!(
+                ErrorKind::ConfigError,
+                "Invalid DuckLake PostgreSQL catalog URL",
+                source: source
+            )
+        })?;
+    let direct_pg_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(5))
+        .connect_lazy_with(metadata_options);
     let metadata_pg_pool =
-        PgPoolOptions::new().max_connections(1).connect_lazy_with(metadata_options);
+        DuckLakeMetadataPool::new(direct_pg_pool, config.catalog_pooler_url.as_ref()).map_err(
+            |source| {
+                etl_error!(
+                    ErrorKind::ConfigError,
+                    "Invalid DuckLake PostgreSQL pooler URL",
+                    source: source
+                )
+            },
+        )?;
     let table_names = list_ducklake_tables(
         &metadata_pg_pool,
         &metadata_schema,
@@ -1856,30 +1862,34 @@ async fn resolve_metadata_schema(duckdb: &DuckDbMaintenanceExecutor) -> EtlResul
 
 /// Lists active DuckLake table names from the metadata catalog.
 async fn list_ducklake_tables(
-    metadata_pg_pool: &PgPool,
+    metadata_pg_pool: &DuckLakeMetadataPool,
     metadata_schema: &str,
     table_namespace: Option<&str>,
 ) -> EtlResult<Vec<DuckLakeMaintenanceTableName>> {
     let sql = namespaced_tables_query(metadata_schema);
-    let rows: Vec<(Option<String>, String, String)> = async {
-        let mut transaction = metadata_pg_pool.begin().await?;
-        let result = sqlx::query_as(AssertSqlSafe(sql))
-            .persistent(false)
-            .bind(table_namespace)
-            .fetch_all(&mut *transaction)
-            .await?;
-        transaction.commit().await?;
-        Ok::<_, sqlx::Error>(result)
-    }
-    .await
-    .map_err(|source| {
-        etl_error!(
-            ErrorKind::DestinationQueryFailed,
-            "DuckLake table list query failed",
-            format!("metadata_schema={metadata_schema}"),
-            source: source
-        )
-    })?;
+    let rows: Vec<(Option<String>, String, String)> = metadata_pg_pool
+        .read("list_tables", |pool| {
+            let sql = &sql;
+            async move {
+                let mut transaction = pool.begin().await?;
+                let result = sqlx::query_as(AssertSqlSafe(sql.as_str()))
+                    .persistent(false)
+                    .bind(table_namespace)
+                    .fetch_all(&mut *transaction)
+                    .await?;
+                transaction.commit().await?;
+                Ok::<_, sqlx::Error>(result)
+            }
+        })
+        .await
+        .map_err(|source| {
+            etl_error!(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake table list query failed",
+                format!("metadata_schema={metadata_schema}"),
+                source: source
+            )
+        })?;
     Ok(rows
         .into_iter()
         .map(|(namespace, schema_name, table_name)| {
@@ -1891,7 +1901,7 @@ async fn list_ducklake_tables(
 /// Loads committed and pending replay epochs from the DuckLake metadata
 /// catalog.
 async fn load_replay_epoch_state(
-    metadata_pg_pool: &PgPool,
+    metadata_pg_pool: &DuckLakeMetadataPool,
     metadata_schema: &str,
 ) -> EtlResult<DuckLakeReplayEpochState> {
     if !postgres_metadata_table_exists(metadata_pg_pool, metadata_schema, REPLAY_EPOCHS_TABLE)
@@ -1922,24 +1932,28 @@ async fn load_replay_epoch_state(
         quote_identifier(metadata_schema),
         quote_identifier(REPLAY_EPOCHS_TABLE)
     );
-    let rows: Vec<(String, String, Option<String>)> = async {
-        let mut transaction = metadata_pg_pool.begin().await?;
-        let result = sqlx::query_as(AssertSqlSafe(sql))
-            .persistent(false)
-            .fetch_all(&mut *transaction)
-            .await?;
-        transaction.commit().await?;
-        Ok::<_, sqlx::Error>(result)
-    }
-    .await
-    .map_err(|source| {
-        etl_error!(
-            ErrorKind::DestinationQueryFailed,
-            "DuckLake replay epoch query failed",
-            format!("metadata_schema={metadata_schema}"),
-            source: source
-        )
-    })?;
+    let rows: Vec<(String, String, Option<String>)> = metadata_pg_pool
+        .read("replay_epochs", |pool| {
+            let sql = &sql;
+            async move {
+                let mut transaction = pool.begin().await?;
+                let result = sqlx::query_as(AssertSqlSafe(sql.as_str()))
+                    .persistent(false)
+                    .fetch_all(&mut *transaction)
+                    .await?;
+                transaction.commit().await?;
+                Ok::<_, sqlx::Error>(result)
+            }
+        })
+        .await
+        .map_err(|source| {
+            etl_error!(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake replay epoch query failed",
+                format!("metadata_schema={metadata_schema}"),
+                source: source
+            )
+        })?;
 
     let mut state = DuckLakeReplayEpochState::default();
     for (table_name, replay_epoch, pending_replay_epoch) in rows {
@@ -1955,49 +1969,50 @@ async fn load_replay_epoch_state(
 
 /// Returns whether one metadata table exists in the DuckLake PostgreSQL schema.
 async fn postgres_metadata_table_exists(
-    metadata_pg_pool: &PgPool,
+    metadata_pg_pool: &DuckLakeMetadataPool,
     metadata_schema: &str,
     table_name: &str,
 ) -> EtlResult<bool> {
-    let exists: bool = async {
-        let mut transaction = metadata_pg_pool.begin().await?;
-        let result = sqlx::query_scalar(
-            "SELECT EXISTS (
+    let exists: bool = metadata_pg_pool
+        .read("table_exists", |pool| async move {
+            let mut transaction = pool.begin().await?;
+            let result = sqlx::query_scalar(
+                "SELECT EXISTS (
              SELECT 1
              FROM information_schema.tables
              WHERE table_schema = $1 AND table_name = $2
          );",
-        )
-        .persistent(false)
-        .bind(metadata_schema)
-        .bind(table_name)
-        .fetch_one(&mut *transaction)
-        .await?;
-        transaction.commit().await?;
-        Ok::<_, sqlx::Error>(result)
-    }
-    .await
-    .map_err(|source| {
-        etl_error!(
-            ErrorKind::DestinationQueryFailed,
-            "DuckLake metadata table existence query failed",
-            format!("metadata_schema={metadata_schema}, table_name={table_name}"),
-            source: source
-        )
-    })?;
+            )
+            .persistent(false)
+            .bind(metadata_schema)
+            .bind(table_name)
+            .fetch_one(&mut *transaction)
+            .await?;
+            transaction.commit().await?;
+            Ok::<_, sqlx::Error>(result)
+        })
+        .await
+        .map_err(|source| {
+            etl_error!(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake metadata table existence query failed",
+                format!("metadata_schema={metadata_schema}, table_name={table_name}"),
+                source: source
+            )
+        })?;
 
     Ok(exists)
 }
 
 /// Returns whether one metadata table contains a column.
 async fn postgres_metadata_column_exists(
-    metadata_pg_pool: &PgPool,
+    metadata_pg_pool: &DuckLakeMetadataPool,
     metadata_schema: &str,
     table_name: &str,
     column_name: &str,
 ) -> EtlResult<bool> {
-    let exists: bool = async {
-        let mut transaction = metadata_pg_pool.begin().await?;
+    let exists: bool = metadata_pg_pool.read("column_exists", |pool| async move {
+        let mut transaction = pool.begin().await?;
         let result = sqlx::query_scalar(
             "select exists (
                  select 1
@@ -2013,7 +2028,7 @@ async fn postgres_metadata_column_exists(
         .await?;
         transaction.commit().await?;
         Ok::<_, sqlx::Error>(result)
-    }
+    })
     .await
     .map_err(|source| {
         etl_error!(
@@ -2032,7 +2047,7 @@ async fn postgres_metadata_column_exists(
 /// Runs inline flush for tables that crossed the pending-inline threshold.
 async fn run_inline_flush(
     duckdb: &DuckDbMaintenanceExecutor,
-    metadata_pg_pool: &PgPool,
+    metadata_pg_pool: &DuckLakeMetadataPool,
     metadata_schema: &str,
     table_names: &[DuckLakeMaintenanceTableName],
     config: InlineFlushMaintenanceConfig,
@@ -2091,7 +2106,7 @@ async fn run_inline_flush(
 /// Runs bounded merge-adjacent-files on selected tables.
 async fn run_merge_adjacent_files(
     duckdb: &DuckDbMaintenanceExecutor,
-    metadata_pg_pool: &PgPool,
+    metadata_pg_pool: &DuckLakeMetadataPool,
     metadata_schema: &str,
     table_names: &[DuckLakeMaintenanceTableName],
     config: &MergeAdjacentFilesMaintenanceConfig,
@@ -2175,7 +2190,7 @@ async fn merge_adjacent_files_for_rewrite(duckdb: &DuckDbMaintenanceExecutor) ->
 /// Runs bounded rewrite-data-files on selected tables.
 async fn run_rewrite_data_files(
     duckdb: &DuckDbMaintenanceExecutor,
-    metadata_pg_pool: &PgPool,
+    metadata_pg_pool: &DuckLakeMetadataPool,
     metadata_schema: &str,
     table_names: &[DuckLakeMaintenanceTableName],
     config: RewriteDataFilesMaintenanceConfig,
@@ -2259,7 +2274,7 @@ async fn run_cleanup_old_files(
 /// Removes obsolete ETL helper rows and compacts helper tables on every run.
 async fn run_replay_helper_cleanup(
     duckdb: &DuckDbMaintenanceExecutor,
-    metadata_pg_pool: &PgPool,
+    metadata_pg_pool: &DuckLakeMetadataPool,
     metadata_schema: &str,
     table_names: &[DuckLakeMaintenanceTableName],
     max_compacted_files: u32,
@@ -2347,7 +2362,7 @@ async fn run_replay_helper_cleanup(
 
 /// Selects tables with small-file pressure for merge-adjacent-files.
 async fn select_merge_tables(
-    metadata_pg_pool: &PgPool,
+    metadata_pg_pool: &DuckLakeMetadataPool,
     metadata_schema: &str,
     table_names: &[DuckLakeMaintenanceTableName],
     target_file_size_bytes: Option<i64>,
@@ -2411,7 +2426,7 @@ fn should_merge(
 
 /// Selects tables with delete pressure for rewrite-data-files.
 async fn select_rewrite_tables(
-    metadata_pg_pool: &PgPool,
+    metadata_pg_pool: &DuckLakeMetadataPool,
     metadata_schema: &str,
     table_names: &[DuckLakeMaintenanceTableName],
     min_active_data_files: i64,
@@ -3125,11 +3140,11 @@ struct DuckLakePendingInlineDataSizes {
 #[derive(Clone)]
 struct DuckLakePendingInlineSizeSampler {
     metadata_schema: String,
-    pool: PgPool,
+    pool: DuckLakeMetadataPool,
 }
 
 impl DuckLakePendingInlineSizeSampler {
-    fn new(metadata_schema: String, pool: PgPool) -> Self {
+    fn new(metadata_schema: String, pool: DuckLakeMetadataPool) -> Self {
         Self { metadata_schema, pool }
     }
 
@@ -3138,26 +3153,31 @@ impl DuckLakePendingInlineSizeSampler {
         table_name: &DuckLakeMaintenanceTableName,
     ) -> EtlResult<DuckLakePendingInlineDataSizes> {
         let sql = pending_inline_data_bytes_query(&self.metadata_schema);
-        let inlined_bytes: i64 = async {
-            let mut transaction = self.pool.begin().await?;
-            let result = sqlx::query_scalar(AssertSqlSafe(sql))
-                .persistent(false)
-                .bind(table_name.schema())
-                .bind(table_name.table())
-                .bind(table_name.namespace())
-                .fetch_one(&mut *transaction)
-                .await?;
-            transaction.commit().await?;
-            Ok::<_, sqlx::Error>(result)
-        }
-        .await
-        .map_err(|source| {
-            etl_error!(
-                ErrorKind::DestinationQueryFailed,
-                "DuckLake inline-size sampler query failed",
-                source: source
-            )
-        })?;
+        let inlined_bytes: i64 = self
+            .pool
+            .read("inline_size", |pool| {
+                let sql = &sql;
+                async move {
+                    let mut transaction = pool.begin().await?;
+                    let result = sqlx::query_scalar(AssertSqlSafe(sql.as_str()))
+                        .persistent(false)
+                        .bind(table_name.schema())
+                        .bind(table_name.table())
+                        .bind(table_name.namespace())
+                        .fetch_one(&mut *transaction)
+                        .await?;
+                    transaction.commit().await?;
+                    Ok::<_, sqlx::Error>(result)
+                }
+            })
+            .await
+            .map_err(|source| {
+                etl_error!(
+                    ErrorKind::DestinationQueryFailed,
+                    "DuckLake inline-size sampler query failed",
+                    source: source
+                )
+            })?;
         Ok(record_pending_inline_data_sizes(inlined_bytes, &table_name.id()))
     }
 }
@@ -3280,7 +3300,7 @@ impl DuckLakeTableStorageMetrics {
 }
 
 async fn query_table_storage_metrics(
-    metadata_pg_pool: &PgPool,
+    metadata_pg_pool: &DuckLakeMetadataPool,
     metadata_schema: &str,
     table_name: &DuckLakeMaintenanceTableName,
 ) -> EtlResult<DuckLakeTableStorageMetrics> {
@@ -3293,27 +3313,31 @@ async fn query_table_storage_metrics(
         active_delete_files,
         _active_delete_bytes,
         deleted_rows,
-    ): (i64, i64, i64, i64, i64, i64, i64) = async {
-        let mut transaction = metadata_pg_pool.begin().await?;
-        let result = sqlx::query_as(AssertSqlSafe(sql))
-            .persistent(false)
-            .bind(table_name.schema())
-            .bind(table_name.table())
-            .bind(table_name.namespace())
-            .fetch_one(&mut *transaction)
-            .await?;
-        transaction.commit().await?;
-        Ok::<_, sqlx::Error>(result)
-    }
-    .await
-    .map_err(|source| {
-        etl_error!(
-            ErrorKind::DestinationQueryFailed,
-            "DuckLake table storage metrics query failed",
-            format!("table={table_name}, metadata_schema={metadata_schema}"),
-            source: source
-        )
-    })?;
+    ): (i64, i64, i64, i64, i64, i64, i64) = metadata_pg_pool
+        .read("table_storage_metrics", |pool| {
+            let sql = &sql;
+            async move {
+                let mut transaction = pool.begin().await?;
+                let result = sqlx::query_as(AssertSqlSafe(sql.as_str()))
+                    .persistent(false)
+                    .bind(table_name.schema())
+                    .bind(table_name.table())
+                    .bind(table_name.namespace())
+                    .fetch_one(&mut *transaction)
+                    .await?;
+                transaction.commit().await?;
+                Ok::<_, sqlx::Error>(result)
+            }
+        })
+        .await
+        .map_err(|source| {
+            etl_error!(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake table storage metrics query failed",
+                format!("table={table_name}, metadata_schema={metadata_schema}"),
+                source: source
+            )
+        })?;
 
     Ok(DuckLakeTableStorageMetrics {
         active_data_files,

@@ -1,7 +1,7 @@
 use etl::error::{ErrorKind, EtlResult};
-use etl_maintenance::ducklake::pending_inline_data_bytes_query;
+use etl_maintenance::ducklake::{DuckLakeMetadataPool, pending_inline_data_bytes_query};
 use metrics::gauge;
-use sqlx::{AssertSqlSafe, PgPool};
+use sqlx::AssertSqlSafe;
 
 use crate::{
     ducklake::{
@@ -21,12 +21,12 @@ pub(super) struct DuckLakePendingInlineDataSizes {
 #[derive(Clone)]
 pub(super) struct DuckLakePendingInlineSizeSampler {
     metadata_schema: String,
-    pool: PgPool,
+    pool: DuckLakeMetadataPool,
 }
 
 impl DuckLakePendingInlineSizeSampler {
     /// Builds a sampler backed by the shared DuckLake metadata pool.
-    pub(super) fn new(metadata_schema: String, pool: PgPool) -> Self {
+    pub(super) fn new(metadata_schema: String, pool: DuckLakeMetadataPool) -> Self {
         Self { metadata_schema, pool }
     }
 
@@ -36,26 +36,31 @@ impl DuckLakePendingInlineSizeSampler {
         table_name: &DuckLakeTableName,
     ) -> EtlResult<DuckLakePendingInlineDataSizes> {
         let sql = pending_inline_data_bytes_query(&self.metadata_schema);
-        let inlined_bytes: i64 = async {
-            let mut transaction = self.pool.begin().await?;
-            let result = sqlx::query_scalar(AssertSqlSafe(sql))
-                .persistent(false)
-                .bind(table_name.schema())
-                .bind(table_name.table())
-                .bind(table_name.namespace())
-                .fetch_one(&mut *transaction)
-                .await?;
-            transaction.commit().await?;
-            Ok::<_, sqlx::Error>(result)
-        }
-        .await
-        .map_err(|source| {
-            classified_error(
-                ErrorKind::DestinationQueryFailed,
-                "DuckLake inline-size sampler query failed",
-                source,
-            )
-        })?;
+        let inlined_bytes: i64 = self
+            .pool
+            .read("inline_size", |pool| {
+                let sql = &sql;
+                async move {
+                    let mut transaction = pool.begin().await?;
+                    let result = sqlx::query_scalar(AssertSqlSafe(sql.as_str()))
+                        .persistent(false)
+                        .bind(table_name.schema())
+                        .bind(table_name.table())
+                        .bind(table_name.namespace())
+                        .fetch_one(&mut *transaction)
+                        .await?;
+                    transaction.commit().await?;
+                    Ok::<_, sqlx::Error>(result)
+                }
+            })
+            .await
+            .map_err(|source| {
+                classified_error(
+                    ErrorKind::DestinationQueryFailed,
+                    "DuckLake inline-size sampler query failed",
+                    source,
+                )
+            })?;
         Ok(record_pending_inline_data_sizes(inlined_bytes, &table_name.id()))
     }
 }
