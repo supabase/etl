@@ -280,9 +280,11 @@ built-in date, interval, float, or bytea literals on text columns, whose text
 follows `DateStyle`, `IntervalStyle`, `extra_float_digits`, or `bytea_output`.
 
 Types ETL replicates as text, such as enums, domains, and extension types, keep
-a default only when it is a literal of the column's own type, as enum defaults
-are. Domain defaults are skipped, because the domain's type modifier can change
-the value PostgreSQL stores.
+a default only when ETL knows the text PostgreSQL stores. Enum defaults are
+kept. A domain over a built-in type without a type modifier, such as a domain
+over `text`, `integer`, or `date`, keeps a constant default as its stored text.
+Defaults of domains whose base type has a modifier, such as `numeric(10,2)`, are
+skipped with a warning, because the modifier rounds or pads the stored value.
 
 ETL does not issue table-wide `UPDATE`, `MERGE`, CTAS/swap, or materialization
 operations to backfill historical destination rows. The result depends on why

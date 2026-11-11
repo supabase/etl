@@ -106,36 +106,99 @@ fn keeps_value_in_column(expression: &DefaultExpression, typ: &Type, modifier: i
     }
 }
 
-/// Returns whether ETL keeps the default `expression` of a column whose type
-/// has OID `type_oid` and `format_type` output `formatted_type`.
+/// The type a domain is built on, after resolving nested domains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DomainBaseType<'a> {
+    /// OID of the base type.
+    pub oid: u32,
+    /// Type modifier of the innermost domain, or `-1` for none.
+    pub modifier: i32,
+    /// `format_type` output for the base type and modifier.
+    pub formatted_type: &'a str,
+}
+
+/// Returns the default ETL replicates for a column, or `None` when no
+/// destination can reproduce the value Postgres stores.
 ///
-/// ETL replicates a type it does not know, such as a domain, an enum, or an
-/// extension type, as text: the type's output for each value. Such a default
-/// is kept only when it is one string literal cast to the column's own type
-/// without a type modifier. Postgres has then already run the type's input
-/// function, so the literal is the text of the value it stores. Any other
-/// form can hide a conversion that changes the value. A domain default renders
-/// as its base type's value, as in `9.999` or `(9.999)::public.price`, and
-/// the domain's type modifier then rounds or truncates it.
-pub fn keeps_column_default(type_oid: u32, formatted_type: &str, expression: &str) -> bool {
-    if Type::from_oid(type_oid).is_some() {
-        return true;
+/// Built-in types keep their default, which destinations parse themselves.
+/// ETL replicates any other type as text: the type's output for each value.
+/// Such a column keeps a default that is one string literal cast to the
+/// column's own unmodified type, as enum defaults render; Postgres has then
+/// already run the type's input function.
+///
+/// A domain default renders as a value of `base_type`, before the domain's
+/// type modifier pads or rounds it. When the base type is built in and
+/// unmodified, and the default is one constant of it, the constant's text is
+/// what Postgres stores, so the default becomes that text as a string literal.
+/// Constants render with `etl.describe_table_schema`'s pinned output settings,
+/// as replicated values do. Defaults that convert a value, such as an integer
+/// domain's `1.5`, are not constants of the base type and are dropped.
+pub fn replicated_column_default(
+    type_oid: u32,
+    formatted_type: &str,
+    base_type: Option<DomainBaseType<'_>>,
+    expression: String,
+) -> Option<String> {
+    if Type::from_oid(type_oid).is_some() || own_type_literal(&expression, formatted_type).is_some()
+    {
+        return Some(expression);
+    }
+
+    let base_type = base_type?;
+    let typ = Type::from_oid(base_type.oid)?;
+    if base_type.modifier >= 0 {
+        return None;
+    }
+
+    let value = base_constant_text(expression.trim(), &typ, base_type.formatted_type)?;
+
+    Some(format!("'{}'", value.replace('\'', "''")))
+}
+
+/// Returns the string literal of `expression` when it is one string literal
+/// cast to `formatted_type`, which must carry no type modifier.
+fn own_type_literal<'a>(expression: &'a str, formatted_type: &str) -> Option<&'a str> {
+    if formatted_type.contains('(') {
+        return None;
     }
 
     let expression = expression.trim();
-    let Some(cast_start) = top_level_cast_start(expression) else {
-        return false;
-    };
+    let cast_start = top_level_cast_start(expression)?;
+    let cast_subject = expression.get(..cast_start)?.trim();
+    let cast_type = expression.get(cast_start.checked_add(2)?..)?.trim();
 
-    let cast_subject = expression.get(..cast_start).map(str::trim);
-    let cast_type = cast_start
-        .checked_add(2)
-        .and_then(|type_start| expression.get(type_start..))
-        .map(str::trim);
+    (cast_type == formatted_type && is_string_literal(cast_subject)).then_some(cast_subject)
+}
 
-    !formatted_type.contains('(')
-        && cast_type == Some(formatted_type)
-        && cast_subject.is_some_and(is_string_literal)
+/// Returns the output text of a domain default that is one constant of the
+/// built-in base type `typ`.
+///
+/// `pg_get_expr` prints most constants as a string literal cast to their type,
+/// but prints positive integer and numeric constants and booleans bare.
+fn base_constant_text(expression: &str, typ: &Type, formatted_type: &str) -> Option<String> {
+    if let Some(literal) = own_type_literal(expression, formatted_type) {
+        return unquote_postgres_string_literal(literal);
+    }
+
+    match typ {
+        // The boolean output function prints `t` and `f`.
+        &Type::BOOL if expression == "true" => Some("t".to_owned()),
+        &Type::BOOL if expression == "false" => Some("f".to_owned()),
+        // A fraction is a numeric constant that the integer cast rounds.
+        typ if is_integer_type(typ) && expression.bytes().all(|byte| byte.is_ascii_digit()) => {
+            (!expression.is_empty()).then(|| expression.to_owned())
+        }
+        // Negative constants render as cast string literals, so a bare one
+        // starts and ends with a digit.
+        &Type::NUMERIC
+            if is_numeric_literal(expression)
+                && expression.starts_with(|ch: char| ch.is_ascii_digit())
+                && expression.ends_with(|ch: char| ch.is_ascii_digit()) =>
+        {
+            Some(expression.to_owned())
+        }
+        _ => None,
+    }
 }
 
 /// Returns the character length of a SQL string literal.
@@ -894,21 +957,69 @@ mod tests {
     }
 
     #[test]
-    fn keeps_unknown_type_defaults_only_as_own_type_literals() {
+    fn replicates_unknown_type_defaults_as_their_stored_text() {
         // Any OID that is not a built-in type, such as a domain or an enum.
         let unknown_oid = 16_385;
+        let base = |typ: Type, modifier: i32, formatted_type: &'static str| {
+            Some(DomainBaseType { oid: typ.oid(), modifier, formatted_type })
+        };
+        let replicated = |formatted_type: &str, base_type, expression: &str| {
+            replicated_column_default(unknown_oid, formatted_type, base_type, expression.to_owned())
+        };
 
-        assert!(keeps_column_default(Type::NUMERIC.oid(), "numeric(10,2)", "9.999"));
-        assert!(keeps_column_default(unknown_oid, "public.status", "'pending'::public.status"));
-        assert!(keeps_column_default(unknown_oid, "public.price[]", "'{10.00}'::public.price[]"));
-        // Domain defaults render as their base type's value.
-        assert!(!keeps_column_default(unknown_oid, "public.price", "9.999"));
-        assert!(!keeps_column_default(unknown_oid, "public.price", "(9.999)::public.price"));
-        assert!(!keeps_column_default(unknown_oid, "public.code", "'ab'::bpchar"));
-        assert!(!keeps_column_default(unknown_oid, "public.code", "('ab'::bpchar)::public.code"));
-        // A type modifier can hide a length coercion.
-        assert!(!keeps_column_default(unknown_oid, "public.vec(3)", "'[1,2]'::public.vec(3)"));
-        assert!(!keeps_column_default(unknown_oid, "public.status", "'a'::public.status::text"));
+        assert_eq!(
+            replicated_column_default(Type::NUMERIC.oid(), "numeric(10,2)", None, "9.999".into())
+                .as_deref(),
+            Some("9.999")
+        );
+        // Enum literals render cast to their own type.
+        assert_eq!(
+            replicated("public.status", None, "'pending'::public.status").as_deref(),
+            Some("'pending'::public.status")
+        );
+        assert_eq!(
+            replicated("public.price[]", None, "'{10.00}'::public.price[]").as_deref(),
+            Some("'{10.00}'::public.price[]")
+        );
+        // Constants of an unmodified built-in base type become their text.
+        for (base_type, expression, text) in [
+            (base(Type::TEXT, -1, "text"), "'it''s'::text", "'it''s'"),
+            (base(Type::INT4, -1, "integer"), "5", "'5'"),
+            (base(Type::INT4, -1, "integer"), "'-5'::integer", "'-5'"),
+            (base(Type::NUMERIC, -1, "numeric"), "1.50", "'1.50'"),
+            (base(Type::BOOL, -1, "boolean"), "true", "'t'"),
+            (base(Type::DATE, -1, "date"), "'2026-01-02'::date", "'2026-01-02'"),
+            (base(Type::INT4_ARRAY, -1, "integer[]"), "'{1,2}'::integer[]", "'{1,2}'"),
+        ] {
+            assert_eq!(
+                replicated("public.d", base_type, expression).as_deref(),
+                Some(text),
+                "{expression}"
+            );
+        }
+
+        for (base_type, expression) in [
+            // Without the base type, a domain default cannot be checked.
+            (None, "'x'::text"),
+            // The domain's type modifier pads or rounds the stored value.
+            (base(Type::NUMERIC, 655_366, "numeric(10,2)"), "1.2"),
+            (base(Type::BPCHAR, 9, "character(5)"), "'ab'::bpchar"),
+            // Integer domains round fractions.
+            (base(Type::INT4, -1, "integer"), "1.5"),
+            // Conversions are not constants of the base type.
+            (base(Type::DATE, -1, "date"), "('01/02/2026'::text)::date"),
+            (base(Type::FLOAT8, -1, "double precision"), "1.0"),
+            (base(Type::NUMERIC, -1, "numeric"), "(9.999)::public.d"),
+            // Unknown base types, such as an enum under a domain.
+            (
+                Some(DomainBaseType { oid: unknown_oid + 1, modifier: -1, formatted_type: "e" }),
+                "'a'::e",
+            ),
+        ] {
+            assert_eq!(replicated("public.d", base_type, expression), None, "{expression}");
+        }
+        // A type modifier on an unknown type can hide a length coercion.
+        assert_eq!(replicated("public.vec(3)", None, "'[1,2]'::public.vec(3)"), None);
     }
 
     #[test]

@@ -23,7 +23,7 @@ use etl::{
     },
 };
 use etl_postgres::{
-    default_expression::keeps_column_default,
+    default_expression::{DomainBaseType, replicated_column_default},
     tokio::test_utils::{PgDatabase, connect_to_pg_database},
     type_utils::convert_type_oid_to_type,
 };
@@ -100,6 +100,10 @@ struct DescribedColumn {
     default_expression: Option<String>,
 }
 
+/// A column's base type after resolving domains: OID, type modifier, and
+/// `format_type` output.
+type BaseType = (u32, i32, String);
+
 impl DescribedColumn {
     /// Builds the column the way ETL's schema snapshot does.
     fn new(
@@ -107,10 +111,18 @@ impl DescribedColumn {
         typname: String,
         formatted_type: String,
         modifier: i32,
+        base_type: BaseType,
         default_expression: Option<String>,
     ) -> Self {
-        let default_expression = default_expression
-            .filter(|expression| keeps_column_default(type_oid, &formatted_type, expression));
+        let (base_oid, base_modifier, base_formatted_type) = &base_type;
+        let base_type = (*base_oid != type_oid).then_some(DomainBaseType {
+            oid: *base_oid,
+            modifier: *base_modifier,
+            formatted_type: base_formatted_type,
+        });
+        let default_expression = default_expression.and_then(|expression| {
+            replicated_column_default(type_oid, &formatted_type, base_type, expression)
+        });
 
         Self {
             typ: convert_type_oid_to_type(type_oid),
@@ -191,15 +203,23 @@ impl Harness {
             .query_one(
                 &format!(
                     "select s.atttypid, s.typname, s.formatted_type, s.default_expression, \
-                     s.atttypmod from etl.describe_table_schema('{CASE_TABLE}'::regclass) s where \
-                     s.attname = 'c'"
+                     s.atttypmod, b.base_type_oid, b.base_typmod, b.base_formatted_type from \
+                     etl.describe_table_schema('{CASE_TABLE}'::regclass) s cross join lateral \
+                     etl.describe_base_type(s.atttypid, s.atttypmod) b where s.attname = 'c'"
                 ),
                 &[],
             )
             .await
             .unwrap();
 
-        DescribedColumn::new(row.get(0), row.get(1), row.get(2), row.get(4), row.get(3))
+        DescribedColumn::new(
+            row.get(0),
+            row.get(1),
+            row.get(2),
+            row.get(4),
+            (row.get(5), row.get(6), row.get(7)),
+            row.get(3),
+        )
     }
 
     /// Returns column `c` from the DDL messages emitted since the last call.
@@ -236,6 +256,11 @@ impl Harness {
             column["typname"].as_str().unwrap().to_owned(),
             column["formatted_type"].as_str().unwrap().to_owned(),
             i32::try_from(column["atttypmod"].as_i64().unwrap()).unwrap(),
+            (
+                u32::try_from(column["base_type_oid"].as_i64().unwrap()).unwrap(),
+                i32::try_from(column["base_typmod"].as_i64().unwrap()).unwrap(),
+                column["base_formatted_type"].as_str().unwrap().to_owned(),
+            ),
             column["default_expression"].as_str().map(ToOwned::to_owned),
         )
     }
@@ -876,41 +901,81 @@ async fn unknown_type_default_denotes_backfilled_text() {
     harness
         .user
         .batch_execute(
-            "create domain public.price as numeric(10,2); create domain public.code as \
-             character(5); create domain public.flag as boolean; create type public.status as \
-             enum ('pending', 'done');",
+            "create domain public.d_text as text; create domain public.d_int as integer; create \
+             domain public.d_bigint as bigint; create domain public.d_numeric as numeric; create \
+             domain public.d_float as double precision; create domain public.d_bool as boolean; \
+             create domain public.d_date as date; create domain public.d_uuid as uuid; create \
+             domain public.d_tstz as timestamptz; create domain public.d_jsonb as jsonb; create \
+             domain public.d_ints as integer[]; create domain public.d_nested as public.d_text; \
+             create domain public.price as numeric(10,2); create domain public.nested_price as \
+             public.price; create domain public.code as character(5); create type public.status \
+             as enum ('pending', 'done');",
         )
         .await
         .unwrap();
+    let mut hostile = SessionSettings::etl();
+    hostile.datestyle = "German, DMY".to_owned();
+    hostile.timezone = "Asia/Kathmandu".to_owned();
+    hostile.intervalstyle = "sql_standard".to_owned();
+    hostile.extra_float_digits = 0;
 
     // Destinations store a type ETL does not know as text, so a kept default
     // must be the text Postgres backfills. A domain default renders as its
     // base type's value, before the domain's type modifier rounds or pads it.
-    let mut kept = Vec::new();
-    for (column_type, literal) in [
-        ("public.price", "9.999"),
-        ("public.price", "'9.999'::public.price"),
-        ("public.code", "'ab'"),
-        ("public.flag", "true"),
-        ("public.price[]", "'{9.999}'"),
-        ("public.status", "'pending'"),
-        ("public.status[]", "'{pending,done}'"),
-    ] {
-        let case = DefaultCase { column_type: column_type.to_owned(), literal: literal.to_owned() };
-        assert!(harness.add_defaulted_column(&case, &SessionSettings::etl()).await);
-        let column = harness.bootstrap_column().await;
-        let Some(expression) = column.default_expression.as_deref() else {
-            continue;
-        };
-        let parsed = parse_default_expression(expression, &column.typ, column.modifier).unwrap();
-        let (_, text) = plain_literal(&parsed);
+    let cases = [
+        ("public.d_text", "'it''s'", true),
+        ("public.d_int", "5", true),
+        ("public.d_int", "-5", true),
+        ("public.d_bigint", "7", true),
+        ("public.d_numeric", "1.50", true),
+        ("public.d_bool", "true", true),
+        ("public.d_date", "'2026-01-02'", true),
+        ("public.d_uuid", "'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11'", true),
+        ("public.d_tstz", "'2026-01-02 03:04:05+05'", true),
+        ("public.d_jsonb", r#"'{"b": 1, "a": 2}'"#, true),
+        ("public.d_ints", "'{1,2}'", true),
+        ("public.d_nested", "'y'", true),
+        ("public.price[]", "'{9.999}'", true),
+        ("public.status", "'pending'", true),
+        ("public.status[]", "'{pending,done}'", true),
+        // The domain's type modifier rounds or pads the stored value.
+        ("public.price", "9.999", false),
+        ("public.price", "'9.999'::public.price", false),
+        ("public.nested_price", "1.239", false),
+        ("public.code", "'ab'", false),
+        // Conversions that round or read the session.
+        ("public.d_int", "1.5", false),
+        ("public.d_float", "1.0", false),
+        ("public.d_date", "'01/02/2026'::text::date", false),
+    ];
+    for settings in [SessionSettings::etl(), hostile] {
+        for (column_type, literal, expect_kept) in cases {
+            let case =
+                DefaultCase { column_type: column_type.to_owned(), literal: literal.to_owned() };
+            assert!(
+                harness.add_defaulted_column(&case, &settings).await,
+                "{column_type} {literal}"
+            );
+            let backfilled = harness.backfilled_value().await;
+            let message = harness.ddl_message_column().await;
+            let bootstrap = harness.bootstrap_column().await;
 
-        assert_eq!(Some(text), harness.backfilled_value().await, "{column_type} default {literal}");
-        kept.push(column_type);
+            for column in [message, bootstrap] {
+                let kept = column.default_expression.as_deref().and_then(|expression| {
+                    parse_default_expression(expression, &column.typ, column.modifier)
+                });
+                assert_eq!(
+                    kept.is_some(),
+                    expect_kept,
+                    "{column_type} default {literal}: {column:?}"
+                );
+                if let Some(parsed) = kept {
+                    let (_, text) = plain_literal(&parsed);
+                    assert_eq!(Some(text), backfilled, "{column_type} default {literal}");
+                }
+            }
+        }
     }
-
-    // Arrays of domains and enums store the value the literal spells.
-    assert_eq!(kept, ["public.price[]", "public.status", "public.status[]"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -660,6 +660,9 @@ impl<'a> PgReplicationTransactionCore<'a> {
                             'atttypid', s.atttypid::pg_catalog.int8,
                             'atttypmod', s.atttypmod,
                             'formatted_type', s.formatted_type,
+                            'base_type_oid', b.base_type_oid::pg_catalog.int8,
+                            'base_typmod', b.base_typmod,
+                            'base_formatted_type', b.base_formatted_type,
                             'attnotnull', s.attnotnull,
                             'default_expression', s.default_expression
                         )
@@ -668,6 +671,26 @@ impl<'a> PgReplicationTransactionCore<'a> {
                     '[]'::pg_catalog.jsonb
                 ) as columns
                 from etl.describe_table_schema({table_id}) s
+                -- Resolves domains as `etl.describe_base_type` does, inline so
+                -- source objects installed before that helper keep working.
+                cross join lateral (
+                    with recursive chain(type_oid, typmod, depth) as (
+                        select s.atttypid, s.atttypmod, 0
+                        union all
+                        select t.typbasetype, t.typtypmod, c.depth + 1
+                        from chain c
+                        join pg_catalog.pg_type t on t.oid = c.type_oid
+                        where t.typtype = 'd'
+                          and c.depth < 64
+                    )
+                    select
+                        c.type_oid as base_type_oid,
+                        c.typmod as base_typmod,
+                        pg_catalog.format_type(c.type_oid, c.typmod) as base_formatted_type
+                    from chain c
+                    order by c.depth desc
+                    limit 1
+                ) b
             )
             select
                 ti.schema_name,
