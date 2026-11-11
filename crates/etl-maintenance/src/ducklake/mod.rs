@@ -2,12 +2,14 @@
 
 mod compatibility;
 mod duckdb_error;
+mod metadata;
 mod namespace;
 mod rewrite;
 mod runner;
 
 pub use compatibility::duckdb_version_check_sql;
 pub use duckdb_error::{RedactedDuckDbError, redact_credentials};
+pub use metadata::DuckLakeMetadataPool;
 pub use namespace::{namespace_version_check_sql, namespaced_tables_query, table_namespace_filter};
 pub use rewrite::DataFileRewriteReason;
 pub use runner::{

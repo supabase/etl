@@ -5,11 +5,13 @@ use std::{
 
 use chrono::Utc;
 use etl::error::{ErrorKind, EtlResult};
-use etl_maintenance::ducklake::{RedactedDuckDbError, table_namespace_filter};
+use etl_maintenance::ducklake::{
+    DuckLakeMetadataPool, RedactedDuckDbError, table_namespace_filter,
+};
 use metrics::{Unit, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
 use parking_lot::Mutex;
 use pg_escape::{quote_identifier, quote_literal};
-use sqlx::{AssertSqlSafe, PgPool};
+use sqlx::AssertSqlSafe;
 use tokio::time::{Duration, Instant, MissedTickBehavior};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::warn;
@@ -47,6 +49,9 @@ pub(crate) const ETL_DUCKLAKE_INLINE_FLUSH_ROWS: &str = "etl_ducklake_inline_flu
 pub(crate) const ETL_DUCKLAKE_INLINE_FLUSH_DURATION_SECONDS: &str =
     "etl_ducklake_inline_flush_duration_seconds";
 pub(crate) const ETL_DUCKLAKE_RETRIES_TOTAL: &str = "etl_ducklake_retries_total";
+/// Transitions from pooled catalog reads to the direct catalog connection.
+pub(super) const ETL_DUCKLAKE_CATALOG_POOLER_FALLBACKS_TOTAL: &str =
+    "etl_ducklake_catalog_pooler_fallbacks_total";
 pub(crate) const ETL_DUCKLAKE_FAILED_BATCHES_TOTAL: &str = "etl_ducklake_failed_batches_total";
 pub(crate) const ETL_DUCKLAKE_REPLAYED_BATCHES_TOTAL: &str = "etl_ducklake_replayed_batches_total";
 pub(crate) const ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_PAUSE_DURATION_SECONDS: &str =
@@ -213,6 +218,12 @@ pub(crate) fn register_metrics() {
             "Retry attempts for DuckLake write paths, labeled by batch_kind and retry_scope."
         );
         describe_counter!(
+            ETL_DUCKLAKE_CATALOG_POOLER_FALLBACKS_TOTAL,
+            Unit::Count,
+            "DuckLake replicator metadata readers that switched to the direct catalog after a \
+             pooler read failed, counted once per destination instance."
+        );
+        describe_counter!(
             ETL_DUCKLAKE_FAILED_BATCHES_TOTAL,
             Unit::Count,
             "DuckLake batch executions that still failed after retries, labeled by batch_kind and \
@@ -325,7 +336,7 @@ pub(crate) fn register_metrics() {
 /// Spawns the periodic DuckLake sampler task on the shared metadata pool.
 pub(super) fn spawn_ducklake_metrics_sampler(
     metadata_schema: String,
-    metadata_pg_pool: PgPool,
+    metadata_pg_pool: DuckLakeMetadataPool,
     applied_tables: Arc<Mutex<HashSet<DuckLakeTableName>>>,
 ) -> DuckLakeMetricsSampler {
     let handle = AbortOnDropHandle::new(tokio::spawn(run_ducklake_metrics_sampler(
@@ -340,7 +351,7 @@ pub(super) fn spawn_ducklake_metrics_sampler(
 /// Periodically samples DuckLake metadata from PostgreSQL.
 async fn run_ducklake_metrics_sampler(
     metadata_schema: String,
-    metadata_pg_pool: PgPool,
+    metadata_pg_pool: DuckLakeMetadataPool,
     applied_tables: Arc<Mutex<HashSet<DuckLakeTableName>>>,
 ) {
     let mut interval =
@@ -390,7 +401,7 @@ async fn run_ducklake_metrics_sampler(
 
 /// Samples storage health for one table without affecting the write path.
 async fn record_table_storage_metrics(
-    metadata_pg_pool: &PgPool,
+    metadata_pg_pool: &DuckLakeMetadataPool,
     metadata_schema: &str,
     table_name: DuckLakeTableName,
 ) -> EtlResult<()> {
@@ -425,7 +436,7 @@ async fn record_table_storage_metrics(
 
 /// Samples global snapshot and deletion backlog gauges.
 async fn record_catalog_maintenance_metrics(
-    metadata_pg_pool: &PgPool,
+    metadata_pg_pool: &DuckLakeMetadataPool,
     metadata_schema: &str,
 ) -> EtlResult<()> {
     let metrics = query_catalog_maintenance_metrics(metadata_pg_pool, metadata_schema).await?;
@@ -452,7 +463,7 @@ async fn record_catalog_maintenance_metrics(
 
 /// Returns table-level storage health from the DuckLake metadata tables.
 pub(super) async fn query_table_storage_metrics(
-    metadata_pg_pool: &PgPool,
+    metadata_pg_pool: &DuckLakeMetadataPool,
     metadata_schema: &str,
     table_name: &DuckLakeTableName,
 ) -> EtlResult<DuckLakeTableStorageMetrics> {
@@ -465,27 +476,31 @@ pub(super) async fn query_table_storage_metrics(
         active_delete_files,
         active_delete_bytes,
         deleted_rows,
-    ): (i64, i64, i64, i64, i64, i64, i64) = async {
-        let mut transaction = metadata_pg_pool.begin().await?;
-        let result = sqlx::query_as(AssertSqlSafe(sql))
-            .persistent(false)
-            .bind(table_name.schema())
-            .bind(table_name.table())
-            .bind(table_name.namespace())
-            .fetch_one(&mut *transaction)
-            .await?;
-        transaction.commit().await?;
-        Ok::<_, sqlx::Error>(result)
-    }
-    .await
-    .map_err(|source| {
-        classified_error_with_detail(
-            ErrorKind::DestinationQueryFailed,
-            "DuckLake table storage metrics query failed",
-            format!("table={table_name}, metadata_schema={metadata_schema}"),
-            source,
-        )
-    })?;
+    ): (i64, i64, i64, i64, i64, i64, i64) = metadata_pg_pool
+        .read("table_storage_metrics", |pool| {
+            let sql = &sql;
+            async move {
+                let mut transaction = pool.begin().await?;
+                let result = sqlx::query_as(AssertSqlSafe(sql.as_str()))
+                    .persistent(false)
+                    .bind(table_name.schema())
+                    .bind(table_name.table())
+                    .bind(table_name.namespace())
+                    .fetch_one(&mut *transaction)
+                    .await?;
+                transaction.commit().await?;
+                Ok::<_, sqlx::Error>(result)
+            }
+        })
+        .await
+        .map_err(|source| {
+            classified_error_with_detail(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake table storage metrics query failed",
+                format!("table={table_name}, metadata_schema={metadata_schema}"),
+                source,
+            )
+        })?;
 
     Ok(DuckLakeTableStorageMetrics {
         active_data_files,
@@ -501,7 +516,7 @@ pub(super) async fn query_table_storage_metrics(
 /// Returns global maintenance backlog metrics from the DuckLake metadata
 /// tables.
 pub(super) async fn query_catalog_maintenance_metrics(
-    metadata_pg_pool: &PgPool,
+    metadata_pg_pool: &DuckLakeMetadataPool,
     metadata_schema: &str,
 ) -> EtlResult<DuckLakeCatalogMaintenanceMetrics> {
     let sql = catalog_maintenance_metrics_query(metadata_schema);
@@ -513,24 +528,28 @@ pub(super) async fn query_catalog_maintenance_metrics(
         files_scheduled_for_deletion_total,
         files_scheduled_for_deletion_bytes,
         oldest_scheduled_deletion_epoch_ms,
-    ): (i64, i64, Option<i64>, i64, i64, Option<i64>) = async {
-        let mut transaction = metadata_pg_pool.begin().await?;
-        let result = sqlx::query_as(AssertSqlSafe(sql))
-            .persistent(false)
-            .fetch_one(&mut *transaction)
-            .await?;
-        transaction.commit().await?;
-        Ok::<_, sqlx::Error>(result)
-    }
-    .await
-    .map_err(|source| {
-        classified_error_with_detail(
-            ErrorKind::DestinationQueryFailed,
-            "DuckLake catalog maintenance metrics query failed",
-            format!("metadata_schema={metadata_schema}"),
-            source,
-        )
-    })?;
+    ): (i64, i64, Option<i64>, i64, i64, Option<i64>) = metadata_pg_pool
+        .read("catalog_maintenance_metrics", |pool| {
+            let sql = &sql;
+            async move {
+                let mut transaction = pool.begin().await?;
+                let result = sqlx::query_as(AssertSqlSafe(sql.as_str()))
+                    .persistent(false)
+                    .fetch_one(&mut *transaction)
+                    .await?;
+                transaction.commit().await?;
+                Ok::<_, sqlx::Error>(result)
+            }
+        })
+        .await
+        .map_err(|source| {
+            classified_error_with_detail(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake catalog maintenance metrics query failed",
+                format!("metadata_schema={metadata_schema}"),
+                source,
+            )
+        })?;
 
     Ok(DuckLakeCatalogMaintenanceMetrics {
         active_data_files_total,
