@@ -1,6 +1,6 @@
 //! Parsing and representation of portable Postgres default expressions.
 
-use tokio_postgres::types::Type;
+use tokio_postgres::types::{Kind, Type};
 use tracing::warn;
 
 use crate::schema::numeric_modifiers;
@@ -127,12 +127,13 @@ pub struct DomainBaseType<'a> {
 /// already run the type's input function.
 ///
 /// A domain default renders as a value of `base_type`, before the domain's
-/// type modifier pads or rounds it. When the base type is built in and
-/// unmodified, and the default is one constant of it, the constant's text is
-/// what Postgres stores, so the default becomes that text as a string literal.
-/// Constants render with `etl.describe_table_schema`'s pinned output settings,
-/// as replicated values do. Defaults that convert a value, such as an integer
-/// domain's `1.5`, are not constants of the base type and are dropped.
+/// type modifier pads or rounds it. When the base type is built in, unmodified,
+/// and prints its values only under settings ETL pins, and the default is one
+/// constant of it, the constant's text is what Postgres stores, so the default
+/// becomes that text as a string literal. Constants render with
+/// `etl.describe_table_schema`'s pinned output settings, as replicated values
+/// do. Defaults that convert a value, such as an integer domain's `1.5`, are
+/// not constants of the base type and are dropped.
 pub fn replicated_column_default(
     type_oid: u32,
     formatted_type: &str,
@@ -146,13 +147,56 @@ pub fn replicated_column_default(
 
     let base_type = base_type?;
     let typ = Type::from_oid(base_type.oid)?;
-    if base_type.modifier >= 0 {
+    if base_type.modifier >= 0 || !has_pinned_output(&typ) {
         return None;
     }
 
     let value = base_constant_text(expression.trim(), &typ, base_type.formatted_type)?;
 
     Some(format!("'{}'", value.replace('\'', "''")))
+}
+
+/// Returns whether a built-in type's text output depends only on the settings
+/// ETL pins on its connections and on `etl.describe_table_schema`.
+///
+/// Other types, such as the `reg*` types, which print names relative to
+/// `search_path`, and `money`, which follows `lc_monetary`, can render a
+/// default differently from the values ETL replicates.
+fn has_pinned_output(typ: &Type) -> bool {
+    let typ = match typ.kind() {
+        Kind::Array(element) => element,
+        _ => typ,
+    };
+
+    matches!(
+        typ,
+        &Type::BOOL
+            | &Type::INT2
+            | &Type::INT4
+            | &Type::INT8
+            | &Type::NUMERIC
+            | &Type::FLOAT4
+            | &Type::FLOAT8
+            | &Type::TEXT
+            | &Type::VARCHAR
+            | &Type::BPCHAR
+            | &Type::NAME
+            | &Type::CHAR
+            | &Type::DATE
+            | &Type::TIME
+            | &Type::TIMETZ
+            | &Type::TIMESTAMP
+            | &Type::TIMESTAMPTZ
+            | &Type::INTERVAL
+            | &Type::UUID
+            | &Type::JSON
+            | &Type::JSONB
+            | &Type::BYTEA
+            | &Type::INET
+            | &Type::CIDR
+            | &Type::MACADDR
+            | &Type::MACADDR8
+    )
 }
 
 /// Returns the string literal of `expression` when it is one string literal
@@ -1010,6 +1054,11 @@ mod tests {
             (base(Type::DATE, -1, "date"), "('01/02/2026'::text)::date"),
             (base(Type::FLOAT8, -1, "double precision"), "1.0"),
             (base(Type::NUMERIC, -1, "numeric"), "(9.999)::public.d"),
+            // Output that follows unpinned settings: `search_path` and
+            // `lc_monetary`.
+            (base(Type::REGCLASS, -1, "regclass"), "'public.t'::regclass"),
+            (base(Type::REGCLASS_ARRAY, -1, "regclass[]"), "'{public.t}'::regclass[]"),
+            (base(Type::MONEY, -1, "money"), "'$1.00'::money"),
             // Unknown base types, such as an enum under a domain.
             (
                 Some(DomainBaseType { oid: unknown_oid + 1, modifier: -1, formatted_type: "e" }),

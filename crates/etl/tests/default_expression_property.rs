@@ -909,7 +909,8 @@ async fn unknown_type_default_denotes_backfilled_text() {
              domain public.d_ints as integer[]; create domain public.d_nested as public.d_text; \
              create domain public.price as numeric(10,2); create domain public.nested_price as \
              public.price; create domain public.code as character(5); create type public.status \
-             as enum ('pending', 'done');",
+             as enum ('pending', 'done'); create domain public.d_reg as regclass; create table \
+             public.reg_target (id int);",
         )
         .await
         .unwrap();
@@ -947,6 +948,9 @@ async fn unknown_type_default_denotes_backfilled_text() {
         ("public.d_int", "1.5", false),
         ("public.d_float", "1.0", false),
         ("public.d_date", "'01/02/2026'::text::date", false),
+        // `regclass` prints names relative to `search_path`: the pinned
+        // rendering says `public.reg_target`, replicated rows `reg_target`.
+        ("public.d_reg", "'public.reg_target'", false),
     ];
     for settings in [SessionSettings::etl(), hostile] {
         for (column_type, literal, expect_kept) in cases {
