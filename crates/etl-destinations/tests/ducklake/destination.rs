@@ -6838,7 +6838,7 @@ async fn catalog_metadata_pins_backend_and_keeps_replay_and_coordination_direct(
 /// requiring a real pooler for the writer.
 #[cfg(feature = "test-utils")]
 #[tokio::test(flavor = "multi_thread")]
-async fn catalog_metadata_without_coordination_waits_for_metrics_sampler() {
+async fn catalog_metadata_without_coordination_samples_metrics_through_pooler() {
     let lake = create_test_lake("catalog_pooler_metrics").await;
     catalog_pooler_roundtrip(
         lake.catalog_url.clone(),
@@ -6960,15 +6960,13 @@ async fn catalog_pooler_roundtrip(direct: Url, writer: Url, pooler: Url, test_co
         .unwrap();
     // Background catalog reads must actually use the pooler, while the copy
     // retry and replay reset above must keep their epoch queries direct.
-    // Without coordination, only the metrics sampler reads pooled metadata.
-    // Allow its first 30-second tick and time for the queries to finish.
-    tokio::time::timeout(Duration::from_secs(60), async {
-        while guard.prepared_queries() == 0 {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .unwrap();
+    // With coordination, the maintenance watcher reads pooled metadata on its
+    // own. Without it, only the metrics sampler does, so run one sampler pass
+    // instead of waiting for its periodic tick.
+    if !test_coordination {
+        destination.sample_metrics_for_tests().await.unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(60), guard.wait_for_prepared_query()).await.unwrap();
     destination.shutdown().await.unwrap();
     drop(destination);
     reset_ducklake_test_hooks();

@@ -255,9 +255,9 @@ pooler while background reads and maintenance discovery reach it. It also
 exercises post-commit retries, replay reset, restart, checkpoints, and direct
 coordination migrations.
 
-The `catalog_metadata_without_coordination_waits_for_metrics_sampler` test covers
-the pooled-writer experiment's metadata path with coordination disabled. It
-allows the metrics sampler's first 30-second tick before asserting pooled reads.
+The `catalog_metadata_without_coordination_samples_metrics_through_pooler` test
+covers the pooled-writer experiment's metadata path with coordination disabled.
+It runs one metrics sampler pass on demand before asserting pooled reads.
 
 The ignored `transaction_pooler_catalog_roundtrip` runs the same checks against
 a real transaction pooler. Point
