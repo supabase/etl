@@ -7,7 +7,10 @@ use utoipa::ToSchema;
 
 use crate::{
     clickhouse::ClickHouseUrl,
-    shared::{DuckLakeTablePartitioningConfig, Validate, ValidationError},
+    shared::{
+        DuckLakeTablePartitioningConfig, Validate, ValidationError,
+        validate_ducklake_table_namespace,
+    },
 };
 
 const fn default_connection_pool_size() -> usize {
@@ -485,8 +488,6 @@ pub enum DestinationKind {
     ClickHouse,
     /// DuckLake destination.
     Ducklake,
-    /// Iceberg destination.
-    Iceberg,
     /// Snowflake destination.
     Snowflake,
 }
@@ -498,7 +499,6 @@ impl DestinationKind {
             DestinationKind::BigQuery => "bigquery",
             DestinationKind::ClickHouse => "clickhouse",
             DestinationKind::Ducklake => "ducklake",
-            DestinationKind::Iceberg => "iceberg",
             DestinationKind::Snowflake => "snowflake",
         }
     }
@@ -513,6 +513,10 @@ impl DestinationKind {
 /// leaking secrets in the config into serialized forms.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "One configuration is stored per pipeline; keep the existing unboxed config API"
+)]
 pub enum DestinationConfig {
     /// Google BigQuery destination configuration.
     ///
@@ -566,10 +570,6 @@ pub enum DestinationConfig {
         #[serde(default)]
         engine: ClickHouseEngine,
     },
-    Iceberg {
-        #[serde(flatten)]
-        config: IcebergConfig,
-    },
     Ducklake {
         /// Direct DuckLake catalog URL used by DuckDB writers.
         catalog_url: SecretString,
@@ -598,6 +598,10 @@ pub enum DestinationConfig {
         s3_use_ssl: Option<bool>,
         /// Optional metadata schema for DuckLake metadata tables.
         metadata_schema: Option<String>,
+        /// Immutable source namespace above each replicated schema.
+        /// ASCII letters must be lowercase; omission preserves the flat layout.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        table_namespace: Option<String>,
         /// Optional DuckLake maintenance target file size.
         maintenance_target_file_size: Option<String>,
         /// Optional Parquet row-group byte limit.
@@ -649,7 +653,6 @@ impl DestinationConfig {
         match self {
             DestinationConfig::BigQuery { .. } => DestinationKind::BigQuery,
             DestinationConfig::ClickHouse { .. } => DestinationKind::ClickHouse,
-            DestinationConfig::Iceberg { .. } => DestinationKind::Iceberg,
             DestinationConfig::Ducklake { .. } => DestinationKind::Ducklake,
             DestinationConfig::Snowflake { .. } => DestinationKind::Snowflake,
         }
@@ -660,128 +663,19 @@ impl Validate for DestinationConfig {
     fn validate(&self) -> Result<(), ValidationError> {
         match self {
             DestinationConfig::BigQuery { table_options, .. } => table_options.validate(),
-            DestinationConfig::Iceberg { config } => config.validate(),
             DestinationConfig::Ducklake {
-                copy_buffer, table_sorting, table_partitioning, ..
+                copy_buffer,
+                table_sorting,
+                table_partitioning,
+                table_namespace,
+                ..
             } => {
                 copy_buffer.validate()?;
+                validate_ducklake_table_namespace(table_namespace.as_deref())?;
                 table_sorting.validate()?;
                 table_partitioning.validate()
             }
             DestinationConfig::ClickHouse { .. } | DestinationConfig::Snowflake { .. } => Ok(()),
-        }
-    }
-}
-
-/// Configuration for the iceberg destination with two variants
-///
-/// 1. Supabase - for analytics buckets on Supabase
-/// 2. Rest - for other REST catalogs.
-///
-/// This intentionally does not implement [`Serialize`] to avoid accidentally
-/// leaking secrets in the config into serialized forms.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum IcebergConfig {
-    Supabase {
-        /// Supabase project_ref
-        project_ref: String,
-        /// Name of the warehouse in the catalog
-        warehouse_name: String,
-        /// If present, the iceberg catalog namespace where tables will be
-        /// created. If missing, multiple catlog namespaces will be created, one
-        /// per source schema.
-        namespace: Option<String>,
-        /// Catalog authentication token
-        catalog_token: SecretString,
-        /// The S3 access key id
-        s3_access_key_id: SecretString,
-        /// The S3 secret access key
-        s3_secret_access_key: SecretString,
-        /// The S3 region
-        s3_region: String,
-    },
-    Rest {
-        /// Iceberg catalog uri
-        catalog_uri: String,
-        /// Name of the warehouse in the catalog
-        warehouse_name: String,
-        /// If present, the iceberg catalog namespace where tables will be
-        /// created. If missing, multiple catlog namespaces will be created, one
-        /// per source schema.
-        namespace: Option<String>,
-        /// The S3 access key id
-        s3_access_key_id: SecretString,
-        /// The S3 secret access key
-        s3_secret_access_key: SecretString,
-        /// The S3 endpoint
-        s3_endpoint: String,
-    },
-}
-
-impl Validate for IcebergConfig {}
-
-/// Same as [`IcebergConfig`] but without secrets. This type implements
-/// [`Serialize`] because it does not contains secrets so is safe to serialize.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum IcebergConfigWithoutSecrets {
-    Supabase {
-        /// Supabase project_ref
-        project_ref: String,
-        /// Name of the warehouse in the catalog
-        warehouse_name: String,
-        /// If present, the iceberg catalog namespace where tables will be
-        /// created. If missing, multiple catlog namespaces will be created, one
-        /// per source schema.
-        namespace: Option<String>,
-        /// The S3 region
-        s3_region: String,
-    },
-    Rest {
-        /// Iceberg catalog uri
-        catalog_uri: String,
-        /// Name of the warehouse in the catalog
-        warehouse_name: String,
-        /// Iceberg catalog namespace where tables will be created
-        namespace: Option<String>,
-        /// The S3 endpoint
-        s3_endpoint: String,
-    },
-}
-
-impl Validate for IcebergConfigWithoutSecrets {}
-
-impl From<IcebergConfig> for IcebergConfigWithoutSecrets {
-    fn from(value: IcebergConfig) -> Self {
-        match value {
-            IcebergConfig::Supabase {
-                project_ref,
-                warehouse_name,
-                namespace,
-                catalog_token: _,
-                s3_access_key_id: _,
-                s3_secret_access_key: _,
-                s3_region,
-            } => IcebergConfigWithoutSecrets::Supabase {
-                project_ref,
-                warehouse_name,
-                namespace,
-                s3_region,
-            },
-            IcebergConfig::Rest {
-                catalog_uri,
-                warehouse_name,
-                namespace,
-                s3_access_key_id: _,
-                s3_secret_access_key: _,
-                s3_endpoint,
-            } => IcebergConfigWithoutSecrets::Rest {
-                catalog_uri,
-                warehouse_name,
-                namespace,
-                s3_endpoint,
-            },
         }
     }
 }
@@ -839,10 +733,6 @@ pub enum DestinationConfigWithoutSecrets {
         #[serde(default)]
         engine: ClickHouseEngine,
     },
-    Iceberg {
-        #[serde(flatten)]
-        config: IcebergConfigWithoutSecrets,
-    },
     Ducklake {
         /// DuckLake data path.
         data_path: String,
@@ -859,6 +749,10 @@ pub enum DestinationConfigWithoutSecrets {
         s3_use_ssl: Option<bool>,
         /// Optional metadata schema for DuckLake metadata tables.
         metadata_schema: Option<String>,
+        /// Immutable source namespace above each replicated schema.
+        /// ASCII letters must be lowercase; omission preserves the flat layout.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        table_namespace: Option<String>,
         /// Optional DuckLake maintenance target file size.
         maintenance_target_file_size: Option<String>,
         /// Optional Parquet row-group byte limit.
@@ -902,14 +796,15 @@ impl Validate for DestinationConfigWithoutSecrets {
             DestinationConfigWithoutSecrets::BigQuery { table_options, .. } => {
                 table_options.validate()
             }
-            DestinationConfigWithoutSecrets::Iceberg { config } => config.validate(),
             DestinationConfigWithoutSecrets::Ducklake {
                 copy_buffer,
                 table_sorting,
                 table_partitioning,
+                table_namespace,
                 ..
             } => {
                 copy_buffer.validate()?;
+                validate_ducklake_table_namespace(table_namespace.as_deref())?;
                 table_sorting.validate()?;
                 table_partitioning.validate()
             }
@@ -939,9 +834,6 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
             DestinationConfig::ClickHouse { url, user, password: _, database, engine } => {
                 DestinationConfigWithoutSecrets::ClickHouse { url, user, database, engine }
             }
-            DestinationConfig::Iceberg { config } => {
-                DestinationConfigWithoutSecrets::Iceberg { config: config.into() }
-            }
             DestinationConfig::Ducklake {
                 catalog_url: _,
                 catalog_pooler_url: _,
@@ -954,6 +846,7 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
+                table_namespace,
                 maintenance_target_file_size,
                 parquet_row_group_size_bytes,
                 parquet_row_group_size,
@@ -970,6 +863,7 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
+                table_namespace,
                 maintenance_target_file_size,
                 parquet_row_group_size_bytes,
                 parquet_row_group_size,
@@ -1000,7 +894,30 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::{from_value, json};
+
     use super::*;
+
+    /// Both public configuration forms reject namespace case aliases.
+    #[test]
+    fn ducklake_configs_validate_namespace_case() {
+        for namespace in [None, Some("projecta"), Some("ProjectA")] {
+            let config: DestinationConfig = from_value(json!({
+                "ducklake": {
+                    "catalog_url": "postgres://placeholder@catalog.example.com/catalog",
+                    "data_path": "s3://example-bucket/",
+                    "table_namespace": namespace
+                }
+            }))
+            .unwrap();
+            let expected_valid = namespace != Some("ProjectA");
+            assert_eq!(config.validate().is_ok(), expected_valid);
+            assert_eq!(
+                DestinationConfigWithoutSecrets::from(config).validate().is_ok(),
+                expected_valid
+            );
+        }
+    }
 
     #[test]
     fn ducklake_writer_config_resolves_defaults_and_overrides() {
@@ -1055,6 +972,7 @@ mod tests {
             s3_url_style: None,
             s3_use_ssl: None,
             metadata_schema: None,
+            table_namespace: None,
             maintenance_target_file_size: None,
             parquet_row_group_size_bytes: None,
             parquet_row_group_size: None,
@@ -1368,12 +1286,57 @@ mod tests {
         }
     }
 
+    /// Retired destination configurations must fail before a pipeline can
+    /// start.
+    #[test]
+    fn retired_destination_configs_are_rejected() {
+        for value in [
+            serde_json::json!({
+                "iceberg": {
+                    "rest": {
+                        "catalog_uri": "https://example.com/catalog",
+                        "warehouse_name": "example-warehouse",
+                        "namespace": "public",
+                        "s3_access_key_id": "placeholder-access-key",
+                        "s3_secret_access_key": "placeholder-secret-key",
+                        "s3_endpoint": "https://example.com/storage"
+                    }
+                }
+            }),
+            serde_json::json!({
+                "iceberg": {
+                    "supabase": {
+                        "project_ref": "example-project",
+                        "warehouse_name": "example-warehouse",
+                        "namespace": "public",
+                        "catalog_token": "placeholder-token",
+                        "s3_access_key_id": "placeholder-access-key",
+                        "s3_secret_access_key": "placeholder-secret-key",
+                        "s3_region": "example-region"
+                    }
+                }
+            }),
+        ] {
+            let error = serde_json::from_value::<DestinationConfig>(value.clone()).unwrap_err();
+            assert!(error.to_string().contains("unknown variant `iceberg`"));
+            let error =
+                serde_json::from_value::<DestinationConfigWithoutSecrets>(value).unwrap_err();
+            assert!(error.to_string().contains("unknown variant `iceberg`"));
+        }
+    }
+
+    /// Retired destination names cannot select a pipeline destination.
+    #[test]
+    fn retired_destination_kind_is_rejected() {
+        let error = serde_json::from_str::<DestinationKind>("\"iceberg\"").unwrap_err();
+        assert!(error.to_string().contains("unknown variant `iceberg`"));
+    }
+
     #[test]
     fn destination_kind_names_match_metrics_labels() {
         assert_eq!(DestinationKind::BigQuery.as_str(), "bigquery");
         assert_eq!(DestinationKind::ClickHouse.as_str(), "clickhouse");
         assert_eq!(DestinationKind::Ducklake.as_str(), "ducklake");
-        assert_eq!(DestinationKind::Iceberg.as_str(), "iceberg");
         assert_eq!(DestinationKind::Snowflake.as_str(), "snowflake");
     }
 }

@@ -10,13 +10,11 @@ use std::{
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
-use replicator::{
-    IcebergCatalog, ReplicatorSetup, release_conflicting_apply_slot, write_replicator_config,
-};
+use replicator::{ReplicatorSetup, release_conflicting_apply_slot, write_replicator_config};
 pub(crate) use replicator::{detect_replicator_destination, replicator_config_has_placeholders};
 
 use crate::{
-    commands::local::{InitConfig, require_command, wait_for_iceberg_catalog},
+    commands::local::{InitConfig, require_command},
     utils::{DestinationPreset, workspace_root},
 };
 
@@ -45,9 +43,6 @@ struct SetupReplicatorArgs {
     /// Destination to configure. Defaults to ClickHouse from `cargo x init`.
     #[arg(long, value_enum)]
     destination: Option<DestinationPreset>,
-    /// Iceberg catalog kind. Used only with `--destination iceberg`.
-    #[arg(long, value_enum)]
-    iceberg_catalog: Option<IcebergCatalog>,
     /// Prompt for Postgres, publication, and destination values.
     #[arg(long)]
     interactive: bool,
@@ -104,24 +99,10 @@ impl SetupReplicatorArgs {
             println!();
         }
 
-        let iceberg_catalog = match destination {
-            DestinationPreset::Iceberg if self.interactive && self.iceberg_catalog.is_none() => {
-                prompt_iceberg_catalog(IcebergCatalog::Rest)?
-            }
-            DestinationPreset::Iceberg => self.iceberg_catalog.unwrap_or(IcebergCatalog::Rest),
-            _ => {
-                if self.iceberg_catalog.is_some() {
-                    println!("Ignoring --iceberg-catalog because the destination is not iceberg.");
-                    println!();
-                }
-                IcebergCatalog::Rest
-            }
-        };
-
-        print_destination_prerequisites(destination, iceberg_catalog);
+        print_destination_prerequisites(destination);
         println!();
 
-        let mut options = ReplicatorSetup::for_destination(&defaults, destination, iceberg_catalog);
+        let mut options = ReplicatorSetup::for_destination(&defaults, destination);
         if let Some(publication) = self.publication {
             options.publication = publication;
         }
@@ -137,16 +118,12 @@ impl SetupReplicatorArgs {
             println!();
         }
 
-        if options.needs_local_iceberg_catalog() {
-            wait_for_iceberg_catalog()?;
-        }
-
         let config = write_replicator_config(&options, self.force)?;
         release_conflicting_apply_slot(&config)?;
 
         println!();
         println!("✅ Replicator configuration is ready.");
-        print_replicator_next_steps(options.preset(), iceberg_catalog);
+        print_replicator_next_steps(options.preset());
         Ok(())
     }
 }
@@ -158,10 +135,7 @@ fn print_banner(title: &str) {
 }
 
 /// Prints destination-specific setup notes before files are written.
-fn print_destination_prerequisites(
-    destination: DestinationPreset,
-    iceberg_catalog: IcebergCatalog,
-) {
+fn print_destination_prerequisites(destination: DestinationPreset) {
     match destination {
         DestinationPreset::BigQuery => {
             println!("BigQuery setup writes fake project/dataset ids and a placeholder key.");
@@ -180,22 +154,6 @@ fn print_destination_prerequisites(
             );
             println!("credentials with APP_DESTINATION__DUCKLAKE__S3_*.");
         }
-        DestinationPreset::Iceberg => match iceberg_catalog {
-            IcebergCatalog::Rest => {
-                println!(
-                    "Iceberg REST setup uses the Lakekeeper catalog and MinIO from cargo x init."
-                );
-                println!(
-                    "After setup: cargo x seed && cargo x run replicator --destination iceberg"
-                );
-            }
-            IcebergCatalog::Supabase => {
-                println!(
-                    "Iceberg Supabase setup writes a fake project ref and placeholder secrets."
-                );
-                println!("Override APP_DESTINATION__ICEBERG__SUPABASE__* before a real run.");
-            }
-        },
         DestinationPreset::Snowflake => {
             println!("Snowflake setup writes a fake account and a placeholder private key.");
             println!("Override APP_DESTINATION__SNOWFLAKE__PRIVATE_KEY before a real run.");
@@ -205,21 +163,13 @@ fn print_destination_prerequisites(
 
 /// Prompts for a destination, using `default` when the user presses Enter.
 fn prompt_destination(default: DestinationPreset) -> Result<DestinationPreset> {
-    let selected = prompt(
-        "Destination (clickhouse, bigquery, ducklake, iceberg, snowflake)",
-        default.feature(),
-    )?;
+    let selected =
+        prompt("Destination (clickhouse, bigquery, ducklake, snowflake)", default.feature())?;
     DestinationPreset::parse(&selected)
 }
 
-/// Prompts for an Iceberg catalog, using `default` when the user presses Enter.
-fn prompt_iceberg_catalog(default: IcebergCatalog) -> Result<IcebergCatalog> {
-    let selected = prompt("Iceberg catalog (rest, supabase)", default.as_str())?;
-    IcebergCatalog::parse(&selected)
-}
-
 /// Prints how to start the replicator after setup.
-fn print_replicator_next_steps(destination: DestinationPreset, iceberg_catalog: IcebergCatalog) {
+fn print_replicator_next_steps(destination: DestinationPreset) {
     println!("Replicator:");
     match destination {
         DestinationPreset::ClickHouse => {
@@ -235,18 +185,6 @@ fn print_replicator_next_steps(destination: DestinationPreset, iceberg_catalog: 
             println!("  export APP_DESTINATION__DUCKLAKE__S3_SECRET_ACCESS_KEY");
             println!("  cargo x run replicator --destination ducklake");
         }
-        DestinationPreset::Iceberg => match iceberg_catalog {
-            IcebergCatalog::Rest => {
-                println!("  cargo x seed");
-                println!("  cargo x run replicator --destination iceberg");
-            }
-            IcebergCatalog::Supabase => {
-                println!("  export APP_DESTINATION__ICEBERG__SUPABASE__CATALOG_TOKEN");
-                println!("  export APP_DESTINATION__ICEBERG__SUPABASE__S3_ACCESS_KEY_ID");
-                println!("  export APP_DESTINATION__ICEBERG__SUPABASE__S3_SECRET_ACCESS_KEY");
-                println!("  cargo x run replicator --destination iceberg");
-            }
-        },
         DestinationPreset::Snowflake => {
             println!("  export APP_DESTINATION__SNOWFLAKE__PRIVATE_KEY=\"$(cat rsa_key.p8)\"");
             println!("  cargo x run replicator --destination snowflake");

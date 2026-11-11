@@ -5,7 +5,7 @@ use std::{
 
 use chrono::Utc;
 use etl::error::{ErrorKind, EtlResult};
-use etl_maintenance::ducklake::RedactedDuckDbError;
+use etl_maintenance::ducklake::{RedactedDuckDbError, table_namespace_filter};
 use metrics::{Unit, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
 use parking_lot::Mutex;
 use pg_escape::{quote_identifier, quote_literal};
@@ -471,6 +471,7 @@ pub(super) async fn query_table_storage_metrics(
             .persistent(false)
             .bind(table_name.schema())
             .bind(table_name.table())
+            .bind(table_name.namespace())
             .fetch_one(&mut *transaction)
             .await?;
         transaction.commit().await?;
@@ -546,6 +547,7 @@ pub(super) async fn query_catalog_maintenance_metrics(
 
 /// Returns the SQL query used to sample table-level storage health.
 fn table_storage_metrics_query(metadata_schema: &str) -> String {
+    let namespace_filter = table_namespace_filter(metadata_schema);
     let metadata_schema = quote_identifier(metadata_schema);
     let ducklake_schema = quote_identifier("ducklake_schema");
     let ducklake_table = quote_identifier("ducklake_table");
@@ -561,6 +563,7 @@ fn table_storage_metrics_query(metadata_schema: &str) -> String {
                AND s.end_snapshot IS NULL
                AND s.schema_name = $1
                AND t.table_name = $2
+               AND {namespace_filter}
              LIMIT 1
          ),
          data_stats AS (

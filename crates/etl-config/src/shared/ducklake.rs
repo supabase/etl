@@ -24,7 +24,7 @@ pub enum DuckLakePartitionTransform {
     Day {},
     /// Partition by hour of day, from 0 through 23.
     Hour {},
-    /// Partition by an Iceberg-compatible hash bucket.
+    /// Partition by a hash bucket.
     Bucket {
         /// Positive number of buckets, bounded by DuckLake's signed integer
         /// argument.

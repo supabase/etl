@@ -2,7 +2,6 @@ import { PipelinesMark } from '@/components/brand';
 import { Mermaid } from '@/components/mermaid';
 import defaultMdxComponents from 'fumadocs-ui/mdx';
 import {
-  ArchiveX,
   Blocks,
   BookOpenText,
   Database,
@@ -27,7 +26,6 @@ const docPathIcons: Record<string, LucideIcon> = {
 
 const destinationStatuses = {
   'public-alpha': { icon: FlaskConical, label: 'Public alpha' },
-  deprecated: { icon: ArchiveX, label: 'Deprecated' },
 } as const;
 
 function DocPathIcon({ name }: { name: string }) {
