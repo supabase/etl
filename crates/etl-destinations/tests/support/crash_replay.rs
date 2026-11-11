@@ -42,16 +42,16 @@ use etl::{
     store::{PostgresStore, StateStore, TableStateType},
     test_utils::{
         cdc_workload::{
-            AfterFaultStep, DeliveryOrder, TxPhase, WORKLOAD_PUBLICATION, WORKLOAD_TIMEOUT,
-            Workload, WorkloadCoverage, WorkloadRecord, WorkloadRunner, WorkloadShape,
-            WorkloadTables, assert_workload_converged, create_workload_tables, has_committed_xid,
-            notify_on_commit, read_source_rows, wait_for_apply_disconnect, wait_for_notification,
-            wait_for_sync_slot_removal, workloads,
+            AfterFaultStep, DeliveryOrder, TxPhase, WORKLOAD_TIMEOUT, Workload, WorkloadCoverage,
+            WorkloadRecord, WorkloadRunner, WorkloadShape, WorkloadTables,
+            assert_workload_converged, create_workload_pipeline, create_workload_tables,
+            has_committed_xid, notify_on_commit, read_source_rows, wait_for_apply_disconnect,
+            wait_for_notification, wait_for_sync_slot_removal, workloads,
         },
         database::spawn_source_database,
         faults::{FaultAction, FaultyOp},
         materialize::FromTableRow,
-        pipeline::{create_pipeline, random_pipeline_id},
+        pipeline::random_pipeline_id,
         property::{block_on, run_expensive_property},
         store::{wait_for_table_state_type, wait_for_table_sync_complete},
         test_destination_wrapper::TestDestinationWrapper,
@@ -311,13 +311,8 @@ async fn start_pipeline<T: CrashReplayTarget>(
     if let Some(action) = copy_fault {
         destination.inject_fault(FaultyOp::WriteTableRows, action).await;
     }
-    let mut pipeline = create_pipeline(
-        &database.config,
-        pipeline_id,
-        WORKLOAD_PUBLICATION.to_owned(),
-        store.clone(),
-        destination.clone(),
-    );
+    let mut pipeline =
+        create_workload_pipeline(&database.config, pipeline_id, store.clone(), destination.clone());
     pipeline
         .start()
         .await
@@ -563,10 +558,9 @@ async fn run_case_on_target<T: CrashReplayTarget>(
                 Some(notify_on_commit(&restarted, fault_xid).await)
             };
 
-            pipeline = create_pipeline(
+            pipeline = create_workload_pipeline(
                 &database.config,
                 pipeline_id,
-                WORKLOAD_PUBLICATION.to_owned(),
                 store.clone(),
                 restarted.clone(),
             );
