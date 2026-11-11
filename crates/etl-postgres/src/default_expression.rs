@@ -1,6 +1,6 @@
 //! Parsing and representation of portable Postgres default expressions.
 
-use tokio_postgres::types::Type;
+use tokio_postgres::types::{Kind, Type};
 use tracing::warn;
 
 use crate::schema::numeric_modifiers;
@@ -103,6 +103,145 @@ fn keeps_value_in_column(expression: &DefaultExpression, typ: &Type, modifier: i
             i32::try_from(fractional_second_digits(literal)).is_ok_and(|digits| digits <= modifier)
         }
         _ => false,
+    }
+}
+
+/// The type a domain is built on, after resolving nested domains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DomainBaseType<'a> {
+    /// OID of the base type.
+    pub oid: u32,
+    /// Type modifier of the innermost domain, or `-1` for none.
+    pub modifier: i32,
+    /// `format_type` output for the base type and modifier.
+    pub formatted_type: &'a str,
+}
+
+/// Returns the default ETL replicates for a column, or `None` when no
+/// destination can reproduce the value Postgres stores.
+///
+/// Built-in types keep their default, which destinations parse themselves.
+/// ETL replicates any other type as text: the type's output for each value.
+/// Such a column keeps a default that is one string literal cast to the
+/// column's own unmodified type, as enum defaults render; Postgres has then
+/// already run the type's input function.
+///
+/// A domain default renders as a value of `base_type`, before the domain's
+/// type modifier pads or rounds it. When the base type is built in, unmodified,
+/// and prints its values only under settings ETL pins, and the default is one
+/// constant of it, the constant's text is what Postgres stores, so the default
+/// becomes that text as a string literal. Constants render with
+/// `etl.describe_table_schema`'s pinned output settings, as replicated values
+/// do. Defaults that convert a value, such as an integer domain's `1.5`, are
+/// not constants of the base type and are dropped.
+pub fn replicated_column_default(
+    type_oid: u32,
+    formatted_type: &str,
+    base_type: Option<DomainBaseType<'_>>,
+    expression: String,
+) -> Option<String> {
+    if Type::from_oid(type_oid).is_some() || own_type_literal(&expression, formatted_type).is_some()
+    {
+        return Some(expression);
+    }
+
+    let base_type = base_type?;
+    let typ = Type::from_oid(base_type.oid)?;
+    if base_type.modifier >= 0 || !has_pinned_output(&typ) {
+        return None;
+    }
+
+    let value = base_constant_text(expression.trim(), &typ, base_type.formatted_type)?;
+
+    Some(format!("'{}'", value.replace('\'', "''")))
+}
+
+/// Returns whether a built-in type's text output depends only on the settings
+/// ETL pins on its connections and on `etl.describe_table_schema`.
+///
+/// Other types, such as the `reg*` types, which print names relative to
+/// `search_path`, and `money`, which follows `lc_monetary`, can render a
+/// default differently from the values ETL replicates.
+fn has_pinned_output(typ: &Type) -> bool {
+    let typ = match typ.kind() {
+        Kind::Array(element) => element,
+        _ => typ,
+    };
+
+    matches!(
+        typ,
+        &Type::BOOL
+            | &Type::INT2
+            | &Type::INT4
+            | &Type::INT8
+            | &Type::NUMERIC
+            | &Type::FLOAT4
+            | &Type::FLOAT8
+            | &Type::TEXT
+            | &Type::VARCHAR
+            | &Type::BPCHAR
+            | &Type::NAME
+            | &Type::CHAR
+            | &Type::DATE
+            | &Type::TIME
+            | &Type::TIMETZ
+            | &Type::TIMESTAMP
+            | &Type::TIMESTAMPTZ
+            | &Type::INTERVAL
+            | &Type::UUID
+            | &Type::JSON
+            | &Type::JSONB
+            | &Type::BYTEA
+            | &Type::INET
+            | &Type::CIDR
+            | &Type::MACADDR
+            | &Type::MACADDR8
+    )
+}
+
+/// Returns the string literal of `expression` when it is one string literal
+/// cast to `formatted_type`, which must carry no type modifier.
+fn own_type_literal<'a>(expression: &'a str, formatted_type: &str) -> Option<&'a str> {
+    if formatted_type.contains('(') {
+        return None;
+    }
+
+    let expression = expression.trim();
+    let cast_start = top_level_cast_start(expression)?;
+    let cast_subject = expression.get(..cast_start)?.trim();
+    let cast_type = expression.get(cast_start.checked_add(2)?..)?.trim();
+
+    (cast_type == formatted_type && is_string_literal(cast_subject)).then_some(cast_subject)
+}
+
+/// Returns the output text of a domain default that is one constant of the
+/// built-in base type `typ`.
+///
+/// `pg_get_expr` prints most constants as a string literal cast to their type,
+/// but prints positive integer and numeric constants and booleans bare.
+fn base_constant_text(expression: &str, typ: &Type, formatted_type: &str) -> Option<String> {
+    if let Some(literal) = own_type_literal(expression, formatted_type) {
+        return unquote_postgres_string_literal(literal);
+    }
+
+    match typ {
+        // The boolean output function prints `t` and `f`.
+        &Type::BOOL if expression == "true" => Some("t".to_owned()),
+        &Type::BOOL if expression == "false" => Some("f".to_owned()),
+        // A fraction is a numeric constant that the integer cast rounds.
+        typ if is_integer_type(typ) && expression.bytes().all(|byte| byte.is_ascii_digit()) => {
+            (!expression.is_empty()).then(|| expression.to_owned())
+        }
+        // Negative constants render as cast string literals, so a bare one
+        // starts and ends with a digit.
+        &Type::NUMERIC
+            if is_numeric_literal(expression)
+                && expression.starts_with(|ch: char| ch.is_ascii_digit())
+                && expression.ends_with(|ch: char| ch.is_ascii_digit()) =>
+        {
+            Some(expression.to_owned())
+        }
+        _ => None,
     }
 }
 
@@ -259,22 +398,61 @@ fn is_cast_type_name(type_name: &str) -> bool {
 /// converts the result to the column type `typ`.
 ///
 /// Modifiers truncate or round. `bpchar` trims trailing blanks, `"char"` keeps
-/// one byte, `real` loses precision when converted to another type, and
-/// integer casts round fractions for non-integer columns.
+/// one byte, `name` keeps 63 bytes, `real` loses precision when converted to
+/// another type, and integer casts round fractions for non-integer columns.
+///
+/// Some conversions read settings of the session that evaluates the default,
+/// so the value they store is not fixed. A text-like column stores another
+/// type's output, which follows `DateStyle`, `IntervalStyle`,
+/// `extra_float_digits`, `TimeZone`, or `bytea_output` for built-in types, so
+/// it only keeps casts to text types and to schema-qualified types. ETL reads
+/// defaults with `search_path = pg_catalog`, so only user-defined types, such
+/// as the enums ETL replicates as text, are qualified. A domain over a
+/// session-dependent type still passes. A temporal or interval column parses
+/// text with `DateStyle`, `IntervalStyle`, or `TimeZone`, so it keeps no text
+/// casts. Conversions to or from `timestamp with time zone`, and from `time`
+/// to `time with time zone`, read `TimeZone`.
 fn is_value_preserving_cast(type_name: &str, typ: &Type) -> bool {
     if type_name.contains('(') {
         return false;
     }
 
-    match type_name.to_ascii_lowercase().as_str() {
-        "bpchar" | "character" | "char" => *typ == Type::BPCHAR,
-        "\"char\"" => *typ == Type::CHAR,
+    let type_name = type_name.to_ascii_lowercase();
+    if is_text_type(typ) {
+        return match type_name.as_str() {
+            "text" | "character varying" | "varchar" => *typ != Type::CHAR && *typ != Type::NAME,
+            "name" => *typ == Type::NAME,
+            "bpchar" | "character" | "char" => *typ == Type::BPCHAR,
+            "\"char\"" => *typ == Type::CHAR,
+            user_type => user_type.contains('.'),
+        };
+    }
+
+    match type_name.as_str() {
+        "text" | "character varying" | "varchar" | "name" => !is_temporal_type(typ),
+        "bpchar" | "character" | "char" | "\"char\"" => false,
         "real" | "float4" => *typ == Type::FLOAT4,
+        "timestamp with time zone" | "timestamptz" => *typ == Type::TIMESTAMPTZ,
+        "timestamp without time zone" | "timestamp" | "date" => *typ != Type::TIMESTAMPTZ,
+        "time without time zone" | "time" => *typ != Type::TIMETZ,
         "smallint" | "integer" | "bigint" | "int2" | "int4" | "int8" | "int" => {
             is_integer_type(typ)
         }
         _ => true,
     }
+}
+
+/// Returns whether a Postgres type parses text with session settings.
+fn is_temporal_type(typ: &Type) -> bool {
+    matches!(
+        typ,
+        &Type::DATE
+            | &Type::TIME
+            | &Type::TIMETZ
+            | &Type::TIMESTAMP
+            | &Type::TIMESTAMPTZ
+            | &Type::INTERVAL
+    )
 }
 
 /// Returns whether a Postgres type is text-like.
@@ -768,10 +946,129 @@ mod tests {
         assert_eq!(parse_default_expression("(1.5)::integer", &Type::NUMERIC, -1), None);
         assert_eq!(parse_default_expression("1.5", &Type::INT4, -1), None);
         assert_eq!(parse_default_expression("'1.5'::numeric", &Type::INT8, -1), None);
+        // `int4("char")` stores the byte code, 53 for `'5'`.
+        assert_eq!(parse_default_expression("('5'::\"char\")::integer", &Type::INT4, -1), None);
+        assert_eq!(parse_default_expression("('5'::bpchar)::integer", &Type::INT4, -1), None);
+        // `name` keeps 63 bytes.
+        let long_name = format!("(('{}'::text)::name)::text", "a".repeat(70));
+        assert_eq!(parse_default_expression(&long_name, &Type::TEXT, -1), None);
         assert_eq!(
             parse_default_expression("'42'::integer", &Type::INT8, -1),
             Some(DefaultExpression::NumericLiteral("42".to_owned()))
         );
+    }
+
+    #[test]
+    fn skips_casts_that_read_session_settings() {
+        for (expression, typ) in [
+            ("'2026-01-02 03:04:05+00'::timestamp with time zone", Type::TIMESTAMP),
+            ("'2026-01-02'::date", Type::TIMESTAMPTZ),
+            ("'2026-01-02 03:04:05'::timestamp without time zone", Type::TIMESTAMPTZ),
+            ("'12:00:00'::time without time zone", Type::TIMETZ),
+            // A text column stores the output of the cast type.
+            ("'2026-01-02'::date", Type::TEXT),
+            ("'{2026-01-02}'::date[]", Type::TEXT),
+            ("'-1 days -02:00:00'::interval", Type::VARCHAR),
+            ("'0.30000000000000004'::double precision", Type::TEXT),
+            ("'\\x00ff'::bytea", Type::TEXT),
+            ("'2026-01-02 03:04:05+00'::timestamp with time zone", Type::TEXT),
+            ("'abc'::text", Type::CHAR),
+            // A temporal or interval column parses text with session settings.
+            ("('01/02/2026'::text)::date", Type::DATE),
+            ("('2026-01-02 03:04:05'::text)::timestamp with time zone", Type::TIMESTAMPTZ),
+            ("('-1 2:00:00'::character varying)::interval", Type::INTERVAL),
+        ] {
+            assert_eq!(parse_default_expression(expression, &typ, -1), None, "{expression} {typ}");
+        }
+
+        assert_eq!(
+            parse_default_expression("'2026-01-02'::date", &Type::TIMESTAMP, -1),
+            Some(DefaultExpression::TimestampLiteral("'2026-01-02'".to_owned()))
+        );
+        assert_eq!(
+            parse_default_expression("'12:00:00+02'::time with time zone", &Type::TIMETZ, -1),
+            Some(DefaultExpression::TimeTzLiteral("'12:00:00+02'".to_owned()))
+        );
+        assert_eq!(
+            parse_default_expression("'ab'::character varying", &Type::TEXT, -1),
+            Some(DefaultExpression::StringLiteral("'ab'".to_owned()))
+        );
+        // ETL replicates enums as text, and their output is fixed.
+        assert_eq!(
+            parse_default_expression("'pending'::public.status", &Type::TEXT, -1),
+            Some(DefaultExpression::StringLiteral("'pending'".to_owned()))
+        );
+    }
+
+    #[test]
+    fn replicates_unknown_type_defaults_as_their_stored_text() {
+        // Any OID that is not a built-in type, such as a domain or an enum.
+        let unknown_oid = 16_385;
+        let base = |typ: Type, modifier: i32, formatted_type: &'static str| {
+            Some(DomainBaseType { oid: typ.oid(), modifier, formatted_type })
+        };
+        let replicated = |formatted_type: &str, base_type, expression: &str| {
+            replicated_column_default(unknown_oid, formatted_type, base_type, expression.to_owned())
+        };
+
+        assert_eq!(
+            replicated_column_default(Type::NUMERIC.oid(), "numeric(10,2)", None, "9.999".into())
+                .as_deref(),
+            Some("9.999")
+        );
+        // Enum literals render cast to their own type.
+        assert_eq!(
+            replicated("public.status", None, "'pending'::public.status").as_deref(),
+            Some("'pending'::public.status")
+        );
+        assert_eq!(
+            replicated("public.price[]", None, "'{10.00}'::public.price[]").as_deref(),
+            Some("'{10.00}'::public.price[]")
+        );
+        // Constants of an unmodified built-in base type become their text.
+        for (base_type, expression, text) in [
+            (base(Type::TEXT, -1, "text"), "'it''s'::text", "'it''s'"),
+            (base(Type::INT4, -1, "integer"), "5", "'5'"),
+            (base(Type::INT4, -1, "integer"), "'-5'::integer", "'-5'"),
+            (base(Type::NUMERIC, -1, "numeric"), "1.50", "'1.50'"),
+            (base(Type::BOOL, -1, "boolean"), "true", "'t'"),
+            (base(Type::DATE, -1, "date"), "'2026-01-02'::date", "'2026-01-02'"),
+            (base(Type::INT4_ARRAY, -1, "integer[]"), "'{1,2}'::integer[]", "'{1,2}'"),
+        ] {
+            assert_eq!(
+                replicated("public.d", base_type, expression).as_deref(),
+                Some(text),
+                "{expression}"
+            );
+        }
+
+        for (base_type, expression) in [
+            // Without the base type, a domain default cannot be checked.
+            (None, "'x'::text"),
+            // The domain's type modifier pads or rounds the stored value.
+            (base(Type::NUMERIC, 655_366, "numeric(10,2)"), "1.2"),
+            (base(Type::BPCHAR, 9, "character(5)"), "'ab'::bpchar"),
+            // Integer domains round fractions.
+            (base(Type::INT4, -1, "integer"), "1.5"),
+            // Conversions are not constants of the base type.
+            (base(Type::DATE, -1, "date"), "('01/02/2026'::text)::date"),
+            (base(Type::FLOAT8, -1, "double precision"), "1.0"),
+            (base(Type::NUMERIC, -1, "numeric"), "(9.999)::public.d"),
+            // Output that follows unpinned settings: `search_path` and
+            // `lc_monetary`.
+            (base(Type::REGCLASS, -1, "regclass"), "'public.t'::regclass"),
+            (base(Type::REGCLASS_ARRAY, -1, "regclass[]"), "'{public.t}'::regclass[]"),
+            (base(Type::MONEY, -1, "money"), "'$1.00'::money"),
+            // Unknown base types, such as an enum under a domain.
+            (
+                Some(DomainBaseType { oid: unknown_oid + 1, modifier: -1, formatted_type: "e" }),
+                "'a'::e",
+            ),
+        ] {
+            assert_eq!(replicated("public.d", base_type, expression), None, "{expression}");
+        }
+        // A type modifier on an unknown type can hide a length coercion.
+        assert_eq!(replicated("public.vec(3)", None, "'[1,2]'::public.vec(3)"), None);
     }
 
     #[test]

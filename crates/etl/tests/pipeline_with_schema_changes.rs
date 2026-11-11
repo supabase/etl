@@ -1292,6 +1292,7 @@ async fn ddl_metric_labels_preserve_supported_tags_and_bound_unknown_tags() {
                             'attnum', s.attnum,
                             'atttypid', s.atttypid::bigint,
                             'atttypmod', s.atttypmod,
+                            'formatted_type', s.formatted_type,
                             'attnotnull', s.attnotnull,
                             'default_expression', s.default_expression
                         ) order by s.attnum

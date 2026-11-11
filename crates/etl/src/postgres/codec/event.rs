@@ -5,10 +5,14 @@ use std::{
     str::FromStr,
 };
 
-use etl_postgres::type_utils::convert_type_oid_to_type;
+use etl_postgres::{
+    default_expression::{DomainBaseType, replicated_column_default},
+    type_utils::convert_type_oid_to_type,
+};
 use postgres_replication::protocol;
 use serde::Deserialize;
 use tokio_postgres::types::{PgLsn, Type};
+use tracing::warn;
 
 use crate::{
     bail,
@@ -223,6 +227,20 @@ pub(crate) struct ColumnSchemaMessage {
     pub(crate) atttypid: u32,
     /// The type modifier from `pg_attribute.atttypmod`.
     pub(crate) atttypmod: i32,
+    /// The `format_type` output for the column type and modifier.
+    pub(crate) formatted_type: String,
+    /// The base type OID after resolving domains, if the payload has it.
+    ///
+    /// DDL messages written before the source migration that adds base types
+    /// lack these fields.
+    #[serde(default)]
+    pub(crate) base_type_oid: Option<u32>,
+    /// The type modifier of the innermost domain, if the payload has it.
+    #[serde(default)]
+    pub(crate) base_typmod: Option<i32>,
+    /// The `format_type` output for the base type, if the payload has it.
+    #[serde(default)]
+    pub(crate) base_formatted_type: Option<String>,
     /// The physical column number from `pg_attribute.attnum`.
     pub(crate) attnum: i32,
     /// Whether the column is marked `NOT NULL` in `pg_attribute.attnotnull`.
@@ -236,7 +254,9 @@ pub(crate) struct ColumnSchemaMessage {
 ///
 /// The resulting columns are always sorted by `attnum`, preserving physical
 /// table order, while `primary_key_ordinal_position` stays tied to the order of
-/// `primary_key_attnums`.
+/// `primary_key_attnums`. Defaults go through [`replicated_column_default`],
+/// which drops those no destination can reproduce and rewrites domain
+/// constants as the text Postgres stores.
 pub(crate) fn build_column_schemas(
     mut columns: Vec<ColumnSchemaMessage>,
     primary_key_attnums: Vec<i32>,
@@ -255,6 +275,32 @@ pub(crate) fn build_column_schemas(
         .into_iter()
         .map(|column| {
             let typ = convert_type_oid_to_type(column.atttypid);
+            // A domain resolves to another type; other types resolve to
+            // themselves and need no base.
+            let base_type =
+                match (column.base_type_oid, column.base_typmod, &column.base_formatted_type) {
+                    (Some(oid), Some(modifier), Some(formatted_type)) if oid != column.atttypid => {
+                        Some(DomainBaseType { oid, modifier, formatted_type })
+                    }
+                    _ => None,
+                };
+            let default_expression = column.default_expression.and_then(|expression| {
+                let replicated = replicated_column_default(
+                    column.atttypid,
+                    &column.formatted_type,
+                    base_type,
+                    expression,
+                );
+                if replicated.is_none() {
+                    warn!(
+                        column_name = %column.attname,
+                        column_type = %column.formatted_type,
+                        "skipping unsupported source column default for a type replicated as text"
+                    );
+                }
+
+                replicated
+            });
             ColumnSchema::new(
                 column.attname,
                 typ,
@@ -263,7 +309,7 @@ pub(crate) fn build_column_schemas(
                 !column.attnotnull,
             )
             .with_primary_key_ordinal_position(primary_key_positions.get(&column.attnum).copied())
-            .with_default_expression_option(column.default_expression)
+            .with_default_expression_option(default_expression)
         })
         .collect()
 }

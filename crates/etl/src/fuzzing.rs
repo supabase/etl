@@ -293,6 +293,7 @@ fn fuzz_schema_change_message(input: &mut FuzzBytes<'_>) -> SchemaChangeMessage 
             "attname": RELATION_FUZZ_NAMES[name_index],
             "atttypid": type_oid,
             "atttypmod": typmod,
+            "formatted_type": "fuzz",
             "attnum": attnum,
             "attnotnull": flags & 1 != 0,
             "default_expression": null,

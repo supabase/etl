@@ -9,14 +9,9 @@
 //!
 //! The DDL path captures the default inside the user's session through the
 //! `supabase_etl_ddl` logical message, while the bootstrap path reads it in an
-//! ETL-configured session. Both call `etl.describe_table_schema`, so session
-//! settings that change `pg_get_expr` output change what destinations see.
-//!
-//! Known defects are pinned by ignored tests: the parser strips casts that
-//! change the literal's value, destinations never see the column's type
-//! modifier, and the DDL message renders defaults with the user's
-//! `DateStyle`, `IntervalStyle`, `extra_float_digits` and `TimeZone`. The
-//! default-run properties exclude exactly those inputs.
+//! ETL-configured session. Both call `etl.describe_table_schema`, which pins
+//! the settings that change `pg_get_expr` output, so both paths must carry a
+//! default that denotes the same value.
 
 use etl::{
     config::PgConnectionOptions,
@@ -27,7 +22,11 @@ use etl::{
         property::{any_f64, block_on, run_property},
     },
 };
-use etl_postgres::tokio::test_utils::{PgDatabase, connect_to_pg_database};
+use etl_postgres::{
+    default_expression::{DomainBaseType, replicated_column_default},
+    tokio::test_utils::{PgDatabase, connect_to_pg_database},
+    type_utils::convert_type_oid_to_type,
+};
 use etl_telemetry::tracing::init_test_tracing;
 use proptest::{prelude::*, sample::select};
 use tokio_postgres::{Client, types::Type};
@@ -86,10 +85,10 @@ impl SessionSettings {
     }
 }
 
-/// The column `c` as `etl.describe_table_schema` reports it.
+/// The column `c` as ETL builds it from `etl.describe_table_schema`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DescribedColumn {
-    /// Postgres type of the column.
+    /// Postgres type of the column, or `text` for types ETL does not know.
     typ: Type,
     /// Type name without the modifier, as destinations map it.
     typname: String,
@@ -97,8 +96,42 @@ struct DescribedColumn {
     formatted_type: String,
     /// `atttypmod` of the column.
     modifier: i32,
-    /// `pg_get_expr` output for the column default.
+    /// `pg_get_expr` output for the column default, if ETL keeps it.
     default_expression: Option<String>,
+}
+
+/// A column's base type after resolving domains: OID, type modifier, and
+/// `format_type` output.
+type BaseType = (u32, i32, String);
+
+impl DescribedColumn {
+    /// Builds the column the way ETL's schema snapshot does.
+    fn new(
+        type_oid: u32,
+        typname: String,
+        formatted_type: String,
+        modifier: i32,
+        base_type: BaseType,
+        default_expression: Option<String>,
+    ) -> Self {
+        let (base_oid, base_modifier, base_formatted_type) = &base_type;
+        let base_type = (*base_oid != type_oid).then_some(DomainBaseType {
+            oid: *base_oid,
+            modifier: *base_modifier,
+            formatted_type: base_formatted_type,
+        });
+        let default_expression = default_expression.and_then(|expression| {
+            replicated_column_default(type_oid, &formatted_type, base_type, expression)
+        });
+
+        Self {
+            typ: convert_type_oid_to_type(type_oid),
+            typname,
+            formatted_type,
+            modifier,
+            default_expression,
+        }
+    }
 }
 
 /// Connections for one property: the user's session that issues DDL and an
@@ -170,21 +203,23 @@ impl Harness {
             .query_one(
                 &format!(
                     "select s.atttypid, s.typname, s.formatted_type, s.default_expression, \
-                     s.atttypmod from etl.describe_table_schema('{CASE_TABLE}'::regclass) s where \
-                     s.attname = 'c'"
+                     s.atttypmod, b.base_type_oid, b.base_typmod, b.base_formatted_type from \
+                     etl.describe_table_schema('{CASE_TABLE}'::regclass) s cross join lateral \
+                     etl.describe_base_type(s.atttypid, s.atttypmod) b where s.attname = 'c'"
                 ),
                 &[],
             )
             .await
             .unwrap();
 
-        DescribedColumn {
-            typ: Type::from_oid(row.get(0)).unwrap(),
-            typname: row.get(1),
-            formatted_type: row.get(2),
-            default_expression: row.get(3),
-            modifier: row.get(4),
-        }
+        DescribedColumn::new(
+            row.get(0),
+            row.get(1),
+            row.get(2),
+            row.get(4),
+            (row.get(5), row.get(6), row.get(7)),
+            row.get(3),
+        )
     }
 
     /// Returns column `c` from the DDL messages emitted since the last call.
@@ -216,14 +251,18 @@ impl Harness {
             .find(|column| column["attname"] == "c")
             .unwrap();
 
-        DescribedColumn {
-            typ: Type::from_oid(u32::try_from(column["atttypid"].as_i64().unwrap()).unwrap())
-                .unwrap(),
-            typname: column["typname"].as_str().unwrap().to_owned(),
-            formatted_type: column["formatted_type"].as_str().unwrap().to_owned(),
-            default_expression: column["default_expression"].as_str().map(ToOwned::to_owned),
-            modifier: i32::try_from(column["atttypmod"].as_i64().unwrap()).unwrap(),
-        }
+        DescribedColumn::new(
+            u32::try_from(column["atttypid"].as_i64().unwrap()).unwrap(),
+            column["typname"].as_str().unwrap().to_owned(),
+            column["formatted_type"].as_str().unwrap().to_owned(),
+            i32::try_from(column["atttypmod"].as_i64().unwrap()).unwrap(),
+            (
+                u32::try_from(column["base_type_oid"].as_i64().unwrap()).unwrap(),
+                i32::try_from(column["base_typmod"].as_i64().unwrap()).unwrap(),
+                column["base_formatted_type"].as_str().unwrap().to_owned(),
+            ),
+            column["default_expression"].as_str().map(ToOwned::to_owned),
+        )
     }
 
     /// Returns the value Postgres backfilled into the pre-existing row.
@@ -569,6 +608,25 @@ fn json_case() -> impl Strategy<Value = DefaultCase> {
         })
 }
 
+/// Text columns whose default is a literal cast to another type.
+///
+/// Postgres stores the cast type's output for such a default, which follows
+/// the session that evaluates it.
+fn typed_text_case() -> impl Strategy<Value = DefaultCase> {
+    prop_oneof![
+        integer_case(),
+        float_case(false),
+        bool_case(),
+        temporal_case(),
+        interval_case(),
+        json_case(),
+    ]
+    .prop_map(|case| DefaultCase {
+        column_type: "text".to_owned(),
+        literal: format!("({})::{}", case.literal, case.column_type),
+    })
+}
+
 /// Any supported column type with a literal that may change value on store.
 ///
 /// `value_changing_casts` enables explicit casts that change the literal's
@@ -584,6 +642,7 @@ fn default_case(value_changing_casts: bool) -> impl Strategy<Value = DefaultCase
         temporal_case(),
         interval_case(),
         json_case(),
+        typed_text_case(),
     ]
 }
 
@@ -612,17 +671,19 @@ fn session_settings() -> impl Strategy<Value = SessionSettings> {
         })
 }
 
-/// Checks that a parsed default denotes the value Postgres backfilled.
+/// Checks that a parsed default denotes the value Postgres backfilled when the
+/// DDL ran under `settings`.
 ///
 /// With `ignore_type_modifier`, the literal is read as the unmodified type,
 /// which is how every destination column receives it.
 fn check_literal_denotes_backfill(
     harness: &Harness,
     case: &DefaultCase,
+    settings: &SessionSettings,
     ignore_type_modifier: bool,
 ) -> Result<(), TestCaseError> {
     block_on(async {
-        if !harness.add_defaulted_column(case, &SessionSettings::etl()).await {
+        if !harness.add_defaulted_column(case, settings).await {
             return Ok(());
         }
         let column = harness.bootstrap_column().await;
@@ -653,40 +714,12 @@ fn check_literal_denotes_backfill(
     })
 }
 
-/// Returns whether `settings` change how Postgres renders the default of
-/// `column` in a way that is a known defect, pinned by its own ignored test.
-fn is_known_session_defect(column: &DescribedColumn, settings: &SessionSettings) -> bool {
-    let typ = &column.typ;
-    // See `ddl_message_date_default_is_independent_of_datestyle`. Every
-    // non-ISO style fails: day-first orders swap fields, and even `SQL, MDY`
-    // renders zone abbreviations such as `LMT` that Postgres cannot read back.
-    let datestyle_defect = matches!(*typ, Type::DATE | Type::TIMESTAMP | Type::TIMESTAMPTZ)
-        && !settings.datestyle.starts_with("ISO");
-    // See `ddl_message_interval_default_is_independent_of_intervalstyle`.
-    let intervalstyle_defect = *typ == Type::INTERVAL && settings.intervalstyle == "sql_standard";
-    // See `ddl_message_float_default_is_independent_of_extra_float_digits`.
-    // Positive values select shortest-exact output, so only the rest round.
-    let float_digits_defect =
-        matches!(*typ, Type::FLOAT4 | Type::FLOAT8) && settings.extra_float_digits < 1;
-    // See `ddl_message_timestamp_default_from_timestamptz_is_independent_of_timezone`.
-    // The hidden `timestamptz` to `timestamp` cast depends on `TimeZone`.
-    let timezone_defect = *typ == Type::TIMESTAMP
-        && settings.timezone != "UTC"
-        && column.default_expression.as_deref().is_some_and(|d| d.ends_with("with time zone"));
-
-    datestyle_defect || intervalstyle_defect || float_digits_defect || timezone_defect
-}
-
 /// Checks that the DDL message default denotes the same value as the bootstrap
 /// default when the DDL ran under `settings`.
-///
-/// With `skip_known_defects`, cases [`is_known_session_defect`] flags pass
-/// without a check.
 fn check_ddl_message_matches_bootstrap(
     harness: &Harness,
     case: &DefaultCase,
     settings: &SessionSettings,
-    skip_known_defects: bool,
 ) -> Result<(), TestCaseError> {
     block_on(async {
         if !harness.add_defaulted_column(case, settings).await {
@@ -696,9 +729,6 @@ fn check_ddl_message_matches_bootstrap(
         let message = harness.ddl_message_column().await;
         let bootstrap = harness.bootstrap_column().await;
         prop_assert_eq!(&message.typ, &bootstrap.typ);
-        if skip_known_defects && is_known_session_defect(&bootstrap, settings) {
-            return Ok(());
-        }
 
         let message_value = harness.denoted_value(&message, &message.formatted_type).await;
         let bootstrap_value = harness.denoted_value(&bootstrap, &bootstrap.formatted_type).await;
@@ -725,7 +755,13 @@ async fn assert_literals_denote_backfill(cases: &[(&str, &str)], ignore_type_mod
                 column_type: (*column_type).to_owned(),
                 literal: (*literal).to_owned(),
             };
-            check_literal_denotes_backfill(&harness, &case, ignore_type_modifier).err()
+            check_literal_denotes_backfill(
+                &harness,
+                &case,
+                &SessionSettings::etl(),
+                ignore_type_modifier,
+            )
+            .err()
         })
         .collect();
 
@@ -749,7 +785,7 @@ async fn assert_ddl_messages_match_bootstrap(
                 column_type: (*column_type).to_owned(),
                 literal: (*literal).to_owned(),
             };
-            check_ddl_message_matches_bootstrap(&harness, &case, &settings, false).err()
+            check_ddl_message_matches_bootstrap(&harness, &case, &settings).err()
         })
         .collect();
 
@@ -764,7 +800,7 @@ async fn parsed_default_literal_denotes_backfilled_value() {
     // Value-changing casts are covered separately by
     // `parsed_default_literal_denotes_backfilled_value_with_value_changing_casts`.
     run_property("parsed default denotes backfilled value", &default_case(false), |case| {
-        check_literal_denotes_backfill(&harness, case, false)
+        check_literal_denotes_backfill(&harness, case, &SessionSettings::etl(), false)
     });
 }
 
@@ -776,7 +812,7 @@ async fn parsed_default_literal_denotes_backfilled_value_with_value_changing_cas
     run_property(
         "parsed default denotes backfill with value-changing casts",
         &default_case(true),
-        |case| check_literal_denotes_backfill(&harness, case, false),
+        |case| check_literal_denotes_backfill(&harness, case, &SessionSettings::etl(), false),
     );
 }
 
@@ -806,7 +842,7 @@ async fn parsed_default_literal_denotes_backfilled_value_without_type_modifier()
     run_property(
         "parsed default denotes backfill without modifier",
         &default_case(false),
-        |case| check_literal_denotes_backfill(&harness, case, true),
+        |case| check_literal_denotes_backfill(&harness, case, &SessionSettings::etl(), true),
     );
 }
 
@@ -859,61 +895,134 @@ async fn parsed_default_keeps_values_the_type_modifier_preserves() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn unknown_type_default_denotes_backfilled_text() {
+    init_test_tracing();
+    let harness = Harness::new().await;
+    harness
+        .user
+        .batch_execute(
+            "create domain public.d_text as text; create domain public.d_int as integer; create \
+             domain public.d_bigint as bigint; create domain public.d_numeric as numeric; create \
+             domain public.d_float as double precision; create domain public.d_bool as boolean; \
+             create domain public.d_date as date; create domain public.d_uuid as uuid; create \
+             domain public.d_tstz as timestamptz; create domain public.d_jsonb as jsonb; create \
+             domain public.d_ints as integer[]; create domain public.d_nested as public.d_text; \
+             create domain public.price as numeric(10,2); create domain public.nested_price as \
+             public.price; create domain public.code as character(5); create type public.status \
+             as enum ('pending', 'done'); create domain public.d_reg as regclass; create table \
+             public.reg_target (id int);",
+        )
+        .await
+        .unwrap();
+    let mut hostile = SessionSettings::etl();
+    hostile.datestyle = "German, DMY".to_owned();
+    hostile.timezone = "Asia/Kathmandu".to_owned();
+    hostile.intervalstyle = "sql_standard".to_owned();
+    hostile.extra_float_digits = 0;
+
+    // Destinations store a type ETL does not know as text, so a kept default
+    // must be the text Postgres backfills. A domain default renders as its
+    // base type's value, before the domain's type modifier rounds or pads it.
+    let cases = [
+        ("public.d_text", "'it''s'", true),
+        ("public.d_int", "5", true),
+        ("public.d_int", "-5", true),
+        ("public.d_bigint", "7", true),
+        ("public.d_numeric", "1.50", true),
+        ("public.d_bool", "true", true),
+        ("public.d_date", "'2026-01-02'", true),
+        ("public.d_uuid", "'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11'", true),
+        ("public.d_tstz", "'2026-01-02 03:04:05+05'", true),
+        ("public.d_jsonb", r#"'{"b": 1, "a": 2}'"#, true),
+        ("public.d_ints", "'{1,2}'", true),
+        ("public.d_nested", "'y'", true),
+        ("public.price[]", "'{9.999}'", true),
+        ("public.status", "'pending'", true),
+        ("public.status[]", "'{pending,done}'", true),
+        // The domain's type modifier rounds or pads the stored value.
+        ("public.price", "9.999", false),
+        ("public.price", "'9.999'::public.price", false),
+        ("public.nested_price", "1.239", false),
+        ("public.code", "'ab'", false),
+        // Conversions that round or read the session.
+        ("public.d_int", "1.5", false),
+        ("public.d_float", "1.0", false),
+        ("public.d_date", "'01/02/2026'::text::date", false),
+        // `regclass` prints names relative to `search_path`: the pinned
+        // rendering says `public.reg_target`, replicated rows `reg_target`.
+        ("public.d_reg", "'public.reg_target'", false),
+    ];
+    for settings in [SessionSettings::etl(), hostile] {
+        for (column_type, literal, expect_kept) in cases {
+            let case =
+                DefaultCase { column_type: column_type.to_owned(), literal: literal.to_owned() };
+            assert!(
+                harness.add_defaulted_column(&case, &settings).await,
+                "{column_type} {literal}"
+            );
+            let backfilled = harness.backfilled_value().await;
+            let message = harness.ddl_message_column().await;
+            let bootstrap = harness.bootstrap_column().await;
+
+            for column in [message, bootstrap] {
+                let kept = column.default_expression.as_deref().and_then(|expression| {
+                    parse_default_expression(expression, &column.typ, column.modifier)
+                });
+                assert_eq!(
+                    kept.is_some(),
+                    expect_kept,
+                    "{column_type} default {literal}: {column:?}"
+                );
+                if let Some(parsed) = kept {
+                    let (_, text) = plain_literal(&parsed);
+                    assert_eq!(Some(text), backfilled, "{column_type} default {literal}");
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn ddl_message_default_matches_bootstrap_under_any_session_settings() {
     init_test_tracing();
     let harness = Harness::new().await;
     let strategy = (default_case(false), session_settings());
 
-    // Known defects are skipped by `is_known_session_defect` and checked by
-    // `ddl_message_default_matches_bootstrap_including_known_defects`.
     run_property("ddl message default matches bootstrap", &strategy, |(case, settings)| {
-        check_ddl_message_matches_bootstrap(&harness, case, settings, true)
+        check_ddl_message_matches_bootstrap(&harness, case, settings)
     });
 }
 
-#[ignore = "known defect: ddl message defaults are rendered with the user's session settings"]
-#[tokio::test(flavor = "multi_thread")]
-async fn ddl_message_default_matches_bootstrap_including_known_defects() {
-    init_test_tracing();
-    let harness = Harness::new().await;
-    let strategy = (default_case(false), session_settings());
-
-    run_property("ddl message default matches bootstrap", &strategy, |(case, settings)| {
-        check_ddl_message_matches_bootstrap(&harness, case, settings, false)
-    });
-}
-
-#[ignore = "known defect: ddl message date defaults follow the user's DateStyle"]
 #[tokio::test(flavor = "multi_thread")]
 async fn ddl_message_date_default_is_independent_of_datestyle() {
     init_test_tracing();
 
-    // The message carries `'02.01.2026'::date`, which ETL reads as February 1.
+    // The user's session renders `'02.01.2026'::date`, which ETL would read as
+    // February 1.
     assert_ddl_messages_match_bootstrap(&[("date", "'2026-01-02'")], |settings| {
         settings.datestyle = "German, MDY".to_owned();
     })
     .await;
 }
 
-#[ignore = "known defect: ddl message interval defaults follow the user's IntervalStyle"]
 #[tokio::test(flavor = "multi_thread")]
 async fn ddl_message_interval_default_is_independent_of_intervalstyle() {
     init_test_tracing();
 
-    // The message carries `'-1 2:00:00'::interval`, which ETL reads as
-    // `-1 days +02:00:00` instead of `-1 days -02:00:00`.
+    // The user's session renders `'-1 2:00:00'::interval`, which ETL would read
+    // as `-1 days +02:00:00` instead of `-1 days -02:00:00`.
     assert_ddl_messages_match_bootstrap(&[("interval", "'-1 days -2 hours'")], |settings| {
         settings.intervalstyle = "sql_standard".to_owned();
     })
     .await;
 }
 
-#[ignore = "known defect: ddl message float defaults follow the user's extra_float_digits"]
 #[tokio::test(flavor = "multi_thread")]
 async fn ddl_message_float_default_is_independent_of_extra_float_digits() {
     init_test_tracing();
 
-    // The message carries `'0.3'::double precision`, losing the last digits.
+    // The user's session renders `'0.3'::double precision`, losing the last
+    // digits.
     assert_ddl_messages_match_bootstrap(
         &[("double precision", "'0.30000000000000004'::float8")],
         |settings| settings.extra_float_digits = 0,
@@ -921,17 +1030,18 @@ async fn ddl_message_float_default_is_independent_of_extra_float_digits() {
     .await;
 }
 
-#[ignore = "known defect: a timestamptz default on a timestamp column depends on TimeZone"]
 #[tokio::test(flavor = "multi_thread")]
-async fn ddl_message_timestamp_default_from_timestamptz_is_independent_of_timezone() {
+async fn parsed_default_denotes_backfilled_value_under_any_session_settings() {
     init_test_tracing();
+    let harness = Harness::new().await;
+    let strategy = (default_case(false), session_settings());
 
-    // The message carries `'2026-01-02 08:49:05+05:45'::timestamp with time
-    // zone`, which ETL reads as 08:49:05, while the bootstrap carries the
-    // `+00` rendering, read as 03:04:05.
-    assert_ddl_messages_match_bootstrap(
-        &[("timestamp", "'2026-01-02 03:04:05+00'::timestamptz")],
-        |settings| settings.timezone = "Asia/Kathmandu".to_owned(),
-    )
-    .await;
+    // Postgres evaluates the default in the DDL session, so hidden
+    // conversions that read its settings, such as `date` to `text` or
+    // `timestamptz` to `timestamp`, change the stored value.
+    run_property(
+        "parsed default denotes backfill under any session settings",
+        &strategy,
+        |(case, settings)| check_literal_denotes_backfill(&harness, case, settings, false),
+    );
 }

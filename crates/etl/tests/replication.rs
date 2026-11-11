@@ -1184,6 +1184,77 @@ async fn ddl_message_primary_key_order_matches_loaded_table_schema() {
     assert_eq!(streamed_column_schemas, table_schema.column_schemas);
 }
 
+/// The bootstrap snapshot resolves domain base types with its own query, so
+/// domain defaults survive without the source migration's helper.
+#[tokio::test(flavor = "multi_thread")]
+async fn bootstrap_schema_resolves_domain_defaults_through_base_types() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+    database
+        .client
+        .as_ref()
+        .unwrap()
+        .batch_execute(
+            "create domain test.d_text as text; create domain test.d_int as integer; create \
+             domain test.d_bool as boolean; create domain test.d_date as date; create domain \
+             test.d_nested as test.d_text; create domain test.price as numeric(10,2); create \
+             domain test.nested_price as test.price; create type test.status as enum ('pending', \
+             'done');",
+        )
+        .await
+        .unwrap();
+    let table_id = database
+        .create_table(
+            test_table_name("domain_defaults"),
+            true,
+            &[
+                ("a", "test.d_text default 'x'"),
+                ("b", "test.d_int default 5"),
+                ("c", "test.d_bool default true"),
+                ("d", "test.d_date default '2026-01-02'"),
+                ("e", "test.d_nested default 'y'"),
+                ("f", "test.price default 9.999"),
+                ("g", "test.nested_price default 1.239"),
+                ("h", "test.status default 'pending'"),
+            ],
+        )
+        .await
+        .unwrap();
+
+    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let (transaction, _) = client
+        .create_table_copy_slot(
+            &test_slot_name("domain_defaults_read"),
+            table_id,
+            &Default::default(),
+        )
+        .await
+        .unwrap();
+    let (table_schema, _) = transaction.get_table_schema_with_identity(table_id).await.unwrap();
+    transaction.commit().await.unwrap();
+
+    let defaults: Vec<_> = table_schema
+        .column_schemas
+        .iter()
+        .filter(|column| column.name != "id")
+        .map(|column| (column.name.as_str(), column.default_expression.as_deref()))
+        .collect();
+    // Domains whose base type has a modifier round or pad the stored value.
+    assert_eq!(
+        defaults,
+        [
+            ("a", Some("'x'")),
+            ("b", Some("'5'")),
+            ("c", Some("'t'")),
+            ("d", Some("'2026-01-02'")),
+            ("e", Some("'y'")),
+            ("f", None),
+            ("g", None),
+            ("h", Some("'pending'::test.status")),
+        ]
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy_stream_is_consistent() {
     init_test_tracing();
