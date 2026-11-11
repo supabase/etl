@@ -49,6 +49,9 @@ pub(crate) const ETL_DUCKLAKE_INLINE_FLUSH_ROWS: &str = "etl_ducklake_inline_flu
 pub(crate) const ETL_DUCKLAKE_INLINE_FLUSH_DURATION_SECONDS: &str =
     "etl_ducklake_inline_flush_duration_seconds";
 pub(crate) const ETL_DUCKLAKE_RETRIES_TOTAL: &str = "etl_ducklake_retries_total";
+/// Transitions from pooled catalog reads to the direct catalog connection.
+pub(super) const ETL_DUCKLAKE_CATALOG_POOLER_FALLBACKS_TOTAL: &str =
+    "etl_ducklake_catalog_pooler_fallbacks_total";
 pub(crate) const ETL_DUCKLAKE_FAILED_BATCHES_TOTAL: &str = "etl_ducklake_failed_batches_total";
 pub(crate) const ETL_DUCKLAKE_REPLAYED_BATCHES_TOTAL: &str = "etl_ducklake_replayed_batches_total";
 pub(crate) const ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_PAUSE_DURATION_SECONDS: &str =
@@ -213,6 +216,12 @@ pub(crate) fn register_metrics() {
             ETL_DUCKLAKE_RETRIES_TOTAL,
             Unit::Count,
             "Retry attempts for DuckLake write paths, labeled by batch_kind and retry_scope."
+        );
+        describe_counter!(
+            ETL_DUCKLAKE_CATALOG_POOLER_FALLBACKS_TOTAL,
+            Unit::Count,
+            "DuckLake replicator metadata readers that switched to the direct catalog after a \
+             pooler read failed, counted once per destination instance."
         );
         describe_counter!(
             ETL_DUCKLAKE_FAILED_BATCHES_TOTAL,

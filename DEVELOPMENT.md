@@ -220,6 +220,13 @@ starting another maintenance run tries the configured pooler again. If the
 direct retry also fails, its error is returned normally. Only read-only catalog
 operations use this fallback.
 
+The replicator increments `etl_ducklake_catalog_pooler_fallbacks_total` once
+when a destination switches to direct reads, even if the direct retry also
+fails. Healthy pooled reads and subsequent direct reads do not increment it.
+The counter starts at zero and uses the replicator's existing project and
+pipeline labels. It counts fallback transitions, not time spent using the
+direct connection. External maintenance runs do not increment this counter.
+
 Destination replay-epoch reads and transitions keep using `catalog_url`, with
 autocommit and normal prepared-statement caching. This avoids adding explicit
 transaction round trips to copy batches and streaming replay checks. Each

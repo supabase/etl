@@ -9,6 +9,7 @@ use std::{
 };
 
 use etl_config::{DuckLakeCatalogConnectOptionsError, ducklake_catalog_metadata_connect_options};
+use metrics::Counter;
 use sqlx::{Error, PgPool, error::DatabaseError};
 use tracing::warn;
 use url::Url;
@@ -41,6 +42,8 @@ pub struct DuckLakeMetadataPool {
     pooler: Option<PgPool>,
     /// Whether a pooled read has failed in any clone.
     fallback: Arc<AtomicBool>,
+    /// Optional caller-owned metric for the first transition to direct reads.
+    fallback_counter: Counter,
 }
 
 impl DuckLakeMetadataPool {
@@ -57,7 +60,21 @@ impl DuckLakeMetadataPool {
                 Ok(direct.options().clone().connect_lazy_with(options.extra_float_digits(None)))
             })
             .transpose()?;
-        Ok(Self { direct, pooler, fallback: Arc::new(AtomicBool::new(false)) })
+        Ok(Self {
+            direct,
+            pooler,
+            fallback: Arc::new(AtomicBool::new(false)),
+            fallback_counter: Counter::noop(),
+        })
+    }
+
+    /// Attaches a counter before cloning the reader and publishes its initial
+    /// value without resetting an existing count. Any clone switching to
+    /// direct reads increments it once.
+    pub fn with_fallback_counter(mut self, counter: Counter) -> Self {
+        counter.increment(0);
+        self.fallback_counter = counter;
+        self
     }
 
     /// Runs a read-only operation, retrying once on the direct pool after a
@@ -80,6 +97,7 @@ impl DuckLakeMetadataPool {
                 Ok(result) => return Ok(result),
                 Err(error) => {
                     if !self.fallback.swap(true, Ordering::Relaxed) {
+                        self.fallback_counter.increment(1);
                         // Provider messages can echo credentials or row values.
                         // Keep the category and code without their raw text.
                         warn!(
@@ -106,6 +124,7 @@ mod tests {
         },
     };
 
+    use metrics::{Counter, atomics::AtomicU64};
     use sqlx::{
         Error, PgPool,
         postgres::{PgPoolOptions, PgSslMode},
@@ -150,7 +169,10 @@ mod tests {
         let direct = direct_pool();
         let url = Url::parse("postgres://reader@pooler.example.com:6543/catalog?sslmode=require")
             .unwrap();
-        let pool = DuckLakeMetadataPool::new(direct.clone(), Some(&url)).unwrap();
+        let fallbacks = Arc::new(AtomicU64::new(0));
+        let pool = DuckLakeMetadataPool::new(direct.clone(), Some(&url))
+            .unwrap()
+            .with_fallback_counter(Counter::from_arc(fallbacks.clone()));
         for _ in 0..2 {
             pool.read("list_tables", |pool| async move {
                 let options = pool.connect_options();
@@ -166,6 +188,7 @@ mod tests {
         pool.pooler.as_ref().unwrap().close().await;
         assert!(!direct.is_closed());
         assert_eq!(direct.options().get_max_connections(), 1);
+        assert_eq!(fallbacks.load(Ordering::Relaxed), 0);
         let invalid = Url::parse("file:///tmp/catalog").unwrap();
         assert!(DuckLakeMetadataPool::new(direct, Some(&invalid)).is_err());
     }
@@ -175,7 +198,10 @@ mod tests {
     #[tokio::test]
     async fn direct_only_errors_are_returned_without_retry() {
         let direct = direct_pool();
-        let pool = DuckLakeMetadataPool::new(direct.clone(), None).unwrap();
+        let fallbacks = Arc::new(AtomicU64::new(0));
+        let pool = DuckLakeMetadataPool::new(direct.clone(), None)
+            .unwrap()
+            .with_fallback_counter(Counter::from_arc(fallbacks.clone()));
         let calls = AtomicUsize::new(0);
         let error = pool
             .read("list_tables", |pool| {
@@ -189,6 +215,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, Error::RowNotFound));
         assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(fallbacks.load(Ordering::Relaxed), 0);
         pool.direct.close().await;
         assert!(direct.is_closed());
     }
@@ -222,7 +249,10 @@ mod tests {
             .with_writer(move || writer.clone())
             .finish();
         let _guard = tracing::subscriber::set_default(subscriber);
-        let pool = DuckLakeMetadataPool::new(direct_pool(), Some(&url)).unwrap();
+        let fallbacks = Arc::new(AtomicU64::new(0));
+        let pool = DuckLakeMetadataPool::new(direct_pool(), Some(&url))
+            .unwrap()
+            .with_fallback_counter(Counter::from_arc(fallbacks.clone()));
         let calls = AtomicUsize::new(0);
         let value = pool
             .read("list_tables", |pool| {
@@ -255,6 +285,7 @@ mod tests {
         assert!(!logs.contains("placeholder-secret"));
         assert!(!logs.contains("placeholder-token"));
         assert!(!logs.contains("postgres://"));
+        assert_eq!(fallbacks.load(Ordering::Relaxed), 1);
     }
 
     /// A later failure switches routing too, and a failed direct retry remains
@@ -262,7 +293,10 @@ mod tests {
     #[tokio::test]
     async fn later_pooler_failure_preserves_direct_error() {
         let url = Url::parse("postgres://reader@pooler.example.com/catalog").unwrap();
-        let pool = DuckLakeMetadataPool::new(direct_pool(), Some(&url)).unwrap();
+        let fallbacks = Arc::new(AtomicU64::new(0));
+        let pool = DuckLakeMetadataPool::new(direct_pool(), Some(&url))
+            .unwrap()
+            .with_fallback_counter(Counter::from_arc(fallbacks.clone()));
         pool.read("list_tables", |_| async { Ok(()) }).await.unwrap();
         let calls = AtomicUsize::new(0);
         let error = pool
@@ -281,5 +315,6 @@ mod tests {
         assert!(matches!(error, Error::RowNotFound));
         assert_eq!(calls.load(Ordering::Relaxed), 2);
         assert!(pool.fallback.load(Ordering::Relaxed));
+        assert_eq!(fallbacks.load(Ordering::Relaxed), 1);
     }
 }

@@ -41,7 +41,7 @@ use etl_maintenance::{
         namespace_version_check_sql, namespaced_tables_query, table_namespace_filter,
     },
 };
-use metrics::gauge;
+use metrics::{counter, gauge};
 use parking_lot::{Mutex, RwLock as ParkingLotRwLock};
 use pg_escape::{quote_identifier as quote_postgres_identifier, quote_literal};
 use rand::Rng;
@@ -87,9 +87,10 @@ use crate::{
         external_maintenance::ExternalMaintenanceOperations,
         inline_size::DuckLakePendingInlineSizeSampler,
         metrics::{
-            DuckLakeMetricsSampler, ETL_DUCKLAKE_POOL_SIZE, query_catalog_maintenance_metrics,
-            query_table_storage_metrics, register_metrics,
-            resolve_ducklake_metadata_schema_blocking, spawn_ducklake_metrics_sampler,
+            DuckLakeMetricsSampler, ETL_DUCKLAKE_CATALOG_POOLER_FALLBACKS_TOTAL,
+            ETL_DUCKLAKE_POOL_SIZE, query_catalog_maintenance_metrics, query_table_storage_metrics,
+            register_metrics, resolve_ducklake_metadata_schema_blocking,
+            spawn_ducklake_metrics_sampler,
         },
         replay_epoch::{
             begin_table_replay_epoch_transition, complete_table_replay_epoch_transition,
@@ -224,13 +225,16 @@ fn build_ducklake_metadata_pg_pool(
     direct_pg_pool: &PgPool,
     catalog_pooler_url: Option<&Url>,
 ) -> EtlResult<DuckLakeMetadataPool> {
-    DuckLakeMetadataPool::new(direct_pg_pool.clone(), catalog_pooler_url).map_err(|source| {
-        classified_error(
-            ErrorKind::ConfigError,
-            "DuckLake catalog pool configuration failed",
-            source,
-        )
-    })
+    let pool = DuckLakeMetadataPool::new(direct_pg_pool.clone(), catalog_pooler_url).map_err(
+        |source| {
+            classified_error(
+                ErrorKind::ConfigError,
+                "DuckLake catalog pool configuration failed",
+                source,
+            )
+        },
+    )?;
+    Ok(pool.with_fallback_counter(counter!(ETL_DUCKLAKE_CATALOG_POOLER_FALLBACKS_TOTAL)))
 }
 
 /// Returns whether a DuckLake DDL error indicates another transaction already
@@ -6195,6 +6199,7 @@ mod tests {
     }
 
     mod postgres_backed {
+        use etl_telemetry::metrics::init_metrics_handle;
         use tokio::{net::TcpListener, time::timeout};
 
         use super::*;
@@ -6203,6 +6208,7 @@ mod tests {
         /// metadata pooler.
         #[tokio::test(flavor = "multi_thread")]
         async fn metadata_pooler_outage_falls_back_for_sampling_and_maintenance() {
+            let metrics = init_metrics_handle().unwrap();
             let directory = TempDir::new().unwrap();
             let data = path_to_file_url(directory.path());
             let (_database, catalog) = create_catalog_database().await;
@@ -6224,6 +6230,11 @@ mod tests {
                 .build()
                 .await
                 .unwrap();
+            assert!(
+                metrics
+                    .render()
+                    .contains(&format!("{ETL_DUCKLAKE_CATALOG_POOLER_FALLBACKS_TOTAL} 0\n"))
+            );
             destination
                 .write_table_rows(
                     &replicated,
@@ -6257,6 +6268,11 @@ mod tests {
             })
             .await
             .unwrap();
+            assert!(
+                metrics
+                    .render()
+                    .contains(&format!("{ETL_DUCKLAKE_CATALOG_POOLER_FALLBACKS_TOTAL} 1\n"))
+            );
             let metadata_schema = destination.metadata_schema.to_string();
             destination.shutdown().await.unwrap();
             drop(destination);
@@ -6290,6 +6306,12 @@ mod tests {
             .await
             .unwrap();
             assert!(outcome.applied());
+            // External maintenance does not increment the replicator's counter.
+            assert!(
+                metrics
+                    .render()
+                    .contains(&format!("{ETL_DUCKLAKE_CATALOG_POOLER_FALLBACKS_TOTAL} 1\n"))
+            );
             let conn = open_lake_conn(&catalog, &data);
             let count: i64 = conn
                 .query_row("select count(*) from lake.public.fallback_rows", [], |row| row.get(0))
