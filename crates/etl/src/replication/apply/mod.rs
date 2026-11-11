@@ -3486,15 +3486,6 @@ mod apply_worker {
         AlreadyInCatchup,
     }
 
-    /// Proof that the apply worker cleared its decoding state for a table.
-    ///
-    /// Building a table-sync worker requires it, so no worker starts while
-    /// the apply loop still holds a decoder from before the copy.
-    struct DecoderReset {
-        /// Table whose apply-side decoding state was cleared.
-        table_id: TableId,
-    }
-
     /// Clears apply-side decoding state before a table-sync worker starts.
     ///
     /// While table sync owns the table, the apply worker skips its DDL,
@@ -3512,7 +3503,7 @@ mod apply_worker {
     fn reset_table_decoding_state_for_sync(
         table_decoding_states: &mut HashMap<TableId, TableDecodingState>,
         table_id: TableId,
-    ) -> DecoderReset {
+    ) {
         if table_decoding_states.remove(&table_id).is_some() {
             debug!(
                 worker_type = %WorkerType::Apply,
@@ -3520,8 +3511,6 @@ mod apply_worker {
                 "cleared apply decoding state before starting table sync worker",
             );
         }
-
-        DecoderReset { table_id }
     }
 
     /// Determines whether changes should be applied for a given table.
@@ -3778,20 +3767,27 @@ mod apply_worker {
         ReadinessInputs::new(current_lsn, persisted_checkpoint_lsn, has_materialized_decoding_state)
     }
 
-    /// Logs one handoff decision.
+    /// Logs one handoff decision with the inputs it was made from.
+    ///
+    /// COMMIT decisions take no readiness inputs, so `readiness` is `None`
+    /// for them.
     fn log_handoff_decision(
         trigger: &'static str,
-        current_lsn: PgLsn,
         table_id: TableId,
         table_state: &TableState,
+        worker_running: bool,
+        current_lsn: PgLsn,
+        readiness: Option<&ReadinessInputs>,
         action: &impl fmt::Debug,
     ) {
         debug!(
             worker_type = %WorkerType::Apply,
             table_id = table_id.0,
-            table_state_type = %table_state.as_type(),
+            %table_state,
+            worker_running,
             trigger,
             %current_lsn,
+            ?readiness,
             ?action,
             "evaluated table sync handoff",
         );
@@ -3803,6 +3799,8 @@ mod apply_worker {
             worker_type = %WorkerType::Apply,
             table_id = table_id.0,
             sync_done_lsn = %proof.sync_done_lsn(),
+            current_lsn = %proof.current_lsn(),
+            persisted_checkpoint_lsn = %proof.persisted_checkpoint_lsn(),
             "transitioning sync_done -> ready",
         );
     }
@@ -3821,10 +3819,12 @@ mod apply_worker {
         S: StateStore,
     {
         let catchup_wait = match action {
-            ActiveAction::StartCatchup { catchup_lsn } => {
+            ActiveAction::StartCatchup { snapshot_lsn, current_lsn, catchup_lsn } => {
                 info!(
                     worker_type = %WorkerType::Apply,
                     table_id = table.table_id.0,
+                    %current_lsn,
+                    %snapshot_lsn,
                     %catchup_lsn,
                     "transitioning sync_wait -> catchup",
                 );
@@ -3861,19 +3861,7 @@ mod apply_worker {
                 ctx.store.update_table_state(table_id, TableState::Ready).await
             }
             IdleAction::SpawnWorker => {
-                let decoder_reset =
-                    reset_table_decoding_state_for_sync(table_decoding_states, table_id);
-                let table_sync_worker = build_table_sync_worker(ctx, decoder_reset);
-                if let Err(err) =
-                    start_table_sync_worker(Arc::clone(&ctx.pool), table_sync_worker).await
-                {
-                    error!(
-                        worker_type = %WorkerType::Apply,
-                        table_id = table_id.0,
-                        error = %err,
-                        "failed to start table sync worker",
-                    );
-                }
+                spawn_table_sync_worker(ctx, table_id, table_decoding_states).await;
 
                 Ok(())
             }
@@ -3903,9 +3891,11 @@ mod apply_worker {
                     let action = handoff::active_after_commit(&table_state, current_lsn);
                     log_handoff_decision(
                         "after_commit",
-                        current_lsn,
                         table_id,
                         &table_state,
+                        true,
+                        current_lsn,
+                        None,
                         &action,
                     );
 
@@ -3922,9 +3912,11 @@ mod apply_worker {
                     let action = handoff::idle_after_commit(&table_state);
                     log_handoff_decision(
                         "after_commit",
-                        current_lsn,
                         table_id,
                         &table_state,
+                        false,
+                        current_lsn,
+                        None,
                         &action,
                     );
                     execute_idle_action(ctx, table_id, action, table_decoding_states).await?;
@@ -3981,9 +3973,11 @@ mod apply_worker {
                     let action = handoff::active_after_flush(&table_state, &readiness);
                     log_handoff_decision(
                         "after_flush",
-                        current_lsn,
                         table_id,
                         &table_state,
+                        true,
+                        current_lsn,
+                        Some(&readiness),
                         &action,
                     );
 
@@ -3998,9 +3992,11 @@ mod apply_worker {
                     let action = handoff::idle_after_flush(&table_state, &readiness);
                     log_handoff_decision(
                         "after_flush",
-                        current_lsn,
                         table_id,
                         &table_state,
+                        false,
+                        current_lsn,
+                        Some(&readiness),
                         &action,
                     );
                     execute_idle_action(ctx, table_id, action, table_decoding_states).await?;
@@ -4043,7 +4039,15 @@ mod apply_worker {
                 ObservedTable::Active(table) => {
                     let table_state = table.table_state();
                     let action = handoff::active_when_quiescent(&table_state, &readiness);
-                    log_handoff_decision("quiescent", current_lsn, table_id, &table_state, &action);
+                    log_handoff_decision(
+                        "quiescent",
+                        table_id,
+                        &table_state,
+                        true,
+                        current_lsn,
+                        Some(&readiness),
+                        &action,
+                    );
 
                     execute_active_action(
                         &ctx.store,
@@ -4056,7 +4060,15 @@ mod apply_worker {
                 }
                 ObservedTable::Idle(table_state) => {
                     let action = handoff::idle_after_flush(&table_state, &readiness);
-                    log_handoff_decision("quiescent", current_lsn, table_id, &table_state, &action);
+                    log_handoff_decision(
+                        "quiescent",
+                        table_id,
+                        &table_state,
+                        false,
+                        current_lsn,
+                        Some(&readiness),
+                        &action,
+                    );
                     execute_idle_action(ctx, table_id, action, table_decoding_states).await?;
 
                     None
@@ -4071,20 +4083,24 @@ mod apply_worker {
         Ok(None)
     }
 
-    /// Creates a new table sync worker for a table whose apply decoder was
-    /// cleared.
-    fn build_table_sync_worker<S, D>(
+    /// Clears the table's apply decoder, then starts a table-sync worker.
+    ///
+    /// Clearing first is part of starting a worker, so no worker can start
+    /// while the apply loop holds a decoder from before the copy. A worker
+    /// that fails to start is logged; the next evaluation finds no running
+    /// worker and tries again.
+    async fn spawn_table_sync_worker<S, D>(
         ctx: &ApplyWorkerContext<S, D>,
-        decoder_reset: DecoderReset,
-    ) -> TableSyncWorker<S, D>
-    where
-        S: Clone,
-        D: Clone,
+        table_id: TableId,
+        table_decoding_states: &mut HashMap<TableId, TableDecodingState>,
+    ) where
+        S: PipelineStore,
+        D: PipelineDestination,
     {
-        let table_id = decoder_reset.table_id;
-        info!(table_id = table_id.0, "creating table sync worker");
+        reset_table_decoding_state_for_sync(table_decoding_states, table_id);
 
-        TableSyncWorker::new(
+        info!(table_id = table_id.0, "creating table sync worker");
+        let table_sync_worker = TableSyncWorker::new(
             ctx.pipeline_id.clone(),
             Arc::clone(&ctx.config),
             table_id,
@@ -4096,7 +4112,15 @@ mod apply_worker {
             Arc::clone(&ctx.table_sync_worker_permits),
             ctx.memory_monitor.clone(),
             ctx.batch_memory_governor.clone(),
-        )
+        );
+        if let Err(err) = start_table_sync_worker(Arc::clone(&ctx.pool), table_sync_worker).await {
+            error!(
+                worker_type = %WorkerType::Apply,
+                table_id = table_id.0,
+                error = %err,
+                "failed to start table sync worker",
+            );
+        }
     }
 
     /// Starts a table sync worker and adds it to the pool.
@@ -4183,7 +4207,11 @@ mod apply_worker {
                     &shutdown_token,
                     &activity_handle,
                     table,
-                    ActiveAction::StartCatchup { catchup_lsn },
+                    ActiveAction::StartCatchup {
+                        snapshot_lsn: PgLsn::from(10),
+                        current_lsn: catchup_lsn,
+                        catchup_lsn,
+                    },
                 ));
 
                 assert!(handoff.as_mut().now_or_never().is_none());

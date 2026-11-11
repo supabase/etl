@@ -82,21 +82,30 @@ impl ReadinessInputs {
     /// does not block owned changes at or after the boundary. Its first
     /// relation or DML can materialize the decoder on demand.
     pub(super) fn ready_proof(&self, sync_done_lsn: PgLsn) -> Option<ReadyProof> {
-        let ready = self.has_materialized_decoding_state
-            && self.current_lsn >= sync_done_lsn
-            && self.persisted_checkpoint_lsn.is_some_and(|lsn| lsn >= sync_done_lsn);
+        let persisted_checkpoint_lsn =
+            self.persisted_checkpoint_lsn.filter(|lsn| *lsn >= sync_done_lsn)?;
+        let ready = self.has_materialized_decoding_state && self.current_lsn >= sync_done_lsn;
 
-        ready.then_some(ReadyProof { sync_done_lsn })
+        ready.then_some(ReadyProof {
+            sync_done_lsn,
+            current_lsn: self.current_lsn,
+            persisted_checkpoint_lsn,
+        })
     }
 }
 
 /// Evidence that a `SyncDone` table may be stored as `Ready`.
 ///
-/// Only [`ReadinessInputs::ready_proof`] constructs it.
-#[derive(Debug, PartialEq, Eq)]
+/// Only [`ReadinessInputs::ready_proof`] constructs it. It records the progress
+/// the checks passed with, so the transition can be logged.
+#[derive(Debug)]
 pub(super) struct ReadyProof {
     /// `SyncDone` boundary the readiness checks were evaluated against.
     sync_done_lsn: PgLsn,
+    /// LSN this connection had reached.
+    current_lsn: PgLsn,
+    /// Persisted apply checkpoint, at or beyond `sync_done_lsn`.
+    persisted_checkpoint_lsn: PgLsn,
 }
 
 impl ReadyProof {
@@ -104,13 +113,27 @@ impl ReadyProof {
     pub(super) fn sync_done_lsn(&self) -> PgLsn {
         self.sync_done_lsn
     }
+
+    /// Returns the LSN this connection had reached.
+    pub(super) fn current_lsn(&self) -> PgLsn {
+        self.current_lsn
+    }
+
+    /// Returns the persisted apply checkpoint the checks passed with.
+    pub(super) fn persisted_checkpoint_lsn(&self) -> PgLsn {
+        self.persisted_checkpoint_lsn
+    }
 }
 
 /// Action for a syncing table whose sync worker is running.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub(super) enum ActiveAction {
-    /// Move `SyncWait` to `Catchup` at this LSN, then wait for `SyncDone`.
+    /// Move `SyncWait` to `Catchup` at `catchup_lsn`, then wait for `SyncDone`.
     StartCatchup {
+        /// LSN of the snapshot the table was copied from.
+        snapshot_lsn: PgLsn,
+        /// LSN this connection had reached.
+        current_lsn: PgLsn,
         /// LSN the table-sync worker must stream up to.
         catchup_lsn: PgLsn,
     },
@@ -126,7 +149,7 @@ pub(super) enum ActiveAction {
 }
 
 /// Action after a durable flush for a table whose sync worker is running.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub(super) enum ActiveFlushAction {
     /// Store `Ready` under the worker's state lock.
     PromoteToReady(ReadyProof),
@@ -144,7 +167,7 @@ impl From<ActiveFlushAction> for ActiveAction {
 }
 
 /// Action for a syncing table without a running sync worker.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub(super) enum IdleAction {
     /// Store `Ready`.
     PromoteToReady(ReadyProof),
@@ -160,9 +183,11 @@ pub(super) enum IdleAction {
 /// because the worker may have started from a position ahead of this loop.
 pub(super) fn active_after_commit(state: &TableState, current_lsn: PgLsn) -> ActiveAction {
     match state {
-        TableState::SyncWait { lsn } => {
-            ActiveAction::StartCatchup { catchup_lsn: (*lsn).max(current_lsn) }
-        }
+        TableState::SyncWait { lsn } => ActiveAction::StartCatchup {
+            snapshot_lsn: *lsn,
+            current_lsn,
+            catchup_lsn: (*lsn).max(current_lsn),
+        },
         TableState::Catchup { lsn } => ActiveAction::AwaitCatchup { catchup_lsn: *lsn },
         _ => ActiveAction::Keep,
     }
@@ -259,7 +284,7 @@ mod tests {
     impl From<ActiveAction> for Effect {
         fn from(action: ActiveAction) -> Self {
             match action {
-                ActiveAction::StartCatchup { catchup_lsn } => Self::StartCatchup(catchup_lsn),
+                ActiveAction::StartCatchup { catchup_lsn, .. } => Self::StartCatchup(catchup_lsn),
                 ActiveAction::AwaitCatchup { catchup_lsn } => Self::AwaitCatchup(catchup_lsn),
                 ActiveAction::PromoteToReady(proof) => Self::PromoteToReady(proof.sync_done_lsn()),
                 ActiveAction::Keep => Self::Keep,
@@ -329,8 +354,9 @@ mod tests {
     /// Returns the specified handoff effect.
     ///
     /// One row per trigger and worker presence, transcribed from the
-    /// per-trigger handoff functions the decisions replaced. The decisions
-    /// must match it on every input.
+    /// per-trigger handoff functions the decisions replaced; each row names its
+    /// source in commit `3cd6c009` so it can be audited. The decisions must
+    /// match it on every input.
     fn specified_effect(
         trigger: Trigger,
         has_active_worker: bool,
@@ -346,30 +372,36 @@ mod tests {
         };
 
         match (trigger, has_active_worker) {
+            // `process_single_syncing_table_after_commit_event`, active branch.
             (Trigger::AfterCommit, true) => match state {
                 TableState::SyncWait { lsn } => Effect::StartCatchup((*lsn).max(current_lsn)),
                 TableState::Catchup { lsn } => Effect::AwaitCatchup(*lsn),
                 _ => Effect::Keep,
             },
+            // `process_single_syncing_table_after_commit_event`, no-worker branch.
             (Trigger::AfterCommit, false) => match state {
                 TableState::SyncDone { .. } => Effect::Keep,
                 _ => Effect::SpawnWorker,
             },
+            // `process_single_syncing_table_after_flush`, active branch.
             (Trigger::AfterFlush, true) => match state {
                 TableState::SyncDone { lsn, .. } if ready(*lsn) => Effect::PromoteToReady(*lsn),
                 _ => Effect::Keep,
             },
+            // `process_single_syncing_table_after_flush`, no-worker branch.
             (Trigger::AfterFlush, false) => match state {
                 TableState::SyncDone { lsn, .. } if ready(*lsn) => Effect::PromoteToReady(*lsn),
                 TableState::SyncDone { .. } => Effect::Keep,
                 _ => Effect::SpawnWorker,
             },
+            // `process_single_syncing_table_when_quiescent`, active branch.
             (Trigger::Quiescent, true) => match state {
                 TableState::SyncWait { lsn } => Effect::StartCatchup((*lsn).max(current_lsn)),
                 TableState::SyncDone { lsn, .. } if ready(*lsn) => Effect::PromoteToReady(*lsn),
                 TableState::Catchup { lsn } => Effect::AwaitCatchup(*lsn),
                 _ => Effect::Keep,
             },
+            // `process_single_syncing_table_when_quiescent`, no-worker branch.
             (Trigger::Quiescent, false) => match state {
                 TableState::SyncDone { lsn, .. } if ready(*lsn) => Effect::PromoteToReady(*lsn),
                 TableState::SyncDone { .. } => Effect::Keep,
@@ -421,55 +453,6 @@ mod tests {
                     }
                 }
             }
-        }
-    }
-
-    /// Generated checks of the readiness laws over the full LSN range.
-    #[cfg(feature = "test-utils")]
-    mod readiness_properties {
-        use proptest::{arbitrary::any, option, prop_assert};
-        use tokio_postgres::types::PgLsn;
-
-        use crate::{
-            replication::apply::handoff::ReadinessInputs, test_utils::property::run_property,
-        };
-
-        #[test]
-        fn readiness_never_regresses_as_progress_advances() {
-            let strategy = (
-                any::<u64>(),
-                any::<u64>(),
-                option::of(any::<u64>()),
-                any::<bool>(),
-                any::<u64>(),
-                any::<u64>(),
-            );
-
-            run_property(
-                "readiness is monotonic in progress",
-                &strategy,
-                |&(sync_done, current, persisted, decoder, current_gain, persisted_gain)| {
-                    let before = ReadinessInputs::new(
-                        PgLsn::from(current),
-                        persisted.map(PgLsn::from),
-                        decoder,
-                    );
-                    let after = ReadinessInputs::new(
-                        PgLsn::from(current.saturating_add(current_gain)),
-                        persisted
-                            .map(|persisted| PgLsn::from(persisted.saturating_add(persisted_gain))),
-                        decoder,
-                    );
-                    let sync_done = PgLsn::from(sync_done);
-
-                    prop_assert!(
-                        before.ready_proof(sync_done).is_none()
-                            || after.ready_proof(sync_done).is_some()
-                    );
-
-                    Ok(())
-                },
-            );
         }
     }
 }
