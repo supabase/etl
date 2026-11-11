@@ -1,0 +1,75 @@
+name: Property tests
+
+on:
+  schedule:
+    # 03:41 UTC, off the whole hour because GitHub delays scheduled runs at
+    # peak times. Runs against the default branch.
+    - cron: "41 3 * * *"
+  workflow_dispatch:
+    inputs:
+      property-budget-secs:
+        description: Per-property wall-clock budget in seconds.
+        type: string
+        default: '300'
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  test-build:
+    name: Build tests
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 90
+    steps:
+      - name: Check out source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          rustflags: ''
+          # Reuse the CI test cache from main without saving a second copy.
+          cache-key: tests
+          cache-on-failure: false
+          cache-save-if: false
+      - name: Install nextest
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-nextest@0.9.148
+      - name: Build test archive
+        run: |
+          mkdir -p target/ci
+          cargo nextest archive --locked --workspace --all-features --archive-file target/ci/tests.tar.zst
+      - name: Build test runner
+        run: |
+          cargo build --locked --workspace --all-features --bin xtask
+          tar -czf target/ci/test-tools.tar.gz -C target/debug xtask
+      - name: Upload test binaries
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-binaries
+          path: |
+            target/ci/tests.tar.zst
+            target/ci/test-tools.tar.gz
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 1
+
+  test:
+    name: Property tests (PostgreSQL 18)
+    needs: test-build
+    # Runs the full suite so new properties are covered without a filter. Only
+    # properties that use the shared runner honor the raised budget. BigQuery
+    # secrets are omitted: the paid BigQuery properties run in the BigQuery
+    # nightly workflow, so they would only add paid calls here.
+    uses: ./.github/workflows/reusable-tests.yml
+    with:
+      property-budget-secs: ${{ inputs.property-budget-secs || '300' }}

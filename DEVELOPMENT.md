@@ -312,6 +312,12 @@ Parser fuzz targets live in `fuzz/`. The nightly `Fuzz` workflow fuzzes each
 target for two minutes, and every CI run replays the committed `fuzz/corpus/`
 seeds once.
 
+Property tests run generated cases until a wall-clock budget elapses: 2 seconds
+for cheap properties and 32 seconds for expensive ones. `PROPERTY_TEST_BUDGET_SECS`
+overrides the budget for every property, and `PROPERTY_TEST_SEED` replays the
+failing chunk a property reports. The nightly `Property tests` workflow runs the
+full suite with a 300-second budget; dispatch it manually to choose another.
+
 Use cargo-nextest 0.9.148 or newer; CI pins 0.9.148. The repository requires
 this version to include the [capture-pipe inheritance fix](https://github.com/nextest-rs/nextest/pull/3553)
 that prevents false `LEAK` reports during parallel test runs on macOS. The Nix
