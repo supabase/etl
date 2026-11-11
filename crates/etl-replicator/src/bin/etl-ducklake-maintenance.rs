@@ -56,6 +56,7 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
         s3_url_style,
         s3_use_ssl,
         metadata_schema,
+        table_namespace,
         maintenance_target_file_size,
         parquet_row_group_size_bytes,
         parquet_row_group_size,
@@ -103,6 +104,7 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
         data_path: parse_ducklake_s3_data_path(&data_path)?,
         s3,
         metadata_schema,
+        table_namespace,
         writer_config,
         inline_flush: InlineFlushMaintenanceConfig {
             enabled: env_bool("ETL_DUCKLAKE_MAINTENANCE__INLINE_FLUSH__ENABLED", true),

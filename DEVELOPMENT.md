@@ -13,7 +13,7 @@ The open-source project is the replication engine: the `etl` library, the
 cargo x init
 ```
 
-That starts local Postgres, ClickHouse, and the Iceberg REST catalog, and runs
+That starts local Postgres and ClickHouse, and runs
 migrations. It does not write service configuration or apply Kubernetes
 resources.
 
@@ -38,23 +38,64 @@ Install SQLx CLI:
 cargo install --version 0.9.0 sqlx-cli --no-default-features --features rustls,postgres --locked
 ```
 
+## Source migrations without replication
+
+Run `etl-replicator migrate` using the image you intend to deploy. It loads
+top-level `pg_connection` and optional `store_pg_connection` through the
+usual base/environment files and `APP_` overrides, applies embedded store and
+source migrations, and exits. No pipeline ID or destination credentials are
+required; it starts no replication workers and creates no replication slots.
+
+Use a migration-specific configuration directory. For example, `base.yaml`:
+
+```yaml
+pg_connection:
+  host: localhost
+  port: 5430
+  name: postgres
+  username: postgres
+  tls:
+    enabled: false
+    trusted_root_certs: ""
+```
+
+Add `dev.yaml` (which may contain `{}`) for environment overrides. Supply the
+password through `APP_PG_CONNECTION__PASSWORD`. An optional top-level
+`store_pg_connection` has the same fields; if omitted, the store uses the source.
+
+Run with that directory:
+
+```bash
+APP_CONFIG_DIR="$PWD/migration-config" APP_ENVIRONMENT=dev \
+  cargo run --locked -p etl-replicator --no-default-features \
+  --bin etl-replicator -- migrate
+```
+
+The source must be a writable primary. Unlike normal replication startup, this
+explicit command fails for a physical standby instead of silently skipping source
+migrations, and checks this before modifying a separate store. Other command-line
+arguments retain their previous behavior; only the exact `migrate` invocation
+selects migration mode.
+
+Keep pipelines using that source stopped during incompatible schema upgrades.
+Errors produce a nonzero exit code; committed migrations remain applied, and
+rerunning resumes from the migration ledger. Check schema compatibility before
+restoring an older image. This explicit command runs source migrations even when
+normal startup has `run_source_migrations` disabled.
+
 ## Replicator
 
 ClickHouse is the default and uses the Docker service from `cargo x init`. No
-cloud credentials are required. Iceberg REST also uses local Docker. Cloud
+cloud credentials are required. Cloud
 destinations write fake identifiers and placeholder secrets; override them with
 `APP_DESTINATION__*` for a real run.
 
 | Destination | Setup | Then |
 | --- | --- | --- |
 | `clickhouse` (default) | `cargo x setup replicator` | `cargo x seed && cargo x run replicator` |
-| `iceberg` | `cargo x setup replicator --destination iceberg` | `cargo x seed && cargo x run replicator` |
 | `bigquery` | `cargo x setup replicator --destination bigquery` | export `APP_DESTINATION__BIG_QUERY__SERVICE_ACCOUNT_KEY`, then `cargo x run replicator` |
 | `ducklake` | `cargo x setup replicator --destination ducklake` | export `APP_DESTINATION__DUCKLAKE__S3_*`, then `cargo x run replicator` |
 | `snowflake` | `cargo x setup replicator --destination snowflake` | export `APP_DESTINATION__SNOWFLAKE__PRIVATE_KEY`, then `cargo x run replicator` |
-
-Iceberg is deprecated. For a Supabase catalog, add `--iceberg-catalog supabase`
-and export `APP_DESTINATION__ICEBERG__SUPABASE__*`.
 
 `cargo x setup replicator --help` lists flags. `--interactive` prompts for hosts
 and names. `cargo x run replicator` compiles the destination from the generated
@@ -100,8 +141,6 @@ cargo xtask nextest run  # full sharded test suite (needs Postgres)
 | Postgres | `localhost:5430` (`postgres` / `postgres`) |
 | Postgres replica | `localhost:6430` |
 | ClickHouse | `http://localhost:8123` (`etl` / `etl`) |
-| Iceberg catalog | `http://localhost:8182` |
-| MinIO | `http://localhost:9010` (`minio-admin` / `minio-admin-password`) |
 
 Override with `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`,
 `POSTGRES_PASSWORD`, `POSTGRES_DB`, `CLICKHOUSE_*`, or `SKIP_DOCKER=1` when
@@ -265,8 +304,7 @@ cargo nextest run --workspace --all-features --lib
 Integration tests need `TESTS_DATABASE_HOST`, `TESTS_DATABASE_PORT`, and
 `TESTS_DATABASE_USERNAME` (local defaults: `localhost`, `5430`, `postgres`).
 ClickHouse tests also need `TESTS_CLICKHOUSE_URL`, `TESTS_CLICKHOUSE_USER`, and
-`TESTS_CLICKHOUSE_PASSWORD`. Iceberg tests use the local catalog and MinIO from
-`cargo x init`. BigQuery tests need `TESTS_BIGQUERY_PROJECT_ID` and
+`TESTS_CLICKHOUSE_PASSWORD`. BigQuery tests need `TESTS_BIGQUERY_PROJECT_ID` and
 `TESTS_BIGQUERY_SA_KEY_PATH`.
 
 Debug a failing test with `ENABLE_TRACING=1` and a focused `RUST_LOG`.

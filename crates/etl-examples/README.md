@@ -21,9 +21,6 @@ if you want to embed the `etl` crate instead.
 Public alpha describes the managed-service release stage. Local and self-hosted
 use of the open-source destinations is unrestricted.
 
-Iceberg is deprecated and is not recommended for new deployments. It has no
-example here.
-
 ## Running an Example
 
 The quickest path is `cargo x example` after sourcing `.env` (see `.env.example`):
