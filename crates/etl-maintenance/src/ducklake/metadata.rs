@@ -172,7 +172,7 @@ mod tests {
         let fallbacks = Arc::new(AtomicU64::new(0));
         let pool = DuckLakeMetadataPool::new(direct.clone(), Some(&url))
             .unwrap()
-            .with_fallback_counter(Counter::from_arc(fallbacks.clone()));
+            .with_fallback_counter(Counter::from_arc(Arc::clone(&fallbacks)));
         for _ in 0..2 {
             pool.read("list_tables", |pool| async move {
                 let options = pool.connect_options();
@@ -201,7 +201,7 @@ mod tests {
         let fallbacks = Arc::new(AtomicU64::new(0));
         let pool = DuckLakeMetadataPool::new(direct.clone(), None)
             .unwrap()
-            .with_fallback_counter(Counter::from_arc(fallbacks.clone()));
+            .with_fallback_counter(Counter::from_arc(Arc::clone(&fallbacks)));
         let calls = AtomicUsize::new(0);
         let error = pool
             .read("list_tables", |pool| {
@@ -252,7 +252,7 @@ mod tests {
         let fallbacks = Arc::new(AtomicU64::new(0));
         let pool = DuckLakeMetadataPool::new(direct_pool(), Some(&url))
             .unwrap()
-            .with_fallback_counter(Counter::from_arc(fallbacks.clone()));
+            .with_fallback_counter(Counter::from_arc(Arc::clone(&fallbacks)));
         let calls = AtomicUsize::new(0);
         let value = pool
             .read("list_tables", |pool| {
@@ -296,7 +296,7 @@ mod tests {
         let fallbacks = Arc::new(AtomicU64::new(0));
         let pool = DuckLakeMetadataPool::new(direct_pool(), Some(&url))
             .unwrap()
-            .with_fallback_counter(Counter::from_arc(fallbacks.clone()));
+            .with_fallback_counter(Counter::from_arc(Arc::clone(&fallbacks)));
         pool.read("list_tables", |_| async { Ok(()) }).await.unwrap();
         let calls = AtomicUsize::new(0);
         let error = pool
