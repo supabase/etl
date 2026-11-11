@@ -23,7 +23,7 @@ use std::{
     time::Duration,
 };
 
-use etl_config::shared::PgConnectionConfig;
+use etl_config::shared::{BatchConfig, PgConnectionConfig};
 use etl_postgres::tokio::test_utils::{PgDatabase, TableModification, connect_to_pg_database};
 use pg_escape::quote_literal;
 use proptest::{collection::vec, prelude::*, sample::Index};
@@ -32,12 +32,16 @@ use uuid::Uuid;
 
 use crate::{
     data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
+    destination::PipelineDestination,
     event::{Event, UpdateEvent},
+    pipeline::{Pipeline, PipelineId},
     schema::{ReplicatedTableSchema, TableId, TableName},
+    store::PipelineStore,
     test_utils::{
         database::{replication_slot_state, test_table_name},
         materialize::{FromTableRow, materialize_events},
         notify::TimedNotify,
+        pipeline::PipelineBuilder,
         test_destination_wrapper::TestDestinationWrapper,
     },
 };
@@ -50,6 +54,17 @@ pub const WORKLOAD_PUBLICATION: &str = "cdc_workload_pub";
 
 /// Maximum time for one workload synchronization point.
 pub const WORKLOAD_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Batch settings for workload pipelines.
+///
+/// A commit does not end a batch, so every awaited transaction waits out the
+/// fill window before its delivery. Runners await each transaction before
+/// the next one, so a longer window adds latency without batching more work.
+pub const WORKLOAD_BATCH_CONFIG: BatchConfig = BatchConfig {
+    max_fill_ms: 100,
+    memory_budget_ratio: 0.2,
+    max_bytes: BatchConfig::DEFAULT_MAX_BYTES,
+};
 
 /// Large-note size, above the out-of-line TOAST threshold for
 /// `storage external` columns.
@@ -694,6 +709,29 @@ pub async fn create_workload_tables(
     }
 
     tables
+}
+
+/// Creates a test pipeline over [`WORKLOAD_PUBLICATION`] with
+/// [`WORKLOAD_BATCH_CONFIG`] and the other test pipeline defaults.
+pub fn create_workload_pipeline<S, D>(
+    pg_connection_config: &PgConnectionConfig,
+    pipeline_id: impl Into<PipelineId>,
+    store: S,
+    destination: D,
+) -> Pipeline<S, D>
+where
+    S: PipelineStore,
+    D: PipelineDestination,
+{
+    PipelineBuilder::new(
+        pg_connection_config.clone(),
+        pipeline_id,
+        WORKLOAD_PUBLICATION.to_owned(),
+        store,
+        destination,
+    )
+    .with_batch_config(WORKLOAD_BATCH_CONFIG)
+    .build()
 }
 
 /// Stage of a committed transaction relative to the fault.
