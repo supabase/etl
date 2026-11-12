@@ -1003,18 +1003,18 @@ impl ApplyLoopState {
             return false;
         }
 
-        self.phase.is_running() && !self.is_processing_paused()
+        self.phase.is_running() && !self.has_batch_queued_behind_flush()
     }
 
     /// Returns `true` when the batch deadline timer may still trigger a flush
     /// for buffered work.
     fn can_wait_for_deadline(&self) -> bool {
-        !self.is_processing_paused() && self.has_pending_batch()
+        !self.has_batch_queued_behind_flush() && self.has_pending_batch()
     }
 
     /// Returns `true` while a buffered batch is queued behind an in-flight
     /// flush.
-    fn is_processing_paused(&self) -> bool {
+    fn has_batch_queued_behind_flush(&self) -> bool {
         match self.flush_state {
             FlushState::Idle | FlushState::InFlight(_) => false,
             FlushState::InFlightWithQueuedBatch(_) => true,
@@ -1022,7 +1022,7 @@ impl ApplyLoopState {
     }
 
     /// Queues the buffered batch behind the in-flight flush.
-    fn pause_processing(&mut self) {
+    fn queue_batch_behind_flush(&mut self) {
         debug_assert!(self.has_pending_flush_result());
         debug_assert!(self.has_pending_batch());
 
@@ -1033,7 +1033,7 @@ impl ApplyLoopState {
 
     /// Clears the resolved in-flight flush and returns whether a queued batch
     /// must now be dispatched.
-    fn resume_processing(&mut self) -> bool {
+    fn finish_flush(&mut self) -> bool {
         debug_assert!(self.has_pending_flush_result());
 
         match std::mem::replace(&mut self.flush_state, FlushState::Idle) {
@@ -1668,7 +1668,7 @@ where
                 %worker_type,
                 pending_flush_result = self.state.has_pending_flush_result(),
                 pending_batch = self.state.has_pending_batch(),
-                processing_paused = self.state.is_processing_paused(),
+                batch_queued_behind_flush = self.state.has_batch_queued_behind_flush(),
                 "shutdown signal received, stopping new intake and entering shutdown drain",
             );
             self.state.start_draining_for_shutdown();
@@ -1873,7 +1873,7 @@ where
     ) -> EtlResult<()> {
         // We clear the state up front because this flush is no longer in
         // flight.
-        let processing_paused = self.state.resume_processing();
+        let batch_queued = self.state.finish_flush();
 
         // Decompose the completed result into its metadata, timing, and
         // outcome.
@@ -2024,7 +2024,7 @@ where
             }
         }
 
-        if processing_paused {
+        if batch_queued {
             // Required-durability writes may be nonterminal. A queued
             // successor has its own captured commit boundary and is dispatched
             // only after the predecessor's result has been processed.
@@ -2144,7 +2144,7 @@ where
         }
 
         if self.state.has_pending_flush_result() {
-            self.state.pause_processing();
+            self.state.queue_batch_behind_flush();
             return Ok(());
         }
 
@@ -4975,7 +4975,7 @@ mod tests {
         let (_result, pending) = pending_write_result();
         state.record_dispatched_flush(pending);
         state.event_batch.push(Event::Unsupported, StreamingPayloadMetadata::default());
-        state.pause_processing();
+        state.queue_batch_behind_flush();
         state.set_flush_deadline_if_needed(std::time::Duration::from_secs(60));
         // The in-flight write may be the terminal catch-up batch of a table
         // sync, whose completion was requested at its commit.
