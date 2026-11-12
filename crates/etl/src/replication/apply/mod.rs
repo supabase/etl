@@ -1397,9 +1397,8 @@ where
     /// backpressured. Feedback channel closure wakes the iteration
     /// even when intake is paused; it does not interrupt an in-flight handler.
     ///
-    /// Each branch performs its work and then relies on
-    /// [`Self::try_finish_active_iteration`] to decide whether the loop may
-    /// return yet.
+    /// Each branch performs its work and then relies on [`Self::try_finish`]
+    /// to decide whether the loop may return yet.
     async fn run_active_iteration(
         &mut self,
         mut replication_message_stream: Pin<
@@ -1417,7 +1416,7 @@ where
         // We try to finish the active iteration even before starting it, since
         // we might be able to finish earlier, without having to process any
         // signal from the following `select!`.
-        if let Some(result) = self.try_finish_active_iteration() {
+        if let Some(result) = self.try_finish() {
             return Ok(Some(result));
         }
 
@@ -1490,7 +1489,7 @@ where
             }
         }
 
-        Ok(self.try_finish_active_iteration())
+        Ok(self.try_finish())
     }
 
     /// Runs one iteration of the shutdown drain state.
@@ -1522,8 +1521,8 @@ where
         batch_memory_subscription: &mut Option<MemoryMonitorSubscription>,
     ) -> EtlResult<Option<ApplyLoopResult>> {
         // If we are done with unresolved work, we can finish the shutdown.
-        if !self.state.has_unresolved_batch_work() {
-            return Ok(Some(self.finish_shutdown()));
+        if let Some(result) = self.try_finish() {
+            return Ok(Some(result));
         }
 
         // Read the deadline up front: the pending flush result branch borrows
@@ -1564,30 +1563,18 @@ where
             }
         }
 
-        // If we are done with unresolved work, we can finish the shutdown.
-        if !self.state.has_unresolved_batch_work() {
-            return Ok(Some(self.finish_shutdown()));
-        }
-
-        // If the batch work is not completed, we return `None` to continue the
-        // draining in the next iteration.
-        Ok(None)
+        // `None` continues the drain in the next iteration.
+        Ok(self.try_finish())
     }
 
-    /// Returns the final loop result after all buffered destination work has
-    /// resolved.
-    fn finish_shutdown(&self) -> ApplyLoopResult {
-        debug_assert!(!self.state.has_unresolved_batch_work());
-
-        // We try to honor the existing exit result, otherwise we just mark it
-        // as `Paused` since shutting down is effectively pausing a loop.
-        self.state.exit_result().unwrap_or(ApplyLoopResult::Paused)
-    }
-
-    /// Returns the final loop result for the active state if all exit barriers
-    /// have been resolved.
-    fn try_finish_active_iteration(&self) -> Option<ApplyLoopResult> {
-        if self.state.is_draining_for_shutdown() || self.state.has_unresolved_batch_work() {
+    /// Returns the final loop result once every exit barrier has resolved.
+    ///
+    /// The loop returns when an exit was requested and no buffered or
+    /// in-flight destination work remains. A draining loop always carries an
+    /// exit intent ([`LoopPhase::Draining`]), so the same rule finishes the
+    /// active and the draining iteration.
+    fn try_finish(&self) -> Option<ApplyLoopResult> {
+        if self.state.has_unresolved_batch_work() {
             return None;
         }
 
