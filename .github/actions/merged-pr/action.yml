@@ -1,0 +1,17 @@
+name: Resolve merged PR
+description: Find the merged PR for a main push without changing release routing.
+outputs:
+  release:
+    description: Whether the merged PR has the release label.
+    value: ${{ steps.pr.outputs.release }}
+  head-ref:
+    description: Source branch of the merged PR.
+    value: ${{ steps.pr.outputs.head-ref }}
+runs:
+  using: composite
+  steps:
+    - id: pr
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: python3 "$GITHUB_ACTION_PATH/resolve.py"

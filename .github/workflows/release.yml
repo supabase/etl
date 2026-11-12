@@ -1,16 +1,16 @@
 name: Release
 
 concurrency:
-  group: release-${{ github.event.pull_request.head.ref }}
+  group: release-${{ github.sha }}
   cancel-in-progress: false
 
 on:
-  pull_request:
-    types: [closed]
+  push:
     branches: [main]
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   tag:
@@ -19,9 +19,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
-    if: |
-      github.event.pull_request.merged == true &&
-      contains(github.event.pull_request.labels.*.name, 'release')
+      pull-requests: read
     outputs:
       tag: ${{ steps.ver.outputs.tag }}
       version: ${{ steps.ver.outputs.version }}
@@ -30,12 +28,17 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0
-          ref: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
+          ref: ${{ github.sha }}
+
+      - name: Resolve merged PR
+        id: pr
+        uses: ./.github/actions/merged-pr
 
       - name: Validate release version
+        if: steps.pr.outputs.release == 'true'
         id: ver
         env:
-          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_HEAD_REF: ${{ steps.pr.outputs.head-ref }}
         run: |
           python3 - <<'PYTHON'
           import os
@@ -57,6 +60,7 @@ jobs:
           PYTHON
 
       - name: Validate release source
+        if: steps.pr.outputs.release == 'true'
         run: |
           if ! git merge-base --is-ancestor HEAD origin/main; then
             echo '::error::Releases must use a commit on main'
@@ -64,6 +68,7 @@ jobs:
           fi
 
       - name: Create release tag
+        if: steps.pr.outputs.release == 'true'
         shell: bash
         env:
           TAG: ${{ steps.ver.outputs.tag }}
@@ -86,6 +91,7 @@ jobs:
   image:
     name: Publish image
     needs: tag
+    if: needs.tag.outputs.version != ''
     permissions:
       contents: read
       id-token: write

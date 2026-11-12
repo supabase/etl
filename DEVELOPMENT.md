@@ -387,7 +387,9 @@ digest, and verifies the combined manifest before tagging it at
 source SHA. CI image checks and publishing share the build action but use
 separate persistent Blacksmith caches: one for CI, one for manual experimental
 publishes, and one for merged-main publishes. State written by pull-request or
-experimental builds never reaches a stable image. The Dockerfile keeps Cargo's
+experimental builds never reaches a stable image. Publishing runs on pushes to
+`main` so Blacksmith can persist its cache; the merged PR label still selects
+ordinary or release publishing. The Dockerfile keeps Cargo's
 registry and target directory in BuildKit cache mounts, so a lockfile change
 rebuilds only the crates it affects; workspace crates always recompile. Pulling these images requires no private registry access. Only a merged-main PR at the current main tip can promote
 `latest`; manual builds never do. Require `CI passed` in branch protection

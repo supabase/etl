@@ -1,8 +1,7 @@
 name: Publish image
 
 on:
-  pull_request:
-    types: [closed]
+  push:
     branches: [main]
   workflow_dispatch:
     inputs:
@@ -14,16 +13,31 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
   id-token: write
 
 jobs:
+  route:
+    name: Resolve publication route
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    outputs:
+      release: ${{ steps.pr.outputs.release }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Resolve merged PR
+        if: github.event_name == 'push'
+        id: pr
+        uses: ./.github/actions/merged-pr
+
   image:
     name: Publish image
+    needs: route
     if: |
-      github.event_name == 'workflow_dispatch' || (
-        github.event.pull_request.merged == true &&
-        !contains(github.event.pull_request.labels.*.name, 'release')
-      )
+      github.event_name == 'workflow_dispatch' || needs.route.outputs.release == 'false'
     uses: ./.github/workflows/reusable-publish-image.yml
     with:
       commit: ${{ github.event_name == 'workflow_dispatch' && inputs.commit || '' }}
