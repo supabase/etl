@@ -1653,10 +1653,8 @@ where
     /// continues during draining and is stopped at teardown without a final
     /// status update.
     ///
-    /// With [`PipelineConfig::drain_on_shutdown`] disabled, buffered and
-    /// in-flight work is abandoned instead of drained: the loop exits paused
-    /// without waiting for the destination, and the abandoned events are
-    /// replayed after restart.
+    /// With [`PipelineConfig::drain_on_shutdown`] disabled, that work is
+    /// abandoned instead; see [`LoopPhase::Abandoned`].
     ///
     /// Graceful shutdown cannot interrupt a handler already awaiting work. The
     /// caller remains responsible for enforcing an overall shutdown limit.
@@ -2038,9 +2036,6 @@ where
             }
         }
 
-        // If processing was paused, there must be a queued batch that still
-        // needs to be flushed now that the previous in-flight result has
-        // resolved.
         if processing_paused {
             // Required-durability writes may be nonterminal. A queued
             // successor has its own captured commit boundary and is dispatched
@@ -2151,19 +2146,15 @@ where
 
     /// Flushes the current batch of events to the destination.
     ///
-    /// If a flush is already in flight, this pauses the loop and leaves the
-    /// current batch queued until the pending flush result has been processed.
-    /// The queued batch is then retried from [`Self::handle_flush_result`] when
-    /// that in-flight flush resolves.
+    /// If a flush is already in flight, the batch is queued behind it
+    /// ([`FlushState::InFlightWithQueuedBatch`]) and dispatched from
+    /// [`Self::handle_flush_result`] once that flush resolves.
     async fn flush_batch(&mut self, reason: &str) -> EtlResult<()> {
         // If the batch is empty, we don't need to do anything.
         if !self.state.has_pending_batch() {
             return Ok(());
         }
 
-        // A flush is already in flight. Pause processing until the result
-        // resolves, at which point the loop will resume and dispatch this
-        // batch.
         if self.state.has_pending_flush_result() {
             self.state.pause_processing();
             return Ok(());
