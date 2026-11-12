@@ -900,7 +900,7 @@ impl<S> Clone for DestinationWriter<S> {
 
 /// Returns the id of every table that `events` write, in ascending order.
 ///
-/// Transaction markers and unsupported events touch no table.
+/// Transaction markers touch no table.
 fn batch_table_ids(events: &[Event]) -> BTreeSet<TableId> {
     let mut table_ids = BTreeSet::new();
     for event in events {
@@ -920,7 +920,7 @@ fn batch_table_ids(events: &[Event]) -> BTreeSet<TableId> {
             Event::Truncate(truncate) => {
                 table_ids.extend(truncate.truncated_tables.iter().map(ReplicatedTableSchema::id));
             }
-            Event::Begin(_) | Event::Commit(_) | Event::Unsupported => {}
+            Event::Begin(_) | Event::Commit(_) => {}
         }
     }
     table_ids
@@ -2912,8 +2912,8 @@ mod tests {
 
     /// Every event kind that writes a table contributes that table to the
     /// fence set, including each table of a multi-table truncate, while
-    /// transaction markers and unsupported events contribute nothing. The
-    /// events name tables out of order; the result is ascending regardless.
+    /// transaction markers contribute nothing. The events name tables out of
+    /// order; the result is ascending regardless.
     #[test]
     fn batch_table_ids_cover_every_written_table() {
         let lsn = PgLsn::from(100);
@@ -2956,7 +2956,6 @@ mod tests {
                 end_lsn: lsn,
                 timestamp: 0,
             }),
-            Event::Unsupported,
         ];
 
         let table_ids: Vec<TableId> = batch_table_ids(&events).into_iter().collect();

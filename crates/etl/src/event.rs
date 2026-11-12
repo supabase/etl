@@ -274,8 +274,6 @@ pub enum Event {
     /// Relation (schema) event notifying about table schema and replication
     /// mask.
     Relation(RelationEvent),
-    /// Unsupported event type that cannot be processed.
-    Unsupported,
 }
 
 impl Event {
@@ -299,7 +297,7 @@ impl Event {
             Event::Delete(event) => event.replicated_table_schema.id() == *table_id,
             Event::Truncate(event) => event.truncated_tables.iter().any(|s| s.id() == *table_id),
             Event::Relation(event) => event.replicated_table_schema.id() == *table_id,
-            _ => false,
+            Event::Begin(_) | Event::Commit(_) => false,
         }
     }
 }
@@ -307,7 +305,7 @@ impl Event {
 impl SizeHint for Event {
     fn size_hint(&self) -> usize {
         let owned_heap_bytes = match self {
-            Self::Begin(_) | Self::Commit(_) | Self::Relation(_) | Self::Unsupported => 0,
+            Self::Begin(_) | Self::Commit(_) | Self::Relation(_) => 0,
             Self::Insert(event) => owned_heap_size_hint(&event.table_row),
             Self::Update(event) => {
                 let old_row_heap_bytes =
@@ -383,8 +381,6 @@ pub enum EventType {
     Relation,
     /// Table truncation operation.
     Truncate,
-    /// Unsupported or unknown event.
-    Unsupported,
 }
 
 impl fmt::Display for EventType {
@@ -397,7 +393,6 @@ impl fmt::Display for EventType {
             Self::Delete => write!(f, "Delete"),
             Self::Relation => write!(f, "Relation"),
             Self::Truncate => write!(f, "Truncate"),
-            Self::Unsupported => write!(f, "Unsupported"),
         }
     }
 }
@@ -412,7 +407,6 @@ impl From<&Event> for EventType {
             Event::Delete(_) => EventType::Delete,
             Event::Truncate(_) => EventType::Truncate,
             Event::Relation(_) => EventType::Relation,
-            Event::Unsupported => EventType::Unsupported,
         }
     }
 }
@@ -510,7 +504,6 @@ mod tests {
 
         let relation = Event::Relation(RelationEvent { replicated_table_schema: schema });
         assert_eq!(relation.size_hint(), size_of::<Event>());
-        assert_eq!(Event::Unsupported.size_hint(), size_of::<Event>());
 
         let truncated_tables = Vec::with_capacity(8);
         let truncated_tables_capacity = truncated_tables.capacity();

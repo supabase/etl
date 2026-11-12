@@ -121,23 +121,21 @@ pub fn check_all_event_conditions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{event::BeginEvent, schema::PgLsn};
 
     #[test]
     fn event_conditions_use_exact_counts() {
-        let events = vec![Event::Unsupported, Event::Unsupported];
+        let begin = Event::Begin(BeginEvent {
+            commit_lsn: PgLsn::from(1),
+            tx_ordinal: 0,
+            timestamp: 0,
+            xid: 1,
+        });
+        let events = vec![begin.clone(), begin];
 
-        assert!(check_event_conditions(
-            &events,
-            &[EventCondition::AnyCount(EventType::Unsupported, 2)]
-        ));
-        assert!(!check_event_conditions(
-            &events,
-            &[EventCondition::AnyCount(EventType::Unsupported, 1)]
-        ));
-        assert!(!check_event_conditions(
-            &events,
-            &[EventCondition::AnyCount(EventType::Unsupported, 3)]
-        ));
+        assert!(check_event_conditions(&events, &[EventCondition::AnyCount(EventType::Begin, 2)]));
+        assert!(!check_event_conditions(&events, &[EventCondition::AnyCount(EventType::Begin, 1)]));
+        assert!(!check_event_conditions(&events, &[EventCondition::AnyCount(EventType::Begin, 3)]));
     }
 
     #[test]
