@@ -421,7 +421,6 @@ impl<T: TokenProvider> SqlClient<T> {
             || self.attempt_statement(url, &body),
         )
         .await
-        .map_err(|f| f.last_error)
     }
 
     /// Submit a statement and interpret the HTTP response.

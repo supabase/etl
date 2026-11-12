@@ -1062,8 +1062,7 @@ where
             },
             || self.writer.client.server_version(),
         )
-        .await
-        .map_err(|failure| failure.last_error)?;
+        .await?;
         ensure_engine_supported(self.writer.inserter_config.engine, server_version)
     }
 

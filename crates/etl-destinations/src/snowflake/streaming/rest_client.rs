@@ -193,7 +193,6 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
             },
         )
         .await
-        .map_err(|f| f.last_error)
     }
 
     async fn insert_rows(
@@ -254,7 +253,6 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
             },
         )
         .await
-        .map_err(|f| f.last_error)
     }
 
     async fn drop_channel(
@@ -301,8 +299,7 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                 }
             },
         )
-        .await
-        .map_err(|f| f.last_error);
+        .await;
 
         if result.is_ok() || matches!(&result, Err(Error::Snowpipe(SnowpipeError::ChannelNotFound)))
         {
@@ -376,7 +373,6 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
             },
         )
         .await
-        .map_err(|f| f.last_error)
     }
 }
 
