@@ -60,15 +60,15 @@ class RoutingTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Multiple merged PRs"):
             resolve_merged_pr(REPOSITORY, SHA)
 
-    @patch("resolve.resolve_merged_pr")
-    def test_outputs_preserve_ordinary_and_release_routing(self, resolve):
+    @patch("resolve.subprocess.check_output")
+    def test_outputs_preserve_ordinary_and_release_routing(self, api):
         for release in [False, True]:
             with self.subTest(release=release), tempfile.TemporaryDirectory() as directory:
                 pr = copy.deepcopy(PR)
                 if release:
                     pr["labels"] = [{"name": "release"}]
                     pr["head"]["ref"] = "release/v1.2.3"
-                resolve.return_value = pr
+                api.return_value = json.dumps([[pr]])
                 output = Path(directory) / "output"
                 with patch.dict(os.environ, {
                     "GITHUB_EVENT_NAME": "push", "GITHUB_REF": "refs/heads/main",

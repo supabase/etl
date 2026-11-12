@@ -23,6 +23,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       release: ${{ steps.pr.outputs.release }}
+      head-ref: ${{ steps.pr.outputs.head-ref }}
     steps:
       - name: Check out source
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -41,5 +42,18 @@ jobs:
     uses: ./.github/workflows/reusable-publish-image.yml
     with:
       commit: ${{ github.event_name == 'workflow_dispatch' && inputs.commit || '' }}
+    secrets:
+      PROD_AWS_ROLE: ${{ secrets.PROD_AWS_ROLE }}
+
+  release:
+    name: Publish release
+    needs: route
+    if: github.event_name == 'push' && needs.route.outputs.release == 'true'
+    permissions:
+      contents: write
+      id-token: write
+    uses: ./.github/workflows/release.yml
+    with:
+      head-ref: ${{ needs.route.outputs.head-ref }}
     secrets:
       PROD_AWS_ROLE: ${{ secrets.PROD_AWS_ROLE }}
