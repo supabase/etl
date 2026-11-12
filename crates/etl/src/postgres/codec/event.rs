@@ -3,6 +3,7 @@ use std::{
     collections::{HashMap, HashSet},
     fmt,
     str::FromStr,
+    sync::Arc,
 };
 
 use etl_postgres::{
@@ -424,7 +425,7 @@ pub(crate) fn parse_event_from_commit_message(
 /// the relation message. Applying the name-based masks to ETL's stored,
 /// `attnum`-ordered [`TableSchema`] creates the [`ReplicatedTableSchema`] view
 /// used for positional tuple decoding.
-pub(crate) fn parse_replicated_column_names(
+fn parse_replicated_column_names(
     relation_body: &protocol::RelationBody,
 ) -> EtlResult<HashSet<String>> {
     let column_names = relation_body
@@ -447,7 +448,7 @@ pub(crate) fn parse_replicated_column_names(
 /// identity-mask membership is also name-based; tuple interpretation relies on
 /// the resulting replicated schema preserving relation-message order after the
 /// masks are applied.
-pub(crate) fn parse_replica_identity_column_names(
+fn parse_replica_identity_column_names(
     relation_body: &protocol::RelationBody,
 ) -> EtlResult<HashSet<String>> {
     let column_names = match relation_body.replica_identity() {
@@ -534,7 +535,7 @@ fn decodes_as_same_text(left: &Type, right: &Type) -> bool {
 /// the name check while decoding values into the wrong column or with the
 /// wrong type. Types are compared after the same OID mapping used for stored
 /// schemas, so types ETL decodes as text still agree.
-pub(crate) fn detect_relation_schema_mismatch(
+fn detect_relation_schema_mismatch(
     relation_body: &protocol::RelationBody,
     replicated_table_schema: &ReplicatedTableSchema,
 ) -> EtlResult<Option<RelationSchemaMismatch>> {
@@ -581,6 +582,30 @@ pub(crate) fn detect_relation_schema_mismatch(
     }
 
     Ok(None)
+}
+
+/// Builds the positional row decoder for a relation message from a stored
+/// table schema.
+///
+/// The replication and identity masks are built by column name, so the result
+/// keeps the stored `attnum` order. The returned mismatch reports the first
+/// position where that order or a column type disagrees with the relation.
+///
+/// Fails when a relation column name is not UTF-8 or is missing from the
+/// stored schema.
+pub(crate) fn replicated_table_schema_from_relation(
+    table_schema: Arc<TableSchema>,
+    relation_body: &protocol::RelationBody,
+) -> EtlResult<(ReplicatedTableSchema, Option<RelationSchemaMismatch>)> {
+    let replicated_column_names = parse_replicated_column_names(relation_body)?;
+    let identity_column_names = parse_replica_identity_column_names(relation_body)?;
+    let replication_mask = ReplicationMask::try_build(&table_schema, &replicated_column_names)?;
+    let identity_mask = IdentityMask::try_build(&table_schema, &identity_column_names)?;
+    let replicated_table_schema =
+        ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask);
+    let mismatch = detect_relation_schema_mismatch(relation_body, &replicated_table_schema)?;
+
+    Ok((replicated_table_schema, mismatch))
 }
 
 /// Converts a Postgres insert message into an [`InsertEvent`].

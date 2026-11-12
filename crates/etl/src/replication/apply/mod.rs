@@ -64,11 +64,10 @@ use crate::{
         client::{PgReplicationClient, PostgresConnectionUpdate, SlotCreationMonitor},
         codec::{
             DDL_MESSAGE_PREFIX, SchemaChangeMessage, delete_message_payload_bytes,
-            detect_relation_schema_mismatch, insert_message_payload_bytes,
-            parse_event_from_begin_message, parse_event_from_commit_message,
-            parse_event_from_delete_message, parse_event_from_insert_message,
-            parse_event_from_truncate_message, parse_event_from_update_message,
-            parse_replica_identity_column_names, parse_replicated_column_names,
+            insert_message_payload_bytes, parse_event_from_begin_message,
+            parse_event_from_commit_message, parse_event_from_delete_message,
+            parse_event_from_insert_message, parse_event_from_truncate_message,
+            parse_event_from_update_message, replicated_table_schema_from_relation,
             schema_snapshot_id_from_message, update_message_payload_bytes,
         },
     },
@@ -84,9 +83,7 @@ use crate::{
             table_sync_worker_apply_stream_id, with_shutdown,
         },
     },
-    schema::{
-        IdentityMask, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId, TableSchema,
-    },
+    schema::{ColumnSchema, ReplicatedTableSchema, SnapshotId, TableId, TableSchema},
     source_payload_metadata::StreamingPayloadMetadata,
     store::{PipelineStore, StateStore},
 };
@@ -463,6 +460,130 @@ struct PendingDurabilityInterval {
     accepted_at: Instant,
 }
 
+/// Transaction opened by pgoutput's synthesized `BEGIN` and closed by its
+/// `COMMIT`.
+#[derive(Debug)]
+struct OpenTransaction {
+    /// Start of the transaction's COMMIT WAL record, reported by `BEGIN`.
+    remote_final_lsn: PgLsn,
+    /// Number of row-change and truncate messages observed since `BEGIN`.
+    change_count: u64,
+    /// Next zero-based ordinal to assign to transaction events.
+    ///
+    /// Every row-change and truncate message consumes an ordinal, including
+    /// messages for tables this worker skips. Apply and table-sync workers
+    /// decode the same WAL, so a row keeps the same
+    /// [`crate::event::EventPosition`] whichever worker emits it, and
+    /// destinations can deduplicate replays by position.
+    next_ordinal: u64,
+}
+
+impl OpenTransaction {
+    /// Opens a transaction whose COMMIT record starts at `remote_final_lsn`.
+    fn new(remote_final_lsn: PgLsn) -> Self {
+        Self { remote_final_lsn, change_count: 0, next_ordinal: 0 }
+    }
+
+    /// Returns and advances the next transaction-local ordinal.
+    fn next_ordinal(&mut self) -> u64 {
+        let ordinal = self.next_ordinal;
+        self.next_ordinal = match self.next_ordinal.checked_add(1) {
+            Some(next_ordinal) => next_ordinal,
+            None => {
+                warn!(
+                    current_tx_ordinal = self.next_ordinal,
+                    "transaction-local ordinal overflow detected; subsequent events may reuse the \
+                     same ordinal"
+                );
+
+                self.next_ordinal
+            }
+        };
+
+        ordinal
+    }
+
+    /// Counts a row-change or truncate message and returns its ordinal.
+    ///
+    /// Messages for tables this worker does not own are counted too, so their
+    /// ordinals are consumed even though no event is emitted.
+    fn next_change_ordinal(&mut self) -> u64 {
+        self.change_count += 1;
+        self.next_ordinal()
+    }
+}
+
+/// Pgoutput row-change message handled by the apply loop.
+#[derive(Debug, Clone, Copy)]
+enum RowChange<'a> {
+    /// INSERT message.
+    Insert(&'a protocol::InsertBody),
+    /// UPDATE message.
+    Update(&'a protocol::UpdateBody),
+    /// DELETE message.
+    Delete(&'a protocol::DeleteBody),
+}
+
+impl RowChange<'_> {
+    /// Returns the protocol message name used in diagnostics.
+    fn message_type(self) -> &'static str {
+        match self {
+            Self::Insert(_) => "INSERT",
+            Self::Update(_) => "UPDATE",
+            Self::Delete(_) => "DELETE",
+        }
+    }
+
+    /// Returns the table the row change belongs to.
+    fn table_id(self) -> TableId {
+        let rel_id = match self {
+            Self::Insert(body) => body.rel_id(),
+            Self::Update(body) => body.rel_id(),
+            Self::Delete(body) => body.rel_id(),
+        };
+
+        TableId::new(rel_id)
+    }
+
+    /// Returns the source tuple-value bytes for this row change.
+    fn payload_metadata(self) -> StreamingPayloadMetadata {
+        match self {
+            Self::Insert(body) => {
+                StreamingPayloadMetadata::insert(insert_message_payload_bytes(body))
+            }
+            Self::Update(body) => {
+                StreamingPayloadMetadata::update(update_message_payload_bytes(body))
+            }
+            Self::Delete(body) => {
+                StreamingPayloadMetadata::delete(delete_message_payload_bytes(body))
+            }
+        }
+    }
+
+    /// Decodes the row change with a resolved replicated table schema.
+    fn decode(
+        self,
+        schema: ReplicatedTableSchema,
+        commit_lsn: PgLsn,
+        ordinal: u64,
+    ) -> EtlResult<Event> {
+        match self {
+            Self::Insert(body) => {
+                parse_event_from_insert_message(schema, commit_lsn, ordinal, body)
+                    .map(Event::Insert)
+            }
+            Self::Update(body) => {
+                parse_event_from_update_message(schema, commit_lsn, ordinal, body)
+                    .map(Event::Update)
+            }
+            Self::Delete(body) => {
+                parse_event_from_delete_message(schema, commit_lsn, ordinal, body)
+                    .map(Event::Delete)
+            }
+        }
+    }
+}
+
 /// Mutable runtime state that evolves throughout the apply loop.
 #[derive(Debug)]
 struct ApplyLoopState {
@@ -494,9 +615,8 @@ struct ApplyLoopState {
     ///
     /// Entries remain pending if evaluation fails or the cleanup queue is full.
     pending_schema_cleanup_table_ids: HashSet<TableId>,
-    /// Start of the current transaction's COMMIT WAL record, reported by
-    /// pgoutput's synthesized `BEGIN` message.
-    remote_final_lsn: Option<PgLsn>,
+    /// Transaction between pgoutput's `BEGIN` and `COMMIT`, if one is open.
+    open_transaction: Option<OpenTransaction>,
     /// The current replication progress tracking received and flushed LSN
     /// positions.
     replication_progress: ReplicationProgress,
@@ -504,12 +624,6 @@ struct ApplyLoopState {
     replication_lag_metrics: ReplicationLagMetrics,
     /// Events and associated batching information waiting for dispatch.
     event_batch: EventBatch,
-    /// Number of row-change and truncate messages observed since the most
-    /// recent `BEGIN`.
-    current_tx_events: u64,
-    /// Next zero-based ordinal to assign to transaction events with sequence
-    /// keys.
-    next_tx_ordinal: u64,
     /// Whether the loop is draining buffered destination work for shutdown.
     draining_for_shutdown: bool,
     /// Whether shutdown abandoned destination work the destination never
@@ -561,12 +675,10 @@ impl ApplyLoopState {
             last_commit_end_lsn: None,
             pending_durability_interval: None,
             pending_schema_cleanup_table_ids: HashSet::new(),
-            remote_final_lsn: None,
+            open_transaction: None,
             replication_progress,
             replication_lag_metrics,
             event_batch: EventBatch::default(),
-            current_tx_events: 0,
-            next_tx_ordinal: 0,
             draining_for_shutdown: false,
             abandoned_work_for_shutdown: false,
             flush_deadline: None,
@@ -739,31 +851,20 @@ impl ApplyLoopState {
     /// Returns true if the apply loop is in the middle of processing a
     /// transaction.
     fn handling_transaction(&self) -> bool {
-        self.remote_final_lsn.is_some()
+        self.open_transaction.is_some()
     }
 
-    /// Resets transaction-local ordinal assignment.
-    fn reset_tx_ordinal(&mut self) {
-        self.next_tx_ordinal = 0;
-    }
-
-    /// Returns and advances the next transaction-local ordinal.
-    fn next_tx_ordinal(&mut self) -> u64 {
-        let tx_ordinal = self.next_tx_ordinal;
-        self.next_tx_ordinal = match self.next_tx_ordinal.checked_add(1) {
-            Some(next_tx_ordinal) => next_tx_ordinal,
-            None => {
-                warn!(
-                    current_tx_ordinal = self.next_tx_ordinal,
-                    "transaction-local ordinal overflow detected; subsequent events may reuse the \
-                     same ordinal"
-                );
-
-                self.next_tx_ordinal
-            }
-        };
-
-        tx_ordinal
+    /// Returns the open transaction a transactional message belongs to.
+    ///
+    /// Fails when pgoutput sends `message_type` outside `BEGIN`/`COMMIT`.
+    fn open_transaction_mut(&mut self, message_type: &str) -> EtlResult<&mut OpenTransaction> {
+        self.open_transaction.as_mut().ok_or_else(|| {
+            etl_error!(
+                ErrorKind::InvalidState,
+                "Invalid transaction state",
+                format!("Transaction must be active before processing {message_type} message")
+            )
+        })
     }
 
     /// Returns `true` if there is a pending batch of events waiting to be
@@ -2062,7 +2163,7 @@ where
             // transaction whose final commit position is already known.
             let replay_frontier = metadata
                 .commit_end_lsn
-                .max(self.state.remote_final_lsn)
+                .max(self.state.open_transaction.as_ref().map(|tx| tx.remote_final_lsn))
                 .unwrap_or(self.state.replication_progress.last_flush_lsn());
             ctx.durability_monitor.dispatched(replay_frontier);
         }
@@ -2216,13 +2317,13 @@ where
                 self.handle_relation_message(relation_body).await
             }
             LogicalReplicationMessage::Insert(insert_body) => {
-                self.handle_insert_message(insert_body).await
+                self.handle_row_change_message(RowChange::Insert(insert_body)).await
             }
             LogicalReplicationMessage::Update(update_body) => {
-                self.handle_update_message(update_body).await
+                self.handle_row_change_message(RowChange::Update(update_body)).await
             }
             LogicalReplicationMessage::Delete(delete_body) => {
-                self.handle_delete_message(delete_body).await
+                self.handle_row_change_message(RowChange::Delete(delete_body)).await
             }
             LogicalReplicationMessage::Truncate(truncate_body) => {
                 self.handle_truncate_message(truncate_body).await
@@ -2290,7 +2391,9 @@ where
         }
 
         // DDL messages must be transactional.
-        let Some(remote_final_lsn) = self.state.remote_final_lsn else {
+        let Some(remote_final_lsn) =
+            self.state.open_transaction.as_ref().map(|tx| tx.remote_final_lsn)
+        else {
             bail!(
                 ErrorKind::InvalidState,
                 "Invalid transaction state",
@@ -2415,14 +2518,8 @@ where
     /// Handles Postgres BEGIN messages.
     fn handle_begin_message(&mut self, message: &protocol::BeginBody) -> HandleMessageResult {
         let final_lsn = PgLsn::from(message.final_lsn());
-        self.state.remote_final_lsn = Some(final_lsn);
-
-        // When a new transaction begins, we want to reset the accumulating
-        // state.
-        self.state.current_tx_events = 0;
-        self.state.reset_tx_ordinal();
-
-        let tx_ordinal = self.state.next_tx_ordinal();
+        let transaction = self.state.open_transaction.insert(OpenTransaction::new(final_lsn));
+        let tx_ordinal = transaction.next_ordinal();
         let event = parse_event_from_begin_message(final_lsn, tx_ordinal, message);
 
         HandleMessageResult::return_event(Event::Begin(event))
@@ -2433,7 +2530,7 @@ where
         &mut self,
         message: &protocol::CommitBody,
     ) -> EtlResult<HandleMessageResult> {
-        let Some(remote_final_lsn) = self.state.remote_final_lsn.take() else {
+        let Some(mut transaction) = self.state.open_transaction.take() else {
             bail!(
                 ErrorKind::InvalidState,
                 "Invalid transaction state",
@@ -2441,6 +2538,7 @@ where
             );
         };
 
+        let remote_final_lsn = transaction.remote_final_lsn;
         let commit_lsn = PgLsn::from(message.commit_lsn());
         if commit_lsn != remote_final_lsn {
             bail!(
@@ -2455,14 +2553,14 @@ where
 
         // Emit the transaction metrics.
         counter!(ETL_TRANSACTIONS_TOTAL).increment(1);
-        histogram!(ETL_TRANSACTION_SIZE).record(self.state.current_tx_events as f64);
+        histogram!(ETL_TRANSACTION_SIZE).record(transaction.change_count as f64);
 
         let end_lsn = PgLsn::from(message.end_lsn());
 
         // Process syncing tables after commit (worker-specific behavior).
         let should_end_batch = self.process_syncing_tables_after_commit_event(end_lsn).await?;
 
-        let tx_ordinal = self.state.next_tx_ordinal();
+        let tx_ordinal = transaction.next_ordinal();
         let event = parse_event_from_commit_message(commit_lsn, tx_ordinal, message);
 
         let mut result = HandleMessageResult {
@@ -2490,57 +2588,29 @@ where
         &mut self,
         message: &protocol::RelationBody,
     ) -> EtlResult<HandleMessageResult> {
-        let Some(remote_final_lsn) = self.state.remote_final_lsn else {
-            bail!(
-                ErrorKind::InvalidState,
-                "Invalid transaction state",
-                "Transaction must be active before processing RELATION message"
-            );
-        };
+        let remote_final_lsn = self.state.open_transaction_mut("RELATION")?.remote_final_lsn;
 
         let table_id = TableId::new(message.rel_id());
         if !self.should_apply_changes(table_id, remote_final_lsn).await? {
             return Ok(HandleMessageResult::no_event());
         }
 
-        // We extract the columns from the message that are needed to build the
-        // masks. The masks themselves are built by name, so relation-message
-        // order is not needed to decide membership: PostgreSQL live column
-        // names are unique within a table schema version. The order matters
-        // after the masks are applied: PostgreSQL writes RELATION columns and
-        // tuple data in the same physical `pg_attribute.attnum` order, skipping
-        // unpublished columns. Because stored TableSchema values use that same
-        // order, ReplicatedTableSchema becomes the positional view used to
-        // decode later tuple payloads. Materialization reports when that view
-        // disagrees with the relation, because a stale snapshot can share
-        // names but not order or types.
-        let replicated_columns = parse_replicated_column_names(message)?;
-        let identity_columns = parse_replica_identity_column_names(message)?;
-
-        fn format_column_names(column_names: &HashSet<String>) -> String {
-            let mut column_names = column_names.iter().map(String::as_str).collect::<Vec<_>>();
-            column_names.sort_unstable();
-            column_names.join(",")
+        fn format_column_names<'a>(columns: impl Iterator<Item = &'a ColumnSchema>) -> String {
+            columns.map(|column| column.name.as_str()).collect::<Vec<_>>().join(",")
         }
 
         let schema_selection =
             self.resolve_relation_schema_selection(table_id, remote_final_lsn).await?;
-        let replicated_table_schema = self
-            .materialize_relation_schema(
-                table_id,
-                schema_selection,
-                message,
-                &replicated_columns,
-                &identity_columns,
-            )
-            .await?;
+        let replicated_table_schema =
+            self.materialize_relation_schema(table_id, schema_selection, message).await?;
 
         debug!(
             table_id = %table_id,
             snapshot_id = %replicated_table_schema.inner().snapshot_id,
             replication_mask = %replicated_table_schema.replication_mask(),
-            replicated_columns = %format_column_names(&replicated_columns),
-            identity_columns = %format_column_names(&identity_columns),
+            replicated_columns = %format_column_names(replicated_table_schema.column_schemas()),
+            identity_columns =
+                %format_column_names(replicated_table_schema.identity_column_schemas()),
             "materialized relation decoding state"
         );
 
@@ -2661,19 +2731,16 @@ where
         table_id: TableId,
         schema_selection: RelationSchemaSelection,
         relation: &protocol::RelationBody,
-        replicated_columns: &HashSet<String>,
-        identity_columns: &HashSet<String>,
     ) -> EtlResult<ReplicatedTableSchema> {
         let table_schema = self.get_table_schema_for_relation(table_id, schema_selection).await?;
 
-        let replication_mask = ReplicationMask::try_build(&table_schema, replicated_columns)?;
-        let identity_mask = IdentityMask::try_build(&table_schema, identity_columns)?;
-        let replicated_table_schema =
-            ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask);
-        // Mismatches are only observed for now, so the rate is known before
-        // they stop replication (PIPE-1283).
-        if let Some(mismatch) = detect_relation_schema_mismatch(relation, &replicated_table_schema)?
-        {
+        // Masks are built by name, but tuples decode by position in the
+        // relation's `attnum` order, so a stale snapshot can share names but
+        // not order or types. Mismatches are only observed for now, so the
+        // rate is known before they stop replication (PIPE-1283).
+        let (replicated_table_schema, mismatch) =
+            replicated_table_schema_from_relation(table_schema, relation)?;
+        if let Some(mismatch) = mismatch {
             let mismatch_kind = mismatch.kind().as_label();
             warn!(
                 table_id = %table_id,
@@ -2989,140 +3056,35 @@ where
         }
     }
 
-    /// Handles Postgres INSERT messages.
-    async fn handle_insert_message(
+    /// Handles Postgres INSERT, UPDATE, and DELETE messages.
+    async fn handle_row_change_message(
         &mut self,
-        message: &protocol::InsertBody,
+        row_change: RowChange<'_>,
     ) -> EtlResult<HandleMessageResult> {
-        let Some(remote_final_lsn) = self.state.remote_final_lsn else {
-            bail!(
-                ErrorKind::InvalidState,
-                "Invalid transaction state",
-                "Transaction must be active before processing INSERT message"
-            );
-        };
-
-        self.state.current_tx_events += 1;
-
-        let tx_ordinal = self.state.next_tx_ordinal();
-        let table_id = TableId::new(message.rel_id());
+        let transaction = self.state.open_transaction_mut(row_change.message_type())?;
+        let remote_final_lsn = transaction.remote_final_lsn;
+        let tx_ordinal = transaction.next_change_ordinal();
+        let table_id = row_change.table_id();
 
         // Capture the source payload metadata and emit the initial metrics.
-        let streaming_payload_metadata =
-            StreamingPayloadMetadata::insert(insert_message_payload_bytes(message));
+        let streaming_payload_metadata = row_change.payload_metadata();
         streaming_payload_metadata.record_received();
         streaming_payload_metadata.record_row_size();
 
         // Exactly one worker owns protocol interpretation for a table at a
-        // time, so Non-owning workers skip row decoding and leave their
+        // time, so non-owning workers skip row decoding and leave their
         // connection-local decoding state untouched.
         if !self.should_apply_changes(table_id, remote_final_lsn).await? {
             return Ok(HandleMessageResult::no_event());
         }
 
         let resolved = self.get_replicated_table_schema(table_id, remote_final_lsn).await?;
-        let event = parse_event_from_insert_message(
-            resolved.replicated_table_schema,
-            remote_final_lsn,
-            tx_ordinal,
-            message,
-        )?;
+        let event =
+            row_change.decode(resolved.replicated_table_schema, remote_final_lsn, tx_ordinal)?;
 
         Ok(HandleMessageResult::return_row_event(
             resolved.relation,
-            Event::Insert(event),
-            streaming_payload_metadata,
-        ))
-    }
-
-    /// Handles Postgres UPDATE messages.
-    async fn handle_update_message(
-        &mut self,
-        message: &protocol::UpdateBody,
-    ) -> EtlResult<HandleMessageResult> {
-        let Some(remote_final_lsn) = self.state.remote_final_lsn else {
-            bail!(
-                ErrorKind::InvalidState,
-                "Invalid transaction state",
-                "Transaction must be active before processing UPDATE message"
-            );
-        };
-
-        self.state.current_tx_events += 1;
-
-        let tx_ordinal = self.state.next_tx_ordinal();
-        let table_id = TableId::new(message.rel_id());
-
-        // Capture the source payload metadata and emit the initial metrics.
-        let streaming_payload_metadata =
-            StreamingPayloadMetadata::update(update_message_payload_bytes(message));
-        streaming_payload_metadata.record_received();
-        streaming_payload_metadata.record_row_size();
-
-        // Exactly one worker owns protocol interpretation for a table at a
-        // time, so Non-owning workers skip row decoding and leave their
-        // connection-local decoding state untouched.
-        if !self.should_apply_changes(table_id, remote_final_lsn).await? {
-            return Ok(HandleMessageResult::no_event());
-        }
-
-        let resolved = self.get_replicated_table_schema(table_id, remote_final_lsn).await?;
-        let event = parse_event_from_update_message(
-            resolved.replicated_table_schema,
-            remote_final_lsn,
-            tx_ordinal,
-            message,
-        )?;
-
-        Ok(HandleMessageResult::return_row_event(
-            resolved.relation,
-            Event::Update(event),
-            streaming_payload_metadata,
-        ))
-    }
-
-    /// Handles Postgres DELETE messages.
-    async fn handle_delete_message(
-        &mut self,
-        message: &protocol::DeleteBody,
-    ) -> EtlResult<HandleMessageResult> {
-        let Some(remote_final_lsn) = self.state.remote_final_lsn else {
-            bail!(
-                ErrorKind::InvalidState,
-                "Invalid transaction state",
-                "Transaction must be active before processing DELETE message"
-            );
-        };
-
-        self.state.current_tx_events += 1;
-
-        let tx_ordinal = self.state.next_tx_ordinal();
-        let table_id = TableId::new(message.rel_id());
-
-        // Capture the source payload metadata and emit the initial metrics.
-        let streaming_payload_metadata =
-            StreamingPayloadMetadata::delete(delete_message_payload_bytes(message));
-        streaming_payload_metadata.record_received();
-        streaming_payload_metadata.record_row_size();
-
-        // Exactly one worker owns protocol interpretation for a table at a
-        // time, so Non-owning workers skip row decoding and leave their
-        // connection-local decoding state untouched.
-        if !self.should_apply_changes(table_id, remote_final_lsn).await? {
-            return Ok(HandleMessageResult::no_event());
-        }
-
-        let resolved = self.get_replicated_table_schema(table_id, remote_final_lsn).await?;
-        let event = parse_event_from_delete_message(
-            resolved.replicated_table_schema,
-            remote_final_lsn,
-            tx_ordinal,
-            message,
-        )?;
-
-        Ok(HandleMessageResult::return_row_event(
-            resolved.relation,
-            Event::Delete(event),
+            event,
             streaming_payload_metadata,
         ))
     }
@@ -3132,17 +3094,9 @@ where
         &mut self,
         message: &protocol::TruncateBody,
     ) -> EtlResult<HandleMessageResult> {
-        let Some(remote_final_lsn) = self.state.remote_final_lsn else {
-            bail!(
-                ErrorKind::InvalidState,
-                "Invalid transaction state",
-                "Transaction must be active before processing TRUNCATE message"
-            );
-        };
-
-        self.state.current_tx_events += 1;
-
-        let tx_ordinal = self.state.next_tx_ordinal();
+        let transaction = self.state.open_transaction_mut("TRUNCATE")?;
+        let remote_final_lsn = transaction.remote_final_lsn;
+        let tx_ordinal = transaction.next_change_ordinal();
 
         // Collect the replicated schemas for tables this worker currently owns.
         let mut truncated_tables = Vec::with_capacity(message.rel_ids().len());
@@ -4561,7 +4515,7 @@ mod tests {
             ReplicationLagMetrics, TableDecodingState,
             apply::{
                 ApplyLoop, ApplyLoopResult, ApplyLoopState, EventBatch, ExitIntent,
-                ReplicationProgress, schema_cleanup_retention_snapshot_id,
+                OpenTransaction, ReplicationProgress, schema_cleanup_retention_snapshot_id,
             },
             state::{StoredTableDecodingState, TableState},
         },
@@ -4882,9 +4836,9 @@ mod tests {
         state.update_last_commit_end_lsn(Some(200.into()));
         assert!(state.can_settle_idle_durability());
 
-        state.remote_final_lsn = Some(300.into());
+        state.open_transaction = Some(OpenTransaction::new(300.into()));
         assert!(!state.can_settle_idle_durability());
-        state.remote_final_lsn = None;
+        state.open_transaction = None;
 
         state.event_batch.push(Event::Unsupported, StreamingPayloadMetadata::default());
         assert!(!state.can_settle_idle_durability());
@@ -4992,15 +4946,8 @@ mod tests {
         use tokio_postgres::types::{Kind, Type};
 
         use crate::{
-            error::EtlResult,
-            postgres::codec::{
-                RelationSchemaMismatchKind, detect_relation_schema_mismatch,
-                parse_replica_identity_column_names, parse_replicated_column_names,
-            },
-            schema::{
-                ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, TableId,
-                TableName, TableSchema,
-            },
+            postgres::codec::{RelationSchemaMismatchKind, replicated_table_schema_from_relation},
+            schema::{ColumnSchema, TableId, TableName, TableSchema},
             test_utils::property::run_property,
         };
 
@@ -5182,35 +5129,22 @@ mod tests {
             ))
         }
 
-        /// Runs the relation-to-decoder steps of
-        /// [`super::ApplyLoop::materialize_relation_schema`] without the store
-        /// lookup that selects the snapshot.
-        fn materialize(
-            table_schema: Arc<TableSchema>,
-            relation: &RelationBody,
-        ) -> EtlResult<ReplicatedTableSchema> {
-            let replicated_columns = parse_replicated_column_names(relation)?;
-            let identity_columns = parse_replica_identity_column_names(relation)?;
-            let replication_mask = ReplicationMask::try_build(&table_schema, &replicated_columns)?;
-            let identity_mask = IdentityMask::try_build(&table_schema, &identity_columns)?;
-            Ok(ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask))
-        }
-
         /// Returns how a case's relation disagrees with its materialized
         /// decoder.
         fn mismatch_kind(case: &RelationCase) -> Option<RelationSchemaMismatchKind> {
             let relation = parse_relation(&encode_relation(case));
-            let replicated_table_schema = materialize(stored_schema(case), &relation).unwrap();
-            detect_relation_schema_mismatch(&relation, &replicated_table_schema)
-                .unwrap()
-                .map(|mismatch| mismatch.kind())
+            let (_, mismatch) =
+                replicated_table_schema_from_relation(stored_schema(case), &relation).unwrap();
+            mismatch.map(|mismatch| mismatch.kind())
         }
 
         /// Checks that a successful materialization is reported as a mismatch
         /// exactly when it disagrees with the relation position by position.
         fn check_relation_agreement(case: &RelationCase) -> Result<(), TestCaseError> {
             let relation = parse_relation(&encode_relation(case));
-            let Ok(replicated_table_schema) = materialize(stored_schema(case), &relation) else {
+            let Ok((replicated_table_schema, mismatch)) =
+                replicated_table_schema_from_relation(stored_schema(case), &relation)
+            else {
                 return Ok(());
             };
 
@@ -5225,8 +5159,6 @@ mod tests {
                     (column.name().unwrap().to_owned(), u32::try_from(column.type_id()).unwrap())
                 })
                 .collect();
-            let mismatch =
-                detect_relation_schema_mismatch(&relation, &replicated_table_schema).unwrap();
             prop_assert_eq!(mismatch.is_some(), decoder_columns != relation_columns);
             if mismatch.is_some() {
                 return Ok(());
