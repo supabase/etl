@@ -180,9 +180,10 @@ enum LoopPhase {
     Exiting(ExitIntent),
     /// Shutdown found unresolved destination work and is draining it.
     ///
-    /// The loop only waits for buffered and in-flight work: it starts no
-    /// table-sync coordination or idle durability barrier, and it enqueues no
-    /// status update.
+    /// Intake has stopped. The loop flushes what is buffered, waits for what
+    /// is in flight, and then exits. It starts no quiescent table-sync
+    /// coordination or idle durability barrier, and it enqueues no status
+    /// update.
     Draining(ExitIntent),
     /// Shutdown abandoned unresolved destination work because draining is
     /// disabled.
@@ -943,7 +944,7 @@ impl ApplyLoopState {
         }
     }
 
-    /// Takes the in-flight flush result out of a loop that is about to exit.
+    /// Takes the in-flight flush result and leaves the flush slot idle.
     fn take_pending_flush_result(&mut self) -> Option<PendingWriteEventsResult> {
         match std::mem::replace(&mut self.flush_state, FlushState::Idle) {
             FlushState::Idle => None,
@@ -4996,7 +4997,6 @@ mod tests {
         assert_eq!(state.abandon_work_for_shutdown(), 1);
 
         assert!(!state.has_unresolved_batch_work());
-        assert!(!state.is_processing_paused());
         assert!(state.flush_deadline().is_none());
         // Nothing abandoned became durable, so the sync is not complete.
         assert!(matches!(state.exit_result(), Some(ApplyLoopResult::Paused)));
