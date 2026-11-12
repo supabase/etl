@@ -372,6 +372,9 @@ fn push_utc_offset(output: &mut AsciiOutput<'_, '_>, offset: FixedOffset) -> fmt
     Ok(())
 }
 
+#[cfg(kani)]
+mod verification;
+
 #[cfg(test)]
 mod tests {
     use super::*;

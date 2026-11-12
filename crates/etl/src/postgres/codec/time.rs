@@ -312,6 +312,9 @@ pub(crate) fn check_fast_paths_match_chrono(value: &str) {
     }
 }
 
+#[cfg(kani)]
+mod verification;
+
 #[cfg(test)]
 mod tests {
     use chrono::{NaiveTime, Timelike};

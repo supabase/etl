@@ -21,7 +21,7 @@ repository = "https://github.com/supabase/etl"
 homepage = "https://supabase.github.io/etl/"
 
 [workspace.lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)', 'cfg(kani)'] }
 
 [workspace.lints.rustdoc]
 broken_intra_doc_links = "deny"
