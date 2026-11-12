@@ -1,0 +1,3 @@
+# Source workspaces are read-only; keep runner reports in the build volume.
+[store]
+dir = "/targets/nextest"

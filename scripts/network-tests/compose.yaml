@@ -1,0 +1,66 @@
+services:
+  database:
+    build:
+      context: .
+      target: database
+    cap_add: [NET_ADMIN]
+    environment:
+      POSTGRES_PASSWORD: postgres
+    tmpfs:
+      - /var/lib/postgresql
+    volumes:
+      - ${NETWORK_LAB_DIR:?set NETWORK_LAB_DIR}/certs:/certs:ro
+    networks:
+      lab:
+        ipv4_address: 172.30.248.10
+        ipv6_address: fd42:6574:6c::10
+    healthcheck:
+      # The entrypoint's temporary initialization server accepts Unix sockets
+      # before the actual TCP listener is ready.
+      test: [CMD-SHELL, "pg_isready -h 127.0.0.1 -U postgres && test -f /run/lab-ready"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+  tester:
+    build:
+      context: .
+      target: tester
+    init: true
+    dns: [172.30.248.10]
+    environment:
+      ETL_NETWORK_LAB: "1"
+      TESTS_DATABASE_HOST: admin.test
+      TESTS_DATABASE_PORT: "5432"
+      TESTS_DATABASE_USERNAME: postgres
+      TESTS_DATABASE_PASSWORD: postgres
+      TESTS_DATABASE_TLS_ENABLED: "true"
+      TESTS_DATABASE_TLS_ROOT_CERT: /certs/root.crt
+      APP_ENVIRONMENT: dev
+      CARGO_BUILD_JOBS: "${CARGO_BUILD_JOBS:-4}"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      NO_PROXY: localhost,127.0.0.1,::1
+    volumes:
+      - ${ETL_WORKSPACE:?set ETL_WORKSPACE}:/work/etl:ro
+      - ${API_WORKSPACE:?set API_WORKSPACE}:/work/api:ro
+      - ${NETWORK_LAB_DIR:?set NETWORK_LAB_DIR}/certs:/certs:ro
+      - targets:/targets
+      - registry:/usr/local/cargo/registry
+      - git:/usr/local/cargo/git
+      - cache:/cache
+    networks:
+      lab:
+        ipv4_address: 172.30.248.30
+        ipv6_address: fd42:6574:6c::30
+networks:
+  lab:
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: 172.30.248.0/24
+        - subnet: fd42:6574:6c::/64
+volumes:
+  targets:
+  registry:
+  git:
+  cache:

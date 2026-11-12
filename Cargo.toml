@@ -108,7 +108,7 @@ percent-encoding = { version = "2.3.2", default-features = false }
 pg_escape = { version = "0.1.1", default-features = false }
 pin-project-lite = { version = "0.2.16", default-features = false }
 pkcs8 = { version = "0.11.0", default-features = false, features = ["pem", "encryption"] }
-postgres-replication = { git = "https://github.com/supabase/rust-postgres", default-features = false, rev = "8086f1fd19bd9abc0da86ba80f8b7dbdd676cb3e" }
+postgres-replication = { git = "https://github.com/supabase/rust-postgres", default-features = false, rev = "ce3e70c0599b017e879a13e9ec2d3aad3e7bcf5b" }
 proptest = { version = "1.7.0", default-features = false, features = ["std"] }
 prost = { version = "0.14.1", default-features = false }
 r2d2 = { version = "0.8.0", default-features = false }
@@ -131,7 +131,7 @@ thiserror = "2.0.12"
 tikv-jemalloc-ctl = { version = "0.6.0", default-features = false, features = ["stats"] }
 tikv-jemallocator = { version = "0.6.1", default-features = false, features = ["background_threads_runtime_support", "unprefixed_malloc_on_supported_platforms"] }
 tokio = { version = "1.47.0", default-features = false }
-tokio-postgres = { git = "https://github.com/supabase/rust-postgres", default-features = false, rev = "8086f1fd19bd9abc0da86ba80f8b7dbdd676cb3e" }
+tokio-postgres = { git = "https://github.com/supabase/rust-postgres", default-features = false, rev = "ce3e70c0599b017e879a13e9ec2d3aad3e7bcf5b" }
 tokio-rustls = { version = "0.26.2", default-features = false }
 tokio-stream = { version = "0.1.18", default-features = false, features = ["sync"] }
 tokio-util = { version = "0.7.18", default-features = false, features = ["rt"] }
@@ -146,6 +146,13 @@ utoipa = { version = "6.0.0", default-features = false }
 uuid = { version = "1.17.0", default-features = false }
 x509-cert = { version = "0.2.2", default-features = false }
 zstd = { version = "0.14.3", default-features = false }
+
+# Stagger PostgreSQL TCP attempts so an unreachable address cannot stall fallback.
+# Keep the PostgreSQL driver and its shared core on the same fork revision.
+# Cargo patches apply only at the workspace root; downstream workspaces must repeat them.
+[patch.crates-io]
+sqlx-core = { git = "https://github.com/supabase/sqlx", rev = "95f5a39afd7f5c4e8ffcef6b72f8d8f30b4cfc8f" }
+sqlx-postgres = { git = "https://github.com/supabase/sqlx", rev = "95f5a39afd7f5c4e8ffcef6b72f8d8f30b4cfc8f" }
 
 [profile.dev.package.libduckdb-sys]
 # The published C++ extensions use release allocator bookkeeping. The bundled
