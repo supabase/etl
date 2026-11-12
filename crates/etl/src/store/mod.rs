@@ -38,6 +38,8 @@ mod lifecycle;
 mod schema;
 mod state;
 
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) use both::memory::MemoryStoreData;
 pub use both::{memory::MemoryStore, postgres::PostgresStore};
 pub use cache::CachedStore;
 pub use capabilities::{DestinationStore, PipelineStore, SharedStateStore};
