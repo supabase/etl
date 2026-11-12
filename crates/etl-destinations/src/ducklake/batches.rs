@@ -942,9 +942,9 @@ async fn apply_table_batch_with_policy(
         },
     )
     .await
-    .map_err(|failure| {
-        if is_ducklake_shutdown_requested_error(&failure.last_error) {
-            return failure.last_error;
+    .map_err(|error| {
+        if is_ducklake_shutdown_requested_error(&error) {
+            return error;
         }
 
         counter!(
@@ -957,7 +957,7 @@ async fn apply_table_batch_with_policy(
             ErrorKind::DestinationQueryFailed,
             "DuckLake atomic table batch failed after retries",
             format!("table={table_name}, batch_id={batch_id}, batch_kind={}", batch_kind.as_str()),
-            failure.last_error,
+            error,
         )
     })
 }

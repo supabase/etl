@@ -76,7 +76,6 @@ where
         attempt_fn,
     )
     .await
-    .map_err(|failure| failure.last_error)
 }
 
 /// Recognizes a missing table while preserving the query's typed error chain.

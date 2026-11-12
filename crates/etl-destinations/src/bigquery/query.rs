@@ -226,7 +226,7 @@ async fn execute_query_attempt(
     )
     .await
     .map_err(|_| query_timeout_error(request_id, None))?
-    .map_err(|failure| bq_error_to_etl_error(failure.last_error))?;
+    .map_err(bq_error_to_etl_error)?;
 
     // Dry runs validate without creating an executable job to poll.
     if request.dry_run == Some(true) {
@@ -263,7 +263,7 @@ async fn execute_query_attempt(
         )
         .await
         .map(QueryResponse::from)
-        .map_err(|failure| bq_error_to_etl_error(failure.last_error))
+        .map_err(bq_error_to_etl_error)
     })
     .await
 }
@@ -309,7 +309,6 @@ where
         },
     )
     .await
-    .map_err(|failure| failure.last_error)
 }
 
 /// Submits a query, waits for completion, and collects every result page.
