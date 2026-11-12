@@ -695,6 +695,11 @@ impl ApplyLoopState {
         self.bootstrap_snapshot_id
     }
 
+    /// Returns the deadline by which the current batch must be flushed.
+    fn flush_deadline(&self) -> Option<Instant> {
+        self.flush_deadline
+    }
+
     /// Sets the batch flush deadline, if not already set.
     ///
     /// The deadline stays armed until a flush is actually dispatched. If a
@@ -879,6 +884,23 @@ impl ApplyLoopState {
         self.pending_flush_result.is_some()
     }
 
+    /// Returns the in-flight flush result so the loop can await it.
+    fn pending_flush_result_mut(&mut self) -> Option<&mut PendingWriteEventsResult> {
+        self.pending_flush_result.as_mut()
+    }
+
+    /// Takes the in-flight flush result out of a loop that is about to exit.
+    fn take_pending_flush_result(&mut self) -> Option<PendingWriteEventsResult> {
+        self.pending_flush_result.take()
+    }
+
+    /// Records the result of a flush that was just handed to the destination.
+    fn record_dispatched_flush(&mut self, pending_flush_result: PendingWriteEventsResult) {
+        debug_assert!(!self.has_pending_flush_result());
+
+        self.pending_flush_result = Some(pending_flush_result);
+    }
+
     /// Returns `true` if any buffered or in-flight destination batch work is
     /// still unresolved.
     fn has_unresolved_batch_work(&self) -> bool {
@@ -897,6 +919,16 @@ impl ApplyLoopState {
         };
     }
 
+    /// Returns `true` once any exit has been requested.
+    fn exit_requested(&self) -> bool {
+        self.exit_intent.is_some()
+    }
+
+    /// Returns `true` once a permanent exit has been requested.
+    fn completion_requested(&self) -> bool {
+        matches!(self.exit_intent, Some(ExitIntent::Complete))
+    }
+
     /// Returns `true` when the apply loop may still accept new replication
     /// messages.
     fn can_process_messages(&self) -> bool {
@@ -912,6 +944,12 @@ impl ApplyLoopState {
     /// for buffered work.
     fn can_wait_for_deadline(&self) -> bool {
         !self.processing_paused && self.has_pending_batch()
+    }
+
+    /// Returns `true` while a buffered batch is queued behind an in-flight
+    /// flush.
+    fn is_processing_paused(&self) -> bool {
+        self.processing_paused
     }
 
     /// Marks the current pending batch as paused behind an in-flight flush.
@@ -1154,7 +1192,7 @@ where
             Err(error) => {
                 return Err(Self::settle_pending_flush_on_error(
                     error,
-                    apply_loop.state.pending_flush_result.take(),
+                    apply_loop.state.take_pending_flush_result(),
                     &apply_loop.shutdown_token,
                 )
                 .await);
@@ -1305,7 +1343,10 @@ where
             return Ok(Some(result));
         }
 
+        // Read the deadlines up front: the pending flush result branch borrows
+        // the loop state mutably for the whole `select!`.
         let durability_deadline = self.state.durability_deadline();
+        let flush_deadline = self.state.flush_deadline();
         tokio::select! {
             biased;
 
@@ -1329,7 +1370,7 @@ where
             // PRIORITY 3: Handle the pending destination write result.
             // Finishing an in-flight flush may advance progress and unblock a
             // queued batch.
-            apply_result = Self::wait_for_flush_result(self.state.pending_flush_result.as_mut()), if self.state.pending_flush_result.is_some() => {
+            apply_result = Self::wait_for_flush_result(self.state.pending_flush_result_mut()), if self.state.has_pending_flush_result() => {
                 self.handle_flush_result(apply_result)
                     .await?;
             }
@@ -1355,7 +1396,7 @@ where
 
             // PRIORITY 6: Handle batch flush timer expiry. This prevents
             // buffered work from waiting forever when traffic is low.
-            _ = Self::wait_for_deadline(self.state.flush_deadline), if self.state.can_wait_for_deadline() => {
+            _ = Self::wait_for_deadline(flush_deadline), if self.state.can_wait_for_deadline() => {
                 self.flush_batch("flush deadline reached").await?;
             }
 
@@ -1407,6 +1448,9 @@ where
             return Ok(Some(self.finish_shutdown()));
         }
 
+        // Read the deadline up front: the pending flush result branch borrows
+        // the loop state mutably for the whole `select!`.
+        let flush_deadline = self.state.flush_deadline();
         tokio::select! {
             biased;
 
@@ -1420,7 +1464,7 @@ where
             result = self.tasks.wait_for_feedback_failure() => result?,
 
             // PRIORITY 2: Handle the pending destination write result.
-            apply_result = Self::wait_for_flush_result(self.state.pending_flush_result.as_mut()), if self.state.pending_flush_result.is_some() => {
+            apply_result = Self::wait_for_flush_result(self.state.pending_flush_result_mut()), if self.state.has_pending_flush_result() => {
                 self.handle_flush_result(apply_result)
                     .await?;
             }
@@ -1437,7 +1481,7 @@ where
             }
 
             // PRIORITY 4: Handle batch flush timer expiry.
-            _ = Self::wait_for_deadline(self.state.flush_deadline), if self.state.can_wait_for_deadline() => {
+            _ = Self::wait_for_deadline(flush_deadline), if self.state.can_wait_for_deadline() => {
                 self.flush_batch("flush deadline reached during shutdown drain").await?;
             }
         }
@@ -1561,7 +1605,7 @@ where
                 %worker_type,
                 pending_flush_result = self.state.has_pending_flush_result(),
                 pending_batch = self.state.has_pending_batch(),
-                processing_paused = self.state.processing_paused,
+                processing_paused = self.state.is_processing_paused(),
                 "shutdown signal received, stopping new intake and entering shutdown drain",
             );
             self.state.start_draining_for_shutdown();
@@ -1910,7 +1954,7 @@ where
             if metadata.event_count == 0
                 && metadata.durability == WriteEventsDurability::RequireDurable
                 && status == DestinationWriteStatus::Durable
-                && matches!(self.state.exit_intent, Some(ExitIntent::Complete))
+                && self.state.completion_requested()
                 && self.state.is_quiescent()
             {
                 self.process_syncing_tables_when_quiescent().await?;
@@ -2052,7 +2096,7 @@ where
 
         // Check on every dispatch, including a queued batch resumed by a
         // result. A ready result must not bypass the deferral timer's policy.
-        let durability = if matches!(self.state.exit_intent, Some(ExitIntent::Complete))
+        let durability = if self.state.completion_requested()
             || (!self.state.is_draining_for_shutdown() && self.state.durability_overdue())
         {
             WriteEventsDurability::RequireDurable
@@ -2176,7 +2220,7 @@ where
         // interrupted. Destinations should offload long-running writes and
         // return promptly; only then can this loop poll the result separately.
         self.destination.write_events(events, durability, flush_result).await?;
-        self.state.pending_flush_result = Some(pending_flush_result);
+        self.state.record_dispatched_flush(pending_flush_result);
 
         // Models a source failure right after dispatch: the loop exits with a
         // retriable error while the destination still owns the batch.
@@ -3295,7 +3339,7 @@ where
     /// of work so draining stays focused on already-started flushes and
     /// shutdown barriers.
     async fn maybe_process_syncing_tables_when_quiescent(&mut self) -> EtlResult<()> {
-        if self.state.exit_intent.is_some() {
+        if self.state.exit_requested() {
             return Ok(());
         }
 
@@ -4852,16 +4896,18 @@ mod tests {
             streaming_payload_metadata: StreamingPayloadMetadata::default(),
             dispatched_at: Instant::now(),
         });
-        state.pending_flush_result = Some(pending);
+        state.record_dispatched_flush(pending);
         assert!(!state.can_settle_idle_durability());
-        state.pending_flush_result = None;
 
         for exit_intent in [ExitIntent::Pause, ExitIntent::Complete] {
-            state.exit_intent = Some(exit_intent);
+            let mut state = state_with_progress_at(100);
+            state.update_last_commit_end_lsn(Some(200.into()));
+            state.record_exit_intent(Some(exit_intent));
             assert!(!state.can_settle_idle_durability());
         }
-        state.exit_intent = None;
 
+        let mut state = state_with_progress_at(100);
+        state.update_last_commit_end_lsn(Some(200.into()));
         state.start_draining_for_shutdown();
         assert!(!state.can_settle_idle_durability());
     }
@@ -4871,7 +4917,7 @@ mod tests {
         let mut state = state_with_progress_at(100);
         state.update_last_received_lsn(300.into());
         let (_result, pending) = pending_write_result();
-        state.pending_flush_result = Some(pending);
+        state.record_dispatched_flush(pending);
         state.event_batch.push(Event::Unsupported, StreamingPayloadMetadata::default());
         state.pause_processing();
         state.set_flush_deadline_if_needed(std::time::Duration::from_secs(60));
@@ -4882,8 +4928,8 @@ mod tests {
         assert_eq!(state.abandon_work_for_shutdown(), 1);
 
         assert!(!state.has_unresolved_batch_work());
-        assert!(!state.processing_paused);
-        assert!(state.flush_deadline.is_none());
+        assert!(!state.is_processing_paused());
+        assert!(state.flush_deadline().is_none());
         // Nothing abandoned became durable, so the sync is not complete.
         assert!(matches!(state.exit_result(), Some(ApplyLoopResult::Paused)));
         // Nothing abandoned is confirmed to PostgreSQL: feedback reports the
@@ -4896,7 +4942,7 @@ mod tests {
         let mut state = state_with_progress_at(100);
         state.update_last_received_lsn(300.into());
         let (_result, pending) = pending_write_result();
-        state.pending_flush_result = Some(pending);
+        state.record_dispatched_flush(pending);
 
         assert_eq!(state.abandon_work_for_shutdown(), 0);
 
