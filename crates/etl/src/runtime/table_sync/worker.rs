@@ -198,7 +198,7 @@ impl TableSyncWorkerState {
     /// This constructor initializes the state management structure with the
     /// specified table ID and table state. It sets up the notification
     /// mechanism for coordinating state changes between workers.
-    pub(crate) fn new(table_id: TableId, table_state: TableState) -> Self {
+    fn new(table_id: TableId, table_state: TableState) -> Self {
         let inner = TableSyncWorkerStateInner {
             table_id,
             table_state,
@@ -207,6 +207,12 @@ impl TableSyncWorkerState {
         };
 
         Self { inner: Arc::new(Mutex::new(inner)) }
+    }
+
+    /// Creates a worker state outside the pool for apply handoff tests.
+    #[cfg(test)]
+    pub(crate) fn new_for_test(table_id: TableId, table_state: TableState) -> Self {
+        Self::new(table_id, table_state)
     }
 
     /// Locks the state and returns a guard that owns the handle.

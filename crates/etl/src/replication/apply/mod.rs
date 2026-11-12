@@ -3418,7 +3418,9 @@ mod apply_worker {
             apply::{
                 ApplyWorkerContext, ExitIntent, get_syncing_tables,
                 handoff::{
-                    self, ActiveAction, ActiveFlushAction, IdleAction, ReadinessInputs, ReadyProof,
+                    ActiveAction, ActiveFlushAction, IdleAction, ReadinessInputs, ReadyProof,
+                    active_after_commit, active_after_flush, active_when_quiescent,
+                    idle_after_commit, idle_after_flush,
                 },
             },
             state::{TableState, TableStateType},
@@ -3734,10 +3736,21 @@ mod apply_worker {
         readiness: Option<&ReadinessInputs>,
         action: &impl fmt::Debug,
     ) {
+        let table_state_lsn = match table_state {
+            TableState::SyncWait { lsn }
+            | TableState::Catchup { lsn }
+            | TableState::SyncDone { lsn, .. } => Some(*lsn),
+            TableState::Init
+            | TableState::DataSync
+            | TableState::FinishedCopy
+            | TableState::Ready
+            | TableState::Errored { .. } => None,
+        };
         debug!(
             worker_type = %WorkerType::Apply,
             table_id = table_id.0,
-            %table_state,
+            table_state_type = %table_state.as_type(),
+            ?table_state_lsn,
             worker_running,
             trigger,
             %current_lsn,
@@ -3842,7 +3855,7 @@ mod apply_worker {
             let exit_intent = match observe_table(ctx, table_id, stored_state).await {
                 ObservedTable::Active(table) => {
                     let table_state = table.table_state();
-                    let action = handoff::active_after_commit(&table_state, current_lsn);
+                    let action = active_after_commit(&table_state, current_lsn);
                     log_handoff_decision(
                         "after_commit",
                         table_id,
@@ -3863,7 +3876,7 @@ mod apply_worker {
                     .await?
                 }
                 ObservedTable::Idle(table_state) => {
-                    let action = handoff::idle_after_commit(&table_state);
+                    let action = idle_after_commit(&table_state);
                     log_handoff_decision(
                         "after_commit",
                         table_id,
@@ -3924,7 +3937,7 @@ mod apply_worker {
             match observe_table(ctx, table_id, stored_state).await {
                 ObservedTable::Active(table) => {
                     let table_state = table.table_state();
-                    let action = handoff::active_after_flush(&table_state, &readiness);
+                    let action = active_after_flush(&table_state, &readiness);
                     log_handoff_decision(
                         "after_flush",
                         table_id,
@@ -3943,7 +3956,7 @@ mod apply_worker {
                     }
                 }
                 ObservedTable::Idle(table_state) => {
-                    let action = handoff::idle_after_flush(&table_state, &readiness);
+                    let action = idle_after_flush(&table_state, &readiness);
                     log_handoff_decision(
                         "after_flush",
                         table_id,
@@ -3992,7 +4005,7 @@ mod apply_worker {
             let exit_intent = match observe_table(ctx, table_id, stored_state).await {
                 ObservedTable::Active(table) => {
                     let table_state = table.table_state();
-                    let action = handoff::active_when_quiescent(&table_state, &readiness);
+                    let action = active_when_quiescent(&table_state, &readiness);
                     log_handoff_decision(
                         "quiescent",
                         table_id,
@@ -4013,7 +4026,7 @@ mod apply_worker {
                     .await?
                 }
                 ObservedTable::Idle(table_state) => {
-                    let action = handoff::idle_after_flush(&table_state, &readiness);
+                    let action = idle_after_flush(&table_state, &readiness);
                     log_handoff_decision(
                         "quiescent",
                         table_id,
@@ -4151,7 +4164,7 @@ mod apply_worker {
             ];
 
             for final_state in final_states {
-                let worker_state = TableSyncWorkerState::new(
+                let worker_state = TableSyncWorkerState::new_for_test(
                     table_id,
                     TableState::SyncWait { lsn: PgLsn::from(10) },
                 );
@@ -4191,8 +4204,10 @@ mod apply_worker {
             let activity_handle = activity.handle();
             let table_id = TableId::new(1);
             let catchup_lsn = PgLsn::from(20);
-            let worker_state =
-                TableSyncWorkerState::new(table_id, TableState::Catchup { lsn: catchup_lsn });
+            let worker_state = TableSyncWorkerState::new_for_test(
+                table_id,
+                TableState::Catchup { lsn: catchup_lsn },
+            );
             let table = ActiveTable::lock(table_id, worker_state).await;
             let mut handoff = pin!(execute_active_action(
                 &store,
@@ -4216,7 +4231,7 @@ mod apply_worker {
             let activity = apply_activity();
             let table_id = TableId::new(1);
             let sync_done_lsn = PgLsn::from(10);
-            let worker_state = TableSyncWorkerState::new(
+            let worker_state = TableSyncWorkerState::new_for_test(
                 table_id,
                 TableState::SyncDone { lsn: sync_done_lsn, table_decoding_state: None },
             );
