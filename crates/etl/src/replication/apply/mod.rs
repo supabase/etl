@@ -188,11 +188,10 @@ enum LoopPhase {
     /// Shutdown abandoned unresolved destination work because draining is
     /// disabled.
     ///
-    /// The destination never confirmed that work, so nothing about it may be
-    /// acknowledged. The loop is never quiescent again, feedback stays at the
-    /// last flush LSN, and PostgreSQL replays the events on the next start.
-    /// The abandoned work may be the terminal batch of a table sync, so the
-    /// loop exits paused and no later intent can complete it.
+    /// Nothing about that work was confirmed, so the loop is never quiescent
+    /// again: feedback stays at the last flush LSN and PostgreSQL replays the
+    /// events on the next start. The work may be the terminal batch of a table
+    /// sync, so the loop always exits paused.
     Abandoned,
 }
 
@@ -1420,8 +1419,7 @@ where
             return Ok(Some(result));
         }
 
-        // Read the deadlines up front: the pending flush result branch borrows
-        // the loop state mutably for the whole `select!`.
+        // Copied out first: the flush-result branch mutably borrows the state.
         let durability_deadline = self.state.durability_deadline();
         let flush_deadline = self.state.flush_deadline();
         tokio::select! {
@@ -1525,8 +1523,7 @@ where
             return Ok(Some(result));
         }
 
-        // Read the deadline up front: the pending flush result branch borrows
-        // the loop state mutably for the whole `select!`.
+        // Copied out first: the flush-result branch mutably borrows the state.
         let flush_deadline = self.state.flush_deadline();
         tokio::select! {
             biased;
