@@ -232,7 +232,7 @@ fn split_timestamp_offset(value: &str) -> Option<(&str, &str)> {
 ///
 /// Panics when a fast path accepts an input that chrono rejects or decodes
 /// differently; that panic is the fuzz target's finding signal.
-#[cfg(any(test, feature = "fuzzing"))]
+#[cfg(any(all(test, feature = "test-utils"), feature = "fuzzing"))]
 pub(crate) fn check_fast_paths_match_chrono(value: &str) {
     if let Some(date) = parse_iso_date_fast(value.as_bytes()) {
         assert_eq!(

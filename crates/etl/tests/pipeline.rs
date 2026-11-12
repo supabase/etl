@@ -639,13 +639,13 @@ async fn pipeline_failure_returns_without_destination_teardown() {
     destination
         .inject_fault(
             FaultyOp::WriteEvents,
-            FaultAction::reject(ErrorKind::WithNoRetry, "Test apply failure"),
+            FaultAction::reject(ErrorKind::DestinationError, "Test apply failure"),
         )
         .await;
     insert_users_data(&mut database, &schema.users_schema().name, 2..=2).await;
 
     let error = wait_for_pipeline_error(&pipeline).await;
-    assert_eq!(error.kind(), ErrorKind::WithNoRetry);
+    assert_eq!(error.kind(), ErrorKind::DestinationError);
     assert!(!destination.shutdown_called().await);
     assert_eq!(pipeline.wait().await.unwrap_err().kind(), ErrorKind::InvalidState);
     assert_eq!(pipeline.start().await.unwrap_err().kind(), ErrorKind::InvalidState);
