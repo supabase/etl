@@ -165,6 +165,55 @@ impl ExitIntent {
     }
 }
 
+/// Lifecycle phase of one apply loop invocation.
+///
+/// Phases only move forward. An exit intent can still grow from
+/// [`ExitIntent::Pause`] to [`ExitIntent::Complete`] while exiting or
+/// draining, for example when the terminal batch of a table sync becomes
+/// durable.
+#[derive(Debug, Copy, Clone)]
+enum LoopPhase {
+    /// Replication messages are being ingested and no exit was requested.
+    Running,
+    /// An exit was requested. Intake has stopped, and the loop returns once
+    /// in-flight flushes and durability barriers have settled.
+    Exiting(ExitIntent),
+    /// Shutdown found unresolved destination work and is draining it.
+    ///
+    /// The loop only waits for buffered and in-flight work: it starts no
+    /// table-sync coordination or idle durability barrier, and it enqueues no
+    /// status update.
+    Draining(ExitIntent),
+    /// Shutdown abandoned unresolved destination work because draining is
+    /// disabled.
+    ///
+    /// The destination never confirmed that work, so nothing about it may be
+    /// acknowledged. The loop is never quiescent again, feedback stays at the
+    /// last flush LSN, and PostgreSQL replays the events on the next start.
+    /// The abandoned work may be the terminal batch of a table sync, so the
+    /// loop exits paused and no later intent can complete it.
+    Abandoned,
+}
+
+impl LoopPhase {
+    /// Returns the strongest exit requested so far, if any.
+    fn exit_intent(self) -> Option<ExitIntent> {
+        match self {
+            Self::Running => None,
+            Self::Exiting(exit_intent) | Self::Draining(exit_intent) => Some(exit_intent),
+            Self::Abandoned => Some(ExitIntent::Pause),
+        }
+    }
+
+    /// Returns `true` while no exit has been requested.
+    fn is_running(self) -> bool {
+        match self {
+            Self::Running => true,
+            Self::Exiting(_) | Self::Draining(_) | Self::Abandoned => false,
+        }
+    }
+}
+
 /// Destination flush slot of the apply loop.
 ///
 /// Streaming writes are serialized: at most one flush is in flight, and its
@@ -643,28 +692,12 @@ struct ApplyLoopState {
     replication_lag_metrics: ReplicationLagMetrics,
     /// Events and associated batching information waiting for dispatch.
     event_batch: EventBatch,
-    /// Whether the loop is draining buffered destination work for shutdown.
-    draining_for_shutdown: bool,
-    /// Whether shutdown abandoned destination work the destination never
-    /// completed, because draining is disabled.
-    ///
-    /// While set, the loop is not quiescent, so a status update would report
-    /// the last flush LSN and the abandoned events replay on the next start.
-    /// The loop exits right after abandoning and teardown sends no final
-    /// update, so this is a safety net for any later feedback path rather than
-    /// something a current path reads.
-    abandoned_work_for_shutdown: bool,
+    /// Lifecycle phase of this apply loop invocation.
+    phase: LoopPhase,
     /// The deadline by which the current batch must be flushed.
     flush_deadline: Option<Instant>,
     /// In-flight destination flush and whether a batch is queued behind it.
     flush_state: FlushState,
-    /// The strongest exit that this apply loop invocation should eventually
-    /// return.
-    ///
-    /// Once set, the loop stops ingesting new replication messages and instead
-    /// drains any in-flight flushes and shutdown barriers before returning the
-    /// final result.
-    exit_intent: Option<ExitIntent>,
     /// Fallback snapshot used before a table establishes connection-local
     /// protocol state or receives stored table decoding state.
     ///
@@ -691,11 +724,9 @@ impl ApplyLoopState {
             replication_progress,
             replication_lag_metrics,
             event_batch: EventBatch::default(),
-            draining_for_shutdown: false,
-            abandoned_work_for_shutdown: false,
+            phase: LoopPhase::Running,
             flush_deadline: None,
             flush_state: FlushState::Idle,
-            exit_intent: None,
             bootstrap_snapshot_id,
         }
     }
@@ -789,21 +820,24 @@ impl ApplyLoopState {
     /// before a later keepalive can force durability. The loop remains
     /// non-quiescent until that result confirms durability.
     ///
-    /// Work abandoned at shutdown also keeps the loop non-quiescent: its
-    /// events were received but never confirmed written, so the received LSN
-    /// is not a safe replay frontier.
+    /// Abandoned shutdown work also keeps the loop non-quiescent; see
+    /// [`LoopPhase::Abandoned`].
     fn is_quiescent(&self) -> bool {
+        let work_abandoned = match self.phase {
+            LoopPhase::Running | LoopPhase::Exiting(_) | LoopPhase::Draining(_) => false,
+            LoopPhase::Abandoned => true,
+        };
+
         !self.handling_transaction()
             && !self.has_unresolved_batch_work()
             && self.last_commit_end_lsn.is_none()
-            && !self.abandoned_work_for_shutdown
+            && !work_abandoned
     }
 
     /// Returns whether a keepalive may settle an accepted commit without
     /// interrupting a transaction or competing with buffered destination work.
     fn can_settle_idle_durability(&self) -> bool {
-        self.exit_intent.is_none()
-            && !self.is_draining_for_shutdown()
+        self.phase.is_running()
             && !self.handling_transaction()
             && !self.has_unresolved_batch_work()
             && self.last_commit_end_lsn.is_some()
@@ -933,26 +967,31 @@ impl ApplyLoopState {
         self.has_pending_batch() || self.has_pending_flush_result()
     }
 
-    /// Records a new exit intent if one was produced.
+    /// Records a new exit intent if one was produced, keeping the strongest.
     fn record_exit_intent(&mut self, exit_intent: Option<ExitIntent>) {
         let Some(exit_intent) = exit_intent else {
             return;
         };
 
-        self.exit_intent = match self.exit_intent {
-            Some(current_exit_intent) => Some(current_exit_intent.merge(exit_intent)),
-            None => Some(exit_intent),
+        self.phase = match self.phase {
+            LoopPhase::Running => LoopPhase::Exiting(exit_intent),
+            LoopPhase::Exiting(current) => LoopPhase::Exiting(current.merge(exit_intent)),
+            LoopPhase::Draining(current) => LoopPhase::Draining(current.merge(exit_intent)),
+            LoopPhase::Abandoned => LoopPhase::Abandoned,
         };
     }
 
     /// Returns `true` once any exit has been requested.
     fn exit_requested(&self) -> bool {
-        self.exit_intent.is_some()
+        !self.phase.is_running()
     }
 
     /// Returns `true` once a permanent exit has been requested.
     fn completion_requested(&self) -> bool {
-        matches!(self.exit_intent, Some(ExitIntent::Complete))
+        match self.phase.exit_intent() {
+            Some(ExitIntent::Complete) => true,
+            Some(ExitIntent::Pause) | None => false,
+        }
     }
 
     /// Returns `true` when the apply loop may still accept new replication
@@ -963,7 +1002,7 @@ impl ApplyLoopState {
             return false;
         }
 
-        self.exit_intent.is_none() && !self.is_processing_paused()
+        self.phase.is_running() && !self.is_processing_paused()
     }
 
     /// Returns `true` when the batch deadline timer may still trigger a flush
@@ -1008,30 +1047,37 @@ impl ApplyLoopState {
 
     /// Returns the final result requested by this loop, if any.
     fn exit_result(&self) -> Option<ApplyLoopResult> {
-        self.exit_intent.map(ExitIntent::to_result)
+        self.phase.exit_intent().map(ExitIntent::to_result)
     }
 
     /// Returns `true` when active intake has stopped to drain shutdown work.
     fn is_draining_for_shutdown(&self) -> bool {
-        self.draining_for_shutdown
+        match self.phase {
+            LoopPhase::Running | LoopPhase::Exiting(_) | LoopPhase::Abandoned => false,
+            LoopPhase::Draining(_) => true,
+        }
     }
 
     /// Stops active intake and starts draining buffered shutdown work.
+    ///
+    /// Shutting down pauses the loop unless a stronger exit was already
+    /// requested.
     fn start_draining_for_shutdown(&mut self) {
-        self.draining_for_shutdown = true;
+        self.phase = match self.phase {
+            LoopPhase::Running => LoopPhase::Draining(ExitIntent::Pause),
+            LoopPhase::Exiting(exit_intent) | LoopPhase::Draining(exit_intent) => {
+                LoopPhase::Draining(exit_intent)
+            }
+            LoopPhase::Abandoned => LoopPhase::Abandoned,
+        };
     }
 
     /// Abandons buffered and in-flight destination work at shutdown and
     /// returns how many buffered events were discarded.
     ///
-    /// This is the shutdown path when draining is disabled. The destination
-    /// never received the buffered events, and the pending write result is
-    /// dropped unobserved, so nothing about either may be acknowledged: the
-    /// loop stays non-quiescent, feedback stays at the last flush LSN, and
-    /// PostgreSQL replays the events on the next start. The abandoned work may
-    /// carry the terminal catch-up batch of a table sync, whose `Complete`
-    /// intent is earned only once that batch is durable, so the exit intent is
-    /// pinned to a pause. With nothing unresolved, the state is left untouched.
+    /// This is the shutdown path when draining is disabled. It moves the loop
+    /// to [`LoopPhase::Abandoned`]. With nothing unresolved, the state is left
+    /// untouched.
     fn abandon_work_for_shutdown(&mut self) -> usize {
         if !self.has_unresolved_batch_work() {
             return 0;
@@ -1043,8 +1089,7 @@ impl ApplyLoopState {
         self.event_batch = EventBatch::empty();
         self.flush_state = FlushState::Idle;
         self.reset_flush_deadline();
-        self.exit_intent = Some(ExitIntent::Pause);
-        self.abandoned_work_for_shutdown = true;
+        self.phase = LoopPhase::Abandoned;
 
         discarded_events
     }
