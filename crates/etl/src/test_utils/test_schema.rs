@@ -375,7 +375,6 @@ pub fn events_equal_excluding_fields(left: &Event, right: &Event) -> bool {
                     .column_schemas()
                     .eq(right.replicated_table_schema.column_schemas())
         }
-        (Event::Unsupported, Event::Unsupported) => true,
         _ => false,
     }
 }

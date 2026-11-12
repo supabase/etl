@@ -577,7 +577,7 @@ pub enum BenchDestination {
     ClickHouse(CountingDestination<ClickHouseDestination<NotifyingStore>>),
     /// DuckLake destination variant.
     #[cfg(feature = "ducklake")]
-    DuckLake(CountingDestination<DuckLakeDestination<NotifyingStore>>),
+    DuckLake(Box<CountingDestination<DuckLakeDestination<NotifyingStore>>>),
     /// Snowflake destination variant.
     #[cfg(feature = "snowflake")]
     Snowflake(CountingDestination<SnowflakeDestination<NotifyingStore>>),
@@ -719,7 +719,7 @@ impl BenchDestination {
                 .build()
                 .await?;
 
-                Ok(Self::DuckLake(CountingDestination::new(destination)))
+                Ok(Self::DuckLake(Box::new(CountingDestination::new(destination))))
             }
             #[cfg(not(feature = "ducklake"))]
             DestinationType::DuckLake => {
@@ -1422,7 +1422,6 @@ fn classify_events(events: &[Event]) -> EventBatchCounts {
             Event::Begin(_) | Event::Commit(_) => {
                 counts.transaction_events += 1;
             }
-            Event::Unsupported => {}
         }
     }
 

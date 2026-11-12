@@ -1109,7 +1109,7 @@ mod tests {
                 options: 0,
                 truncated_tables: vec![schema.clone()],
             }),
-            Event::Unsupported,
+            Event::Relation(RelationEvent { replicated_table_schema: schema.clone() }),
         ]
         .into_iter()
         .peekable();
@@ -1121,7 +1121,7 @@ mod tests {
         assert_eq!(operations[0].1, first_offset);
         assert_eq!(operations[1].0.id(), schema.id());
         assert_eq!(operations[1].1, second_offset);
-        assert!(matches!(iter.next(), Some(Event::Unsupported)));
+        assert!(matches!(iter.next(), Some(Event::Relation(_))));
     }
 
     /// Rejection and restart leave metadata applied and send no DDL or channel

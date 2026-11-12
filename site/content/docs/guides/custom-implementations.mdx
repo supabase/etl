@@ -519,7 +519,6 @@ impl Destination for HttpDestination {
                     Event::Commit(_) => json!({"type": "commit"}),
                     Event::Relation(r) => json!({"type": "relation", "table": r.replicated_table_schema.name().to_string()}),
                     Event::Truncate(t) => json!({"type": "truncate", "tables": t.truncated_tables.iter().map(|table| table.name().to_string()).collect::<Vec<_>>() }),
-                    Event::Unsupported => json!({"type": "unsupported"}),
                 }
             }).collect::<Vec<_>>()
         });

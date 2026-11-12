@@ -5,7 +5,7 @@ mod table_row;
 mod text;
 mod time;
 
-#[cfg(any(test, feature = "fuzzing"))]
+#[cfg(any(all(test, feature = "test-utils"), feature = "fuzzing"))]
 pub(crate) use event::RelationSchemaMismatchKind;
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) use event::convert_tuple_to_row;

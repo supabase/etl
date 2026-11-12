@@ -157,7 +157,10 @@ fn crash_replay_cases(shape: WorkloadShape) -> impl Strategy<Value = CrashReplay
 }
 
 /// Where a stored version came from.
+///
+/// Only the ClickHouse target reads back a change log of versions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(not(all(feature = "clickhouse", feature = "test-utils")), expect(dead_code))]
 pub(crate) enum VersionOrigin {
     /// The initial table copy.
     Copy,
@@ -181,6 +184,7 @@ pub(crate) struct StoredVersion {
 
 impl StoredVersion {
     /// Creates a stored version of key `id` at `position`.
+    #[cfg_attr(not(all(feature = "clickhouse", feature = "test-utils")), expect(dead_code))]
     pub(crate) fn new(
         origin: VersionOrigin,
         id: i64,
