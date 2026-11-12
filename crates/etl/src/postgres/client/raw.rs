@@ -950,11 +950,13 @@ mod tests {
                 replication_options(APP_NAME_REPLICATOR_REPLICATION.to_owned()),
             )
             .unwrap();
+
             // Keep the observer independent, with one second of scheduling
             // tolerance.
             let deadline = Instant::now() + Duration::from_secs(31);
             let connection =
                 AbortOnDropHandle::new(spawn(PgReplicationClient::connect_with_kind(config, kind)));
+
             let (mut socket, _) =
                 timeout(Duration::from_secs(5), listener.accept()).await.unwrap().unwrap();
             let startup_len = socket.read_u32().await.unwrap();
@@ -966,11 +968,13 @@ mod tests {
             pause();
             let result = timeout_at(deadline, connection).await;
             resume();
+
             let error = result.unwrap().unwrap().err().unwrap();
             assert_eq!(error.kind(), ErrorKind::SourceConnectionFailed);
             assert_eq!(error.retryability(), Retryability::Retryable);
             assert!(error.source().is_some());
             assert_eq!(error.description(), Some("Postgres connection timed out"));
+
             let mut remaining = Vec::new();
             assert_eq!(
                 timeout(Duration::from_secs(5), socket.read_to_end(&mut remaining))
