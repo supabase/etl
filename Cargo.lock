@@ -3747,7 +3747,7 @@ dependencies = [
 [[package]]
 name = "postgres-protocol"
 version = "0.6.12"
-source = "git+https://github.com/supabase/rust-postgres?rev=8086f1fd19bd9abc0da86ba80f8b7dbdd676cb3e#8086f1fd19bd9abc0da86ba80f8b7dbdd676cb3e"
+source = "git+https://github.com/supabase/rust-postgres?rev=ce3e70c0599b017e879a13e9ec2d3aad3e7bcf5b#ce3e70c0599b017e879a13e9ec2d3aad3e7bcf5b"
 dependencies = [
  "base64 0.23.1",
  "byteorder",
@@ -3764,7 +3764,7 @@ dependencies = [
 [[package]]
 name = "postgres-replication"
 version = "0.6.7"
-source = "git+https://github.com/supabase/rust-postgres?rev=8086f1fd19bd9abc0da86ba80f8b7dbdd676cb3e#8086f1fd19bd9abc0da86ba80f8b7dbdd676cb3e"
+source = "git+https://github.com/supabase/rust-postgres?rev=ce3e70c0599b017e879a13e9ec2d3aad3e7bcf5b#ce3e70c0599b017e879a13e9ec2d3aad3e7bcf5b"
 dependencies = [
  "byteorder",
  "bytes",
@@ -3779,7 +3779,7 @@ dependencies = [
 [[package]]
 name = "postgres-types"
 version = "0.2.14"
-source = "git+https://github.com/supabase/rust-postgres?rev=8086f1fd19bd9abc0da86ba80f8b7dbdd676cb3e#8086f1fd19bd9abc0da86ba80f8b7dbdd676cb3e"
+source = "git+https://github.com/supabase/rust-postgres?rev=ce3e70c0599b017e879a13e9ec2d3aad3e7bcf5b#ce3e70c0599b017e879a13e9ec2d3aad3e7bcf5b"
 dependencies = [
  "bytes",
  "chrono",
@@ -5038,8 +5038,7 @@ dependencies = [
 [[package]]
 name = "sqlx-core"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "05b44e85bf579a8eeb4ceaa77a3a523baf2bf0e9bac7e40f405d537b5d2d5ccb"
+source = "git+https://github.com/supabase/sqlx?rev=95f5a39afd7f5c4e8ffcef6b72f8d8f30b4cfc8f#95f5a39afd7f5c4e8ffcef6b72f8d8f30b4cfc8f"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -5141,8 +5140,7 @@ dependencies = [
 [[package]]
 name = "sqlx-postgres"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "87a2bdd6e83f6b3ea525ca9fee568030508b58355a43d0b2c1674d5f79dcd65e"
+source = "git+https://github.com/supabase/sqlx?rev=95f5a39afd7f5c4e8ffcef6b72f8d8f30b4cfc8f#95f5a39afd7f5c4e8ffcef6b72f8d8f30b4cfc8f"
 dependencies = [
  "atoi 2.0.0",
  "base64 0.22.1",
@@ -5551,7 +5549,7 @@ dependencies = [
 [[package]]
 name = "tokio-postgres"
 version = "0.7.18"
-source = "git+https://github.com/supabase/rust-postgres?rev=8086f1fd19bd9abc0da86ba80f8b7dbdd676cb3e#8086f1fd19bd9abc0da86ba80f8b7dbdd676cb3e"
+source = "git+https://github.com/supabase/rust-postgres?rev=ce3e70c0599b017e879a13e9ec2d3aad3e7bcf5b#ce3e70c0599b017e879a13e9ec2d3aad3e7bcf5b"
 dependencies = [
  "async-trait",
  "byteorder",

@@ -77,6 +77,12 @@ jobs:
           dockerfile = Path("crates/etl-replicator/Dockerfile").read_text()
           if not re.search(rf"^ARG RUST_VERSION={re.escape(toolchain)}$", dockerfile, re.M):
               raise SystemExit("Docker Rust version must match rust-toolchain.toml")
+          network_dockerfile = Path("scripts/network-tests/Dockerfile").read_text()
+          if not re.search(rf"^FROM rust:{re.escape(toolchain)}-", network_dockerfile, re.M):
+              raise SystemExit("Network fixture Rust image must match rust-toolchain.toml")
+          if not re.search(rf"^ENV RUSTUP_TOOLCHAIN={re.escape(toolchain)}(?:\s|$)", network_dockerfile, re.M):
+              raise SystemExit("Network fixture Rust override must match rust-toolchain.toml")
+
           for member in workspace["members"]:
               with (Path(member) / "Cargo.toml").open("rb") as source:
                   declared = tomllib.load(source)["package"].get("rust-version")
@@ -143,6 +149,11 @@ jobs:
             -p etl -p etl-postgres -p etl-maintenance -p etl-destinations \
             --no-default-features \
             --features "${TLS_FEATURES}"
+
+      - name: Check AWS-LC integration tests
+        run: |
+          cargo check --locked -p etl --test main --no-default-features \
+            --features tls-rustls-aws-lc-rs,test-utils
 
   snowflake:
     name: Features (Snowflake only)
@@ -349,10 +360,43 @@ jobs:
         with:
           platform: ${{ matrix.platform }}
 
+  hostname-connections:
+    name: Hostname connections
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      DOCKER_CONTEXT: default
+      NETWORK_TEST_SUITE: etl
+      NETWORK_LAB_DIR: ${{ github.workspace }}-hostname-lab
+      ETL_WORKSPACE: ${{ github.workspace }}
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Start the isolated network fixture
+        run: bash "$ETL_WORKSPACE/scripts/network-tests/run.sh" start
+      - name: Test hostname connections and endpoint changes
+        run: bash "$ETL_WORKSPACE/scripts/network-tests/run.sh" test
+      - name: Test fallback with IPv4 ordered first
+        run: bash "$ETL_WORKSPACE/scripts/network-tests/run.sh" ipv4-first
+      - name: Stop the isolated network fixture
+        if: always()
+        run: bash "$ETL_WORKSPACE/scripts/network-tests/run.sh" down
+      - name: Upload network test logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hostname-connections
+          path: ${{ env.NETWORK_LAB_DIR }}/*.log
+          if-no-files-found: ignore
+          retention-days: 7
+
   ci-passed:
     name: CI passed
     if: always()
-    needs: [format, clippy, tls, snowflake, workflow-lint, test-build, test, coverage, multigres, fuzz-corpus, image]
+    needs: [hostname-connections, format, clippy, tls, snowflake, workflow-lint, test-build, test, coverage, multigres, fuzz-corpus, image]
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 5
     permissions: {}

@@ -13,7 +13,7 @@ use rustls::{
     ClientConfig,
     pki_types::{CertificateDer, pem::PemObject},
 };
-use tokio::sync::watch;
+use tokio::{sync::watch, time::timeout};
 use tokio_postgres::{
     Client, Config, Connection, IsolationLevel, NoTls, SimpleQueryMessage, Socket, Transaction,
     config::ReplicationMode, error::SqlState, tls::MakeTlsConnect, types::PgLsn,
@@ -43,6 +43,9 @@ use crate::{
 /// Slot deletion uses `WAIT`, which can block until the slot is no longer in
 /// use. This timeout ensures calls are bounded and cannot wait forever.
 const DELETE_SLOT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Bounds DNS, socket establishment, TLS negotiation, and authentication
+/// together.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Default duration unit used when `pg_settings.unit` is empty.
 const PG_SETTINGS_DEFAULT_DURATION_UNIT: &str = "ms";
 /// Base application name for ETL logical replication connections.
@@ -312,10 +315,17 @@ impl PgReplicationClient {
         connection_config: PgReplicationConnectionConfig,
         kind: ConnectionKind,
     ) -> EtlResult<Self> {
-        match connection_config.pg_connection_config().tls.enabled {
-            true => PgReplicationClient::connect_tls(connection_config, kind).await,
-            false => PgReplicationClient::connect_no_tls(connection_config, kind).await,
-        }
+        timeout(CONNECT_TIMEOUT, async {
+            match connection_config.pg_connection_config().tls.enabled {
+                true => PgReplicationClient::connect_tls(connection_config, kind).await,
+                false => PgReplicationClient::connect_no_tls(connection_config, kind).await,
+            }
+        })
+        .await
+        .map_err(|error| {
+            etl_error!(ErrorKind::SourceConnectionFailed, "Postgres connection timed out")
+                .with_source(error)
+        })?
     }
 
     /// Establishes a connection to Postgres without TLS encryption.
@@ -903,13 +913,78 @@ impl PgReplicationClient {
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error;
+
+    use etl_config::shared::{TcpKeepaliveConfig, TlsConfig};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
+        spawn,
         sync::oneshot,
+        time::{Instant, pause, resume, timeout_at},
     };
+    use tokio_util::task::AbortOnDropHandle;
 
     use super::*;
+    use crate::error::Retryability;
+
+    /// An accepted socket with no authentication response must respect the
+    /// whole-connection deadline and close for both replication and copy
+    /// clients.
+    #[tokio::test]
+    async fn stalled_startup_times_out_and_closes_socket() {
+        for kind in [ConnectionKind::Replication, ConnectionKind::Child] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let config = PgConnectionConfig {
+                host: "127.0.0.1".to_owned(),
+                hostaddr: None,
+                port: listener.local_addr().unwrap().port(),
+                name: "unused".to_owned(),
+                username: "unused".to_owned(),
+                password: None,
+                tls: TlsConfig { enabled: false, trusted_root_certs: String::new() },
+                keepalive: TcpKeepaliveConfig::default(),
+            };
+            let config = PgReplicationConnectionConfig::new(
+                config,
+                replication_options(APP_NAME_REPLICATOR_REPLICATION.to_owned()),
+            )
+            .unwrap();
+
+            // Keep the observer independent, with one second of scheduling
+            // tolerance.
+            let deadline = Instant::now() + Duration::from_secs(31);
+            let connection =
+                AbortOnDropHandle::new(spawn(PgReplicationClient::connect_with_kind(config, kind)));
+
+            let (mut socket, _) =
+                timeout(Duration::from_secs(5), listener.accept()).await.unwrap().unwrap();
+            let startup_len = socket.read_u32().await.unwrap();
+            let mut startup = vec![0; usize::try_from(startup_len - 4).unwrap()];
+            socket.read_exact(&mut startup).await.unwrap();
+
+            // Pause only after the server has observed startup, so the test
+            // exercises authentication waiting rather than a TCP race.
+            pause();
+            let result = timeout_at(deadline, connection).await;
+            resume();
+
+            let error = result.unwrap().unwrap().err().unwrap();
+            assert_eq!(error.kind(), ErrorKind::SourceConnectionFailed);
+            assert_eq!(error.retryability(), Retryability::Retryable);
+            assert!(error.source().is_some());
+            assert_eq!(error.description(), Some("Postgres connection timed out"));
+
+            let mut remaining = Vec::new();
+            assert_eq!(
+                timeout(Duration::from_secs(5), socket.read_to_end(&mut remaining))
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                0
+            );
+        }
+    }
 
     /// Certificate-less bundles fail before a crypto provider or connection
     /// is needed, including nonblank input silently skipped by the PEM parser.
