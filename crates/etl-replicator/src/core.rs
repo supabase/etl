@@ -41,7 +41,7 @@ type ReplicatorStore = ErrorReportingStateStore<PostgresStore>;
 
 /// Replicator lifecycle updated by the runner and observed by health probes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(not(feature = "any-destination"), allow(dead_code))]
+#[cfg_attr(not(any(feature = "any-destination", test)), expect(dead_code))]
 pub(crate) enum ReplicatorState {
     /// Store, destination, or pipeline initialization is still in progress.
     Initializing,

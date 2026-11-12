@@ -4,10 +4,11 @@
 //! table contents by querying DuckLake directly through DuckDB.
 
 use duckdb::Connection;
+#[cfg(feature = "test-utils")]
+use etl::pipeline::PipelineId;
 use etl::{
     config::BatchConfig,
     event::EventType,
-    pipeline::PipelineId,
     store::StateStore,
     test_utils::{
         database::{spawn_source_database, test_table_name},
