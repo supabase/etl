@@ -356,7 +356,7 @@ jobs:
     env:
       DOCKER_CONTEXT: default
       NETWORK_TEST_SUITE: etl
-      NETWORK_LAB_DIR: ${{ github.workspace }}/../hostname-lab
+      NETWORK_LAB_DIR: ${{ github.workspace }}-hostname-lab
       ETL_WORKSPACE: ${{ github.workspace }}
       CARGO_BUILD_JOBS: "2"
     steps:

@@ -39,7 +39,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream, lookup_host},
     spawn,
-    time::{advance, pause, resume, sleep, timeout},
+    time::{Instant as TokioInstant, pause, resume, sleep, timeout, timeout_at},
 };
 use tokio_postgres::{Config as TokioPgConfig, error::SqlState};
 use tokio_util::task::AbortOnDropHandle;
@@ -386,6 +386,9 @@ async fn stalled_handshakes_time_out_and_close_sockets() -> TestResult {
             },
             keepalive: TcpKeepaliveConfig::default(),
         };
+        // Keep the observer independent, with one second of scheduling
+        // tolerance.
+        let deadline = TokioInstant::now() + Duration::from_secs(31);
         let connection = AbortOnDropHandle::new(spawn(async move {
             if driver == "replication_tls" {
                 PgReplicationClient::connect(config)
@@ -401,19 +404,27 @@ async fn stalled_handshakes_time_out_and_close_sockets() -> TestResult {
             let length = socket.read_u32().await?;
             let mut startup = vec![0; usize::try_from(length - 4)?];
             socket.read_exact(&mut startup).await?;
+            assert_eq!(startup, [4, 210, 22, 47]);
             if tls_enabled {
-                assert_eq!(startup, [4, 210, 22, 47]);
                 socket.write_all(b"S").await?;
                 let mut client_hello = [0; 4096];
                 assert!(socket.read(&mut client_hello).await? > 0);
+            } else {
+                // SQLx prefers TLS; reject it and observe protocol-3.0 startup
+                // before stalling authentication.
+                socket.write_all(b"N").await?;
+                let length = socket.read_u32().await?;
+                startup.resize(usize::try_from(length - 4)?, 0);
+                socket.read_exact(&mut startup).await?;
+                assert!(startup.starts_with(&[0, 3, 0, 0]));
             }
             Ok::<_, Box<dyn Error + Send + Sync>>(())
         })
         .await??;
         pause();
-        advance(Duration::from_secs(30)).await;
-        let error = connection.await?.unwrap_err();
+        let result = timeout_at(deadline, connection).await;
         resume();
+        let error = result??.unwrap_err();
         if driver == "replication_tls" {
             assert_eq!(
                 error.downcast_ref::<EtlError>().unwrap().kind(),

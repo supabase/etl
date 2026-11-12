@@ -921,7 +921,7 @@ mod tests {
         net::TcpListener,
         spawn,
         sync::oneshot,
-        time::{advance, pause, resume},
+        time::{Instant, pause, resume, timeout_at},
     };
     use tokio_util::task::AbortOnDropHandle;
 
@@ -950,6 +950,9 @@ mod tests {
                 replication_options(APP_NAME_REPLICATOR_REPLICATION.to_owned()),
             )
             .unwrap();
+            // Keep the observer independent, with one second of scheduling
+            // tolerance.
+            let deadline = Instant::now() + Duration::from_secs(31);
             let connection =
                 AbortOnDropHandle::new(spawn(PgReplicationClient::connect_with_kind(config, kind)));
             let (mut socket, _) =
@@ -958,12 +961,12 @@ mod tests {
             let mut startup = vec![0; usize::try_from(startup_len - 4).unwrap()];
             socket.read_exact(&mut startup).await.unwrap();
 
-            // Advance time only after the server has observed startup, so the
-            // test exercises authentication waiting rather than a TCP race.
+            // Pause only after the server has observed startup, so the test
+            // exercises authentication waiting rather than a TCP race.
             pause();
-            advance(CONNECT_TIMEOUT).await;
-            let error = connection.await.unwrap().err().unwrap();
+            let result = timeout_at(deadline, connection).await;
             resume();
+            let error = result.unwrap().unwrap().err().unwrap();
             assert_eq!(error.kind(), ErrorKind::SourceConnectionFailed);
             assert_eq!(error.retryability(), Retryability::Retryable);
             assert!(error.source().is_some());
