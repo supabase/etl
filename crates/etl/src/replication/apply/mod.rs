@@ -4510,7 +4510,7 @@ mod tests {
         },
         error::ErrorKind,
         etl_error,
-        event::Event,
+        event::{BeginEvent, Event},
         replication::{
             ReplicationLagMetrics, TableDecodingState,
             apply::{
@@ -4655,14 +4655,19 @@ mod tests {
         )
     }
 
+    /// Builds a table-independent event for batch bookkeeping tests.
+    fn begin_event() -> Event {
+        Event::Begin(BeginEvent { commit_lsn: PgLsn::from(1), tx_ordinal: 0, timestamp: 0, xid: 1 })
+    }
+
     #[test]
     fn event_batch_sums_event_size_hints() {
         let mut batch = EventBatch::with_capacity(8);
 
-        let event = Event::Unsupported;
+        let event = begin_event();
         let event_size_hint_bytes = event.size_hint();
         batch.push(event, StreamingPayloadMetadata::default());
-        batch.push(Event::Unsupported, StreamingPayloadMetadata::default());
+        batch.push(begin_event(), StreamingPayloadMetadata::default());
 
         assert_eq!(batch.size_hint_bytes(), 2 * event_size_hint_bytes);
     }
@@ -4840,7 +4845,7 @@ mod tests {
         assert!(!state.can_settle_idle_durability());
         state.open_transaction = None;
 
-        state.event_batch.push(Event::Unsupported, StreamingPayloadMetadata::default());
+        state.event_batch.push(begin_event(), StreamingPayloadMetadata::default());
         assert!(!state.can_settle_idle_durability());
         state.event_batch.take();
 
@@ -4872,7 +4877,7 @@ mod tests {
         state.update_last_received_lsn(300.into());
         let (_result, pending) = pending_write_result();
         state.pending_flush_result = Some(pending);
-        state.event_batch.push(Event::Unsupported, StreamingPayloadMetadata::default());
+        state.event_batch.push(begin_event(), StreamingPayloadMetadata::default());
         state.pause_processing();
         state.set_flush_deadline_if_needed(std::time::Duration::from_secs(60));
         // The in-flight write may be the terminal catch-up batch of a table

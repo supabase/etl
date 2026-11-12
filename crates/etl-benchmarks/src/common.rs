@@ -1422,7 +1422,6 @@ fn classify_events(events: &[Event]) -> EventBatchCounts {
             Event::Begin(_) | Event::Commit(_) => {
                 counts.transaction_events += 1;
             }
-            Event::Unsupported => {}
         }
     }
 

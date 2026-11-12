@@ -1246,7 +1246,7 @@ impl Destination for HoldingDmlDispatchDestination {
             Event::Update(update) => Some(update.commit_lsn),
             Event::Delete(delete) => Some(delete.commit_lsn),
             Event::Truncate(truncate) => Some(truncate.commit_lsn),
-            Event::Begin(_) | Event::Commit(_) | Event::Relation(_) | Event::Unsupported => None,
+            Event::Begin(_) | Event::Commit(_) | Event::Relation(_) => None,
         }) {
             let gate = self.gate.lock().unwrap().take();
             if let Some(gate) = gate {
