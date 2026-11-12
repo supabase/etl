@@ -327,7 +327,6 @@ enum AppendRequestProcessResult {
 enum AppendProcessingResult {
     Success,
     Retry { pending_requests: Vec<RetryableAppendRequest> },
-    Error(EtlError),
 }
 
 /// An append request that should be retried after a local Storage Write delay.
@@ -1405,7 +1404,6 @@ impl BigQueryClient {
                     retry_delay = (retry_delay * 2).min(STORAGE_WRITE_MAX_RETRY_DELAY);
                     attempt += 1;
                 }
-                AppendProcessingResult::Error(error) => return Err(error),
             }
         }
     }
@@ -1460,7 +1458,7 @@ impl BigQueryClient {
                     });
                 }
 
-                return Ok(AppendProcessingResult::Error(bq_error_to_etl_error(error)));
+                return Err(bq_error_to_etl_error(error));
             }
         };
 
@@ -1523,7 +1521,7 @@ impl BigQueryClient {
         }
 
         if !errors.is_empty() {
-            return Ok(AppendProcessingResult::Error(errors.into()));
+            return Err(errors.into());
         }
 
         if retryable_request_details.iter().any(Option::is_some) {
