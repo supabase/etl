@@ -3736,21 +3736,11 @@ mod apply_worker {
         readiness: Option<&ReadinessInputs>,
         action: &impl fmt::Debug,
     ) {
-        let table_state_lsn = match table_state {
-            TableState::SyncWait { lsn }
-            | TableState::Catchup { lsn }
-            | TableState::SyncDone { lsn, .. } => Some(*lsn),
-            TableState::Init
-            | TableState::DataSync
-            | TableState::FinishedCopy
-            | TableState::Ready
-            | TableState::Errored { .. } => None,
-        };
         debug!(
             worker_type = %WorkerType::Apply,
             table_id = table_id.0,
             table_state_type = %table_state.as_type(),
-            ?table_state_lsn,
+            %table_state,
             worker_running,
             trigger,
             %current_lsn,
