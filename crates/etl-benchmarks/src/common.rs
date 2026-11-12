@@ -459,7 +459,10 @@ impl<D> CountingDestination<D> {
         stats.truncates.fetch_add(counts.truncates, Ordering::Relaxed);
         stats.relations.fetch_add(counts.relations, Ordering::Relaxed);
         stats.transaction_events.fetch_add(counts.transaction_events, Ordering::Relaxed);
-        update_atomic_max(&stats.max_event_batch_size, counts.total_events);
+        let maximum = &stats.max_event_batch_size;
+        if counts.total_events > maximum.load(Ordering::Relaxed) {
+            maximum.fetch_max(counts.total_events, Ordering::Relaxed);
+        }
     }
 }
 
@@ -1426,17 +1429,6 @@ fn classify_events(events: &[Event]) -> EventBatchCounts {
     }
 
     counts
-}
-
-fn update_atomic_max(value: &AtomicU64, candidate: u64) {
-    let mut current = value.load(Ordering::Relaxed);
-    while candidate > current {
-        match value.compare_exchange_weak(current, candidate, Ordering::Relaxed, Ordering::Relaxed)
-        {
-            Ok(_) => return,
-            Err(next) => current = next,
-        }
-    }
 }
 
 async fn drop_replication_slot(pool: &PgPool, slot_name: &str) {
