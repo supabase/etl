@@ -165,6 +165,25 @@ impl ExitIntent {
     }
 }
 
+/// Destination flush slot of the apply loop.
+///
+/// Streaming writes are serialized: at most one flush is in flight, and its
+/// result must be processed before the next batch is dispatched.
+#[derive(Debug)]
+enum FlushState {
+    /// No flush is in flight, so the next batch can be dispatched right away.
+    Idle,
+    /// A flush is in flight. Its result advances the last flush LSN.
+    ///
+    /// Intake continues and the next batch keeps filling.
+    InFlight(PendingWriteEventsResult),
+    /// A flush is in flight and the buffered batch is already due behind it.
+    ///
+    /// Message intake and deadline-driven flush attempts stop until the
+    /// in-flight result resolves and the queued batch is dispatched.
+    InFlightWithQueuedBatch(PendingWriteEventsResult),
+}
+
 /// Resources for the apply worker during the apply loop.
 ///
 /// Contains all state and dependencies needed by the apply worker to coordinate
@@ -637,8 +656,8 @@ struct ApplyLoopState {
     abandoned_work_for_shutdown: bool,
     /// The deadline by which the current batch must be flushed.
     flush_deadline: Option<Instant>,
-    /// Destination write result waiting to advance the last flush LSN.
-    pending_flush_result: Option<PendingWriteEventsResult>,
+    /// In-flight destination flush and whether a batch is queued behind it.
+    flush_state: FlushState,
     /// The strongest exit that this apply loop invocation should eventually
     /// return.
     ///
@@ -646,13 +665,6 @@ struct ApplyLoopState {
     /// drains any in-flight flushes and shutdown barriers before returning the
     /// final result.
     exit_intent: Option<ExitIntent>,
-    /// Set to `true` when a flush was deferred because another flush result was
-    /// still in flight.
-    ///
-    /// While this is set, the loop stops both deadline-driven flush attempts
-    /// and new message intake until the in-flight flush resolves and the queued
-    /// batch can be retried.
-    processing_paused: bool,
     /// Fallback snapshot used before a table establishes connection-local
     /// protocol state or receives stored table decoding state.
     ///
@@ -682,9 +694,8 @@ impl ApplyLoopState {
             draining_for_shutdown: false,
             abandoned_work_for_shutdown: false,
             flush_deadline: None,
-            pending_flush_result: None,
+            flush_state: FlushState::Idle,
             exit_intent: None,
-            processing_paused: false,
             bootstrap_snapshot_id,
         }
     }
@@ -881,24 +892,39 @@ impl ApplyLoopState {
     /// Returns `true` if there is a batch flush in flight whose result has not
     /// yet resolved.
     fn has_pending_flush_result(&self) -> bool {
-        self.pending_flush_result.is_some()
+        match self.flush_state {
+            FlushState::Idle => false,
+            FlushState::InFlight(_) | FlushState::InFlightWithQueuedBatch(_) => true,
+        }
     }
 
     /// Returns the in-flight flush result so the loop can await it.
     fn pending_flush_result_mut(&mut self) -> Option<&mut PendingWriteEventsResult> {
-        self.pending_flush_result.as_mut()
+        match &mut self.flush_state {
+            FlushState::Idle => None,
+            FlushState::InFlight(pending_flush_result)
+            | FlushState::InFlightWithQueuedBatch(pending_flush_result) => {
+                Some(pending_flush_result)
+            }
+        }
     }
 
     /// Takes the in-flight flush result out of a loop that is about to exit.
     fn take_pending_flush_result(&mut self) -> Option<PendingWriteEventsResult> {
-        self.pending_flush_result.take()
+        match std::mem::replace(&mut self.flush_state, FlushState::Idle) {
+            FlushState::Idle => None,
+            FlushState::InFlight(pending_flush_result)
+            | FlushState::InFlightWithQueuedBatch(pending_flush_result) => {
+                Some(pending_flush_result)
+            }
+        }
     }
 
     /// Records the result of a flush that was just handed to the destination.
     fn record_dispatched_flush(&mut self, pending_flush_result: PendingWriteEventsResult) {
         debug_assert!(!self.has_pending_flush_result());
 
-        self.pending_flush_result = Some(pending_flush_result);
+        self.flush_state = FlushState::InFlight(pending_flush_result);
     }
 
     /// Returns `true` if any buffered or in-flight destination batch work is
@@ -937,40 +963,47 @@ impl ApplyLoopState {
             return false;
         }
 
-        self.exit_intent.is_none() && !self.processing_paused
+        self.exit_intent.is_none() && !self.is_processing_paused()
     }
 
     /// Returns `true` when the batch deadline timer may still trigger a flush
     /// for buffered work.
     fn can_wait_for_deadline(&self) -> bool {
-        !self.processing_paused && self.has_pending_batch()
+        !self.is_processing_paused() && self.has_pending_batch()
     }
 
     /// Returns `true` while a buffered batch is queued behind an in-flight
     /// flush.
     fn is_processing_paused(&self) -> bool {
-        self.processing_paused
+        match self.flush_state {
+            FlushState::Idle | FlushState::InFlight(_) => false,
+            FlushState::InFlightWithQueuedBatch(_) => true,
+        }
     }
 
-    /// Marks the current pending batch as paused behind an in-flight flush.
+    /// Queues the buffered batch behind the in-flight flush.
     fn pause_processing(&mut self) {
         debug_assert!(self.has_pending_flush_result());
         debug_assert!(self.has_pending_batch());
 
-        self.processing_paused = true;
+        if let Some(pending_flush_result) = self.take_pending_flush_result() {
+            self.flush_state = FlushState::InFlightWithQueuedBatch(pending_flush_result);
+        }
     }
 
-    /// Resumes processing by clearing the existing pending flush result and
-    /// enabling processing.
+    /// Clears the resolved in-flight flush and returns whether a queued batch
+    /// must now be dispatched.
     fn resume_processing(&mut self) -> bool {
         debug_assert!(self.has_pending_flush_result());
 
-        let prev_processing_paused = std::mem::replace(&mut self.processing_paused, false);
-        self.pending_flush_result = None;
+        match std::mem::replace(&mut self.flush_state, FlushState::Idle) {
+            FlushState::Idle | FlushState::InFlight(_) => false,
+            FlushState::InFlightWithQueuedBatch(_) => {
+                debug_assert!(self.has_pending_batch());
 
-        debug_assert!(!prev_processing_paused || self.has_pending_batch());
-
-        prev_processing_paused
+                true
+            }
+        }
     }
 
     /// Returns the final result requested by this loop, if any.
@@ -1008,8 +1041,7 @@ impl ApplyLoopState {
         // for reuse.
         let discarded_events = self.event_batch.len();
         self.event_batch = EventBatch::empty();
-        self.pending_flush_result = None;
-        self.processing_paused = false;
+        self.flush_state = FlushState::Idle;
         self.reset_flush_deadline();
         self.exit_intent = Some(ExitIntent::Pause);
         self.abandoned_work_for_shutdown = true;
