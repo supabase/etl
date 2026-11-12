@@ -14,14 +14,14 @@ use etl::{
     store::{PostgresStore, StateStore, TableStateType},
     test_utils::{
         cdc_workload::{
-            AfterFaultStep, DeliveryOrder, TxPhase, WORKLOAD_PUBLICATION, WORKLOAD_TIMEOUT,
-            Workload, WorkloadCoverage, WorkloadRunner, assert_workload_converged,
+            AfterFaultStep, DeliveryOrder, TxPhase, WORKLOAD_TIMEOUT, Workload, WorkloadCoverage,
+            WorkloadRunner, assert_workload_converged, create_workload_pipeline,
             create_workload_tables, read_source_rows, sync_workloads,
         },
         database::spawn_source_database,
         faults::{FaultyOp, HoldHandle},
         memory_destination::MemoryDestination,
-        pipeline::{create_pipeline, random_pipeline_id},
+        pipeline::random_pipeline_id,
         property::{block_on, run_expensive_property},
         store::{wait_for_table_state_type, wait_for_table_sync_complete},
         test_destination_wrapper::TestDestinationWrapper,
@@ -119,10 +119,9 @@ async fn run_sync_crash_case(
     // partial table before copying again.
     let memory_destination = MemoryDestination::new(first_store.clone());
     let first_destination = TestDestinationWrapper::wrap(memory_destination.clone());
-    let mut first_pipeline = create_pipeline(
+    let mut first_pipeline = create_workload_pipeline(
         &database.config,
         pipeline_id.clone(),
-        WORKLOAD_PUBLICATION.to_owned(),
         first_store.clone(),
         first_destination.clone(),
     );
@@ -172,10 +171,9 @@ async fn run_sync_crash_case(
             |error| TestCaseError::fail(format!("failed to reopen the Postgres store: {error}")),
         )?;
     let restarted_destination = TestDestinationWrapper::wrap(memory_destination.clone());
-    let mut restarted_pipeline = create_pipeline(
+    let mut restarted_pipeline = create_workload_pipeline(
         &database.config,
         pipeline_id,
-        WORKLOAD_PUBLICATION.to_owned(),
         restarted_store.clone(),
         restarted_destination.clone(),
     );

@@ -3610,6 +3610,20 @@ where
         self.reconcile_applied_table_layouts().await
     }
 
+    /// Runs one metrics pass on the spawned sampler and waits for it to
+    /// finish, instead of waiting for the next periodic tick.
+    #[cfg(feature = "test-utils")]
+    pub async fn sample_metrics_for_tests(&self) -> EtlResult<()> {
+        let sampler = self.metrics_sampler.as_ref().as_ref().ok_or_else(|| {
+            etl_error!(
+                ErrorKind::InvalidState,
+                "DuckLake metrics sampler is not running",
+                "The destination was built without a metrics sampler"
+            )
+        })?;
+        sampler.sample_now_for_tests().await
+    }
+
     /// Rechecks existing managed tables without creating, resetting, or
     /// recovering them. A bad table never prevents the remaining checks.
     async fn reconcile_applied_table_layouts(&self) -> EtlResult<()> {
