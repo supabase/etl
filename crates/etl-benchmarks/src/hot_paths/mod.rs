@@ -10,6 +10,8 @@
 //! than wall time between two builds of nearly identical code. Allocation
 //! counts are exact. Wall time is reported only as a cross-check.
 
+#[cfg(feature = "bigquery")]
+mod bigquery;
 mod codec;
 mod counters;
 mod fixtures;
@@ -30,7 +32,12 @@ use crate::hot_paths::{
 const DEFAULT_SEED: u64 = 0x00e7_1b5e_edc0_ffee;
 
 /// Scenario groups in report order.
-const SCENARIO_GROUPS: &[&[Scenario]] = &[postgres::SCENARIOS, codec::SCENARIOS];
+const SCENARIO_GROUPS: &[&[Scenario]] = &[
+    postgres::SCENARIOS,
+    codec::SCENARIOS,
+    #[cfg(feature = "bigquery")]
+    bigquery::SCENARIOS,
+];
 
 /// Command-line arguments for the hot-path benchmark.
 #[derive(Parser, Debug)]
@@ -58,6 +65,9 @@ struct Args {
 trait Workload {
     /// Returns how many units one pass processes.
     fn units(&self) -> usize;
+
+    /// Rebuilds input that a pass consumes, outside the measured window.
+    fn prepare_pass(&mut self) {}
 
     /// Runs one pass over every unit and keeps its output.
     fn run(&mut self);
@@ -111,11 +121,13 @@ fn measure(scenario: &Scenario, args: &Args) -> Result<ScenarioReport> {
 
     // The warm-up faults in output buffers and fills allocator caches, so the
     // measured passes see steady-state costs.
+    workload.prepare_pass();
     workload.run();
     let checksum = workload.checksum();
 
     let mut samples: Vec<Usage> = Vec::with_capacity(usize::from(args.repeat));
     for _ in 0..args.repeat {
+        workload.prepare_pass();
         let before = Counters::read();
         workload.run();
         let usage = Counters::read().since(before);

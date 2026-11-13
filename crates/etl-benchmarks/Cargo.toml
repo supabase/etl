@@ -21,7 +21,11 @@ required-features = ["snowflake"]
 
 [features]
 default = []
-bigquery = ["dep:etl-destinations", "etl-destinations/bigquery"]
+bigquery = [
+    "dep:etl-destinations",
+    "etl-destinations/benchmarking",
+    "etl-destinations/bigquery",
+]
 clickhouse = ["dep:clickhouse", "dep:etl-destinations", "etl-destinations/clickhouse"]
 ducklake = ["dep:etl-destinations", "etl-destinations/ducklake"]
 snowflake = [

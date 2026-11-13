@@ -257,6 +257,55 @@ fn copy_row(fields: &[Option<String>]) -> Vec<u8> {
     row
 }
 
+/// Returns decoded rows of an order-like table that also has the types
+/// destinations format as text: timestamp, time, UUID, and JSON.
+///
+/// The rows come from the COPY decoder, so destination scenarios encode
+/// exactly what a table copy would hand them.
+#[cfg(feature = "bigquery")]
+pub(super) fn decoded_wide_rows(rng: &mut Rng, units: usize) -> Vec<TableRow> {
+    let mut column_schemas = plain_column_schemas();
+    column_schemas.extend([
+        ColumnSchema::new("updated_at".to_owned(), Type::TIMESTAMP, -1, 9, false),
+        ColumnSchema::new("opens_at".to_owned(), Type::TIME, -1, 10, false),
+        ColumnSchema::new("external_id".to_owned(), Type::UUID, -1, 11, false),
+        ColumnSchema::new("attributes".to_owned(), Type::JSONB, -1, 12, false),
+    ]);
+
+    let rows: Vec<Vec<u8>> = (0..units)
+        .map(|id| {
+            let mut fields = plain_row_fields(rng, id);
+
+            fields.push(Some(rng.timestamp().format("%Y-%m-%d %H:%M:%S%.f").to_string()));
+            fields.push(Some(rng.time().format("%H:%M:%S%.f").to_string()));
+
+            let mut uuid = String::new();
+            for (index, bytes) in [4, 2, 2, 2, 6].into_iter().enumerate() {
+                if index > 0 {
+                    uuid.push('-');
+                }
+                rng.push_hex_bytes(&mut uuid, bytes);
+            }
+            fields.push(Some(uuid));
+
+            let mut tier = String::new();
+            rng.push_letters(&mut tier, 6);
+            fields.push(Some(format!(
+                "{{\"tier\": \"{tier}\", \"score\": {}, \"tags\": [\"a\", \"b\"]}}",
+                rng.below(10_000)
+            )));
+
+            copy_row(&fields)
+        })
+        .collect();
+
+    let mut table_rows = Vec::with_capacity(units);
+    parse_copy_rows(rows.iter().map(Vec::as_slice), &column_schemas, &mut table_rows)
+        .expect("fixture COPY rows decode");
+
+    table_rows
+}
+
 /// Appends one pgoutput tuple with text-format fields.
 fn push_tuple(message: &mut Vec<u8>, fields: &[Option<String>]) {
     let field_count = i16::try_from(fields.len()).expect("fixture rows have few columns");
