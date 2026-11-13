@@ -942,7 +942,7 @@ async fn table_truncate_with_batching() {
             table_options,
         )
         .await;
-    let destination = TestDestinationWrapper::wrap(raw_destination);
+    let destination = TestDestinationWrapper::wrap(raw_destination.clone());
 
     // Start pipeline from scratch.
     let mut pipeline = create_pipeline_with_batch_config(
@@ -1002,6 +1002,9 @@ async fn table_truncate_with_batching() {
     .await;
 
     events_notify.notified().await;
+
+    // Wait for version cleanup before shutdown can cancel it.
+    raw_destination.wait_for_background_tasks_for_tests().await.unwrap();
 
     pipeline.shutdown_and_wait().await.unwrap();
 
