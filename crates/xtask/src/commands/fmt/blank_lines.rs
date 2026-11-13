@@ -453,12 +453,55 @@ fn control_flow_head(expr: &ast::Expr) -> Option<SyntaxNode> {
 }
 
 /// Returns whether `head` uses any of the bound `names`, including inside
-/// macro arguments.
+/// macro arguments and inline format captures.
 fn mentions(head: &SyntaxNode, names: &[SyntaxToken]) -> bool {
-    head.descendants_with_tokens()
-        .filter_map(NodeOrToken::into_token)
-        .filter(is_name_token)
-        .any(|token| names.iter().any(|name| name.text() == token.text()))
+    let is_bound = |text: &str| names.iter().any(|name| name.text() == text);
+    head.descendants_with_tokens().filter_map(NodeOrToken::into_token).any(|token| {
+        match token.kind() {
+            SyntaxKind::IDENT | T![self] => is_bound(token.text()),
+            // `format!("{name}")` uses `name` inside a string literal.
+            SyntaxKind::STRING
+                if token.parent_ancestors().any(|node| node.kind() == SyntaxKind::TOKEN_TREE) =>
+            {
+                format_captures(token.text()).any(is_bound)
+            }
+            _ => false,
+        }
+    })
+}
+
+/// Returns the identifiers captured inline by a format string literal, such
+/// as `name` in `"{name}"` or `"{name:?}"`.
+fn format_captures(literal: &str) -> impl Iterator<Item = &str> {
+    let bytes = literal.as_bytes();
+    let mut index = 0;
+    std::iter::from_fn(move || {
+        while let Some(offset) = bytes.get(index..)?.iter().position(|&byte| byte == b'{') {
+            let start = index + offset + 1;
+            // `{{` is an escaped brace, not a placeholder.
+            if bytes.get(start) == Some(&b'{') {
+                index = start + 1;
+                continue;
+            }
+
+            let length = bytes
+                .get(start..)
+                .unwrap_or_default()
+                .iter()
+                .take_while(|&&byte| byte == b'_' || byte.is_ascii_alphanumeric())
+                .count();
+            let end = start + length;
+            index = end;
+            let starts_like_identifier =
+                bytes.get(start).is_some_and(|&byte| byte == b'_' || byte.is_ascii_alphabetic());
+            if starts_like_identifier && matches!(bytes.get(end), Some(b'}' | b':')) {
+                // ASCII bytes delimit the range, so it lies on char boundaries.
+                return literal.get(start..end);
+            }
+        }
+
+        None
+    })
 }
 
 /// Returns whether a token can name a binding.
@@ -581,6 +624,35 @@ fn f() {
     }
 }
 ";
+        assert_eq!(fixed(source), (expected.to_owned(), vec![Rule::SeparateParagraph; 2]));
+    }
+
+    #[test]
+    fn allows_cuddling_with_a_binding_captured_by_a_format_string() {
+        let source = r#"fn f() {
+    let open = "[".repeat(3);
+    for input in [format!("{{x}} {open:?}")] {
+        check(input);
+    }
+    let close = "]";
+    if log_enabled!("{{close}}") {
+        bar();
+    }
+}
+"#;
+        let expected = r#"fn f() {
+    let open = "[".repeat(3);
+    for input in [format!("{{x}} {open:?}")] {
+        check(input);
+    }
+
+    let close = "]";
+
+    if log_enabled!("{{close}}") {
+        bar();
+    }
+}
+"#;
         assert_eq!(fixed(source), (expected.to_owned(), vec![Rule::SeparateParagraph; 2]));
     }
 
