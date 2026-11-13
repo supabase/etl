@@ -74,7 +74,16 @@ pub(crate) fn parse_postgres_timestamptz(
 }
 
 /// Parses a Postgres `time with time zone` text value.
+///
+/// Postgres emits `HH:MM:SS[.ffffff]` followed by a numeric UTC offset on
+/// replication connections. That shape is decoded with the fixed-layout time
+/// parser; anything else falls back to [`PgTimeTz`]'s parser so accepted and
+/// rejected inputs stay identical.
 pub(crate) fn parse_postgres_timetz(value: &str) -> Result<PgTimeTz, ParseTimeError> {
+    if let Some(timetz) = parse_iso_timetz_fast(value) {
+        return Ok(timetz);
+    }
+
     value.parse()
 }
 
@@ -215,6 +224,24 @@ fn parse_iso_timestamp_fast(bytes: &[u8]) -> Option<NaiveDateTime> {
     Some(NaiveDateTime::new(date, time))
 }
 
+/// Parses a strict `HH:MM:SS[.f{1,9}]` layout followed by a numeric UTC offset
+/// into a [`PgTimeTz`].
+///
+/// Returns [`None`] for any deviation, including the end-of-day time
+/// `24:00:00`, so the caller can defer to [`PgTimeTz`]'s parser for the exact
+/// accept/reject decision.
+fn parse_iso_timetz_fast(value: &str) -> Option<PgTimeTz> {
+    // The offset starts at the last sign. A sign is ASCII, so the split falls
+    // on a character boundary.
+    let sign_index = value.bytes().rposition(|byte| matches!(byte, b'+' | b'-'))?;
+    let (time, offset) = value.split_at(sign_index);
+
+    let time = parse_iso_time_fast(time.as_bytes())?;
+    let offset = parse_postgres_utc_offset(offset)?;
+
+    Some(PgTimeTz::new(time, offset))
+}
+
 /// Splits a timestamp string into timestamp and numeric UTC offset parts.
 fn split_timestamp_offset(value: &str) -> Option<(&str, &str)> {
     value.char_indices().rev().find_map(|(idx, ch)| {
@@ -222,16 +249,18 @@ fn split_timestamp_offset(value: &str) -> Option<(&str, &str)> {
     })
 }
 
-/// Checks that each fast path accepts only inputs chrono accepts, with the same
-/// value.
+/// Checks that each fast path accepts only inputs its reference parser
+/// accepts, with the same value.
 ///
-/// Inputs the fast paths decline already go to chrono, so this covers every
-/// way the fast paths can change a parse result.
+/// The reference is chrono for dates, times, and timestamps, and
+/// [`PgTimeTz`]'s parser for times with a UTC offset. Inputs the fast paths
+/// decline already go to the reference, so this covers every way the fast
+/// paths can change a parse result.
 ///
 /// # Panics
 ///
-/// Panics when a fast path accepts an input that chrono rejects or decodes
-/// differently; that panic is the fuzz target's finding signal.
+/// Panics when a fast path accepts an input that its reference rejects or
+/// decodes differently; that panic is the fuzz target's finding signal.
 #[cfg(any(all(test, feature = "test-utils"), feature = "fuzzing"))]
 pub(crate) fn check_fast_paths_match_chrono(value: &str) {
     if let Some(date) = parse_iso_date_fast(value.as_bytes()) {
@@ -253,6 +282,13 @@ pub(crate) fn check_fast_paths_match_chrono(value: &str) {
             NaiveDateTime::parse_from_str(value, TIMESTAMP_FORMAT).ok(),
             Some(timestamp),
             "timestamp fast path disagrees with chrono for {value:?}"
+        );
+    }
+    if let Some(timetz) = parse_iso_timetz_fast(value) {
+        assert_eq!(
+            value.parse::<PgTimeTz>().ok(),
+            Some(timetz),
+            "timetz fast path disagrees with the reference parser for {value:?}"
         );
     }
 }
@@ -551,10 +587,21 @@ mod tests {
                     format!("{hour}:{minute}:{second}{fraction}")
                 })
                 .boxed();
+            let offset = prop_oneof![
+                (prop_oneof![Just('+'), Just('-')], two_digits())
+                    .prop_map(|(sign, hours)| format!("{sign}{hours}")),
+                (prop_oneof![Just('+'), Just('-')], two_digits(), two_digits())
+                    .prop_map(|(sign, hours, minutes)| format!("{sign}{hours}:{minutes}")),
+                (prop_oneof![Just('+'), Just('-')], two_digits(), two_digits(), two_digits())
+                    .prop_map(|(sign, hours, minutes, seconds)| {
+                        format!("{sign}{hours}:{minutes}:{seconds}")
+                    }),
+            ];
             let shaped = prop_oneof![
                 date.clone(),
                 time.clone(),
-                (date, time).prop_map(|(date, time)| format!("{date} {time}")),
+                (date, time.clone()).prop_map(|(date, time)| format!("{date} {time}")),
+                (time, offset).prop_map(|(time, offset)| format!("{time}{offset}")),
             ];
             (shaped, any::<prop::sample::Index>(), proptest::option::of(any::<char>())).prop_map(
                 |(value, index, replacement)| {
