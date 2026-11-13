@@ -33,7 +33,9 @@ jobs:
       - name: Resolve merged PR
         if: github.event_name == 'push'
         id: pr
-        uses: ./.github/actions/merged-pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/actions/merged-pr/resolve.py
 
   image:
     name: Publish image
