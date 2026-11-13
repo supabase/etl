@@ -103,6 +103,13 @@ implementation details private.
 - `Cargo.toml` workspace lints, `rustfmt.toml`, and compiler diagnostics are
   the enforceable style source of truth. Prefer tightening static checks over
   adding prose rules here.
+- Use blank lines to separate logically distinct steps in generated and edited
+  code: setup, validation, execution, error handling, and results or assertions.
+  Keep closely related statements together, but avoid dense blocks containing
+  several separate operations. Prefer readable grouping over minimizing line
+  count. Apply this to production code, tests, and code snippets. Before
+  finishing, explicitly inspect the changed code for appropriate blank-line
+  separation; passing the formatter alone does not satisfy this check.
 - Migrations already on `main` are immutable (SQL, comments, whitespace,
   filenames). Add a new file. Do not edit a migration that is not yet on `main`
   unless the user asks, including comments.
