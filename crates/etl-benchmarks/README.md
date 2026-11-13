@@ -411,6 +411,33 @@ Scenarios isolate one code path with synthetic fixtures. They rank and confirm
 local changes; confirm a result that matters with `table_copy` or
 `table_streaming` before relying on it.
 
+## Comparing Two Commits On One Machine
+
+Runs on different machines cannot resolve small changes: identical code has
+differed by 6% to 25% in throughput between CI runners. To compare two commits,
+run both on the same machine in one invocation:
+
+```bash
+git worktree add ../etl-baseline <baseline-commit>
+cargo x benchmark --samples 5 --warmup-samples 1 --baseline-dir ../etl-baseline
+cargo x benchmark-compare \
+  --previous-dir target/bench-results/baseline \
+  --current-dir target/bench-results
+```
+
+Each sample runs the baseline checkout and the current checkout back to back,
+alternating which goes first, against the same database. Baseline reports are
+written to `<output-dir>/baseline`. In each report, `sample_summary.<metric>.values`
+lists the samples in run order, so the two sides can be paired sample by sample.
+
+The baseline checkout must accept the same `table_copy` and `table_streaming`
+arguments as the current one. Streaming samples add rows to the TPC-C tables,
+so later samples run against slightly more data; alternating the order keeps
+that from favoring one side.
+
+In the `Benchmark` workflow, set `baseline_commit` to do the same on one runner.
+The comparison then appears in the job summary.
+
 ## GitHub Actions
 
 The `Benchmark` workflow runs nightly and on demand through `workflow_dispatch`.
@@ -461,6 +488,10 @@ Important workflow inputs:
   selected workflow ref (a backfill). The workflow still comes from the
   selected ref, so the commit's `cargo x benchmark` must accept the flags the
   workflow passes; older commits fail fast on unknown flags.
+- `baseline_commit`: optional full 40-character commit SHA to benchmark as a
+  baseline on the same runner, alternating samples with the benchmarked commit.
+  See [Comparing Two Commits On One Machine](#comparing-two-commits-on-one-machine).
+- `samples`: measured samples per benchmark, after one warmup. Defaults to 3.
 - `force_prepare`: drop and regenerate TPC-C tables before running.
 - `skip_table_copy`: skip table copy.
 - `skip_table_streaming`: skip table streaming.

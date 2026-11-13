@@ -1,7 +1,7 @@
 use std::{
     fs,
     io::{self, IsTerminal, Write},
-    path::{Path, PathBuf},
+    path::{self, Path, PathBuf},
     process::{Command, Output, Stdio},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -124,6 +124,15 @@ pub(crate) struct BenchmarkArgs {
     /// Directory where JSON benchmark reports are written.
     #[arg(long, default_value = "target/bench-results")]
     output_dir: PathBuf,
+    /// Another checkout of this repository to benchmark as a baseline on the
+    /// same machine.
+    ///
+    /// Every sample runs both checkouts back to back, alternating which goes
+    /// first, so machine speed and drift affect both sides equally. Baseline
+    /// reports are written to `<output-dir>/baseline`. The baseline checkout
+    /// must accept the same benchmark binary arguments as this one.
+    #[arg(long)]
+    baseline_dir: Option<PathBuf>,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug)]
@@ -137,9 +146,53 @@ enum Destination {
     Snowflake,
 }
 
+/// Which checkout a benchmark sample runs from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Checkout {
+    /// The checkout this task runner was started from.
+    Candidate,
+    /// The checkout given by `--baseline-dir`.
+    Baseline,
+}
+
+/// Measured sample reports of one benchmark, by checkout.
+#[derive(Default)]
+struct SampleReports {
+    /// Reports from the candidate checkout.
+    candidate: Vec<Value>,
+    /// Reports from the baseline checkout.
+    baseline: Vec<Value>,
+}
+
+impl SampleReports {
+    /// Records one measured sample.
+    fn push(&mut self, checkout: Checkout, report: Value) {
+        match checkout {
+            Checkout::Candidate => self.candidate.push(report),
+            Checkout::Baseline => self.baseline.push(report),
+        }
+    }
+}
+
 impl BenchmarkArgs {
-    pub(crate) fn run(self) -> Result<()> {
+    pub(crate) fn run(mut self) -> Result<()> {
         self.validate()?;
+
+        // Baseline samples run from another directory, so no path passed to a
+        // benchmark binary may depend on the current one.
+        self.output_dir =
+            path::absolute(&self.output_dir).context("failed to resolve benchmark output dir")?;
+        if let Some(baseline_dir) = self.baseline_dir.take() {
+            self.baseline_dir = Some(
+                path::absolute(&baseline_dir)
+                    .context("failed to resolve benchmark baseline dir")?,
+            );
+        }
+        if let Some(sa_key_file) = self.bq_sa_key_file.take() {
+            self.bq_sa_key_file =
+                Some(path::absolute(&sa_key_file).context("failed to resolve BigQuery key file")?);
+        }
+
         check_command("psql")?;
         let runs_tpcc_streaming = self.runs_tpcc_streaming();
         let needs_tpcc_tables = self.needs_tpcc_tables();
@@ -147,7 +200,8 @@ impl BenchmarkArgs {
             check_command("go-tpc")?;
         }
 
-        fs::create_dir_all(&self.output_dir).context("failed to create benchmark output dir")?;
+        fs::create_dir_all(self.report_dir(Checkout::Baseline))
+            .context("failed to create benchmark output dir")?;
 
         let tpcc_threads =
             self.tpcc_threads.unwrap_or_else(|| recommended_threads(self.warehouses));
@@ -165,6 +219,12 @@ impl BenchmarkArgs {
             ("Memory backpressure", memory_backpressure_label(self.enable_memory_backpressure)),
             ("Memory budget ratio", format_decimal(f64::from(self.memory_budget_ratio), 2)),
             ("Output dir", self.output_dir.display().to_string()),
+            (
+                "Baseline dir",
+                self.baseline_dir
+                    .as_ref()
+                    .map_or_else(|| "none".to_owned(), |dir| dir.display().to_string()),
+            ),
         ]);
 
         print_phase("Benchmark database", "ensuring it exists");
@@ -205,7 +265,6 @@ impl BenchmarkArgs {
                 &table_ids,
                 expected_row_count,
                 pipeline_id_base,
-                self.output_dir.join("table_copy.json"),
             )?);
             print_done("Table copy", "finished");
         } else {
@@ -214,17 +273,25 @@ impl BenchmarkArgs {
 
         if !self.skip_table_streaming {
             print_phase("Table streaming", "preparing benchmark");
-            table_streaming_report = Some(self.run_table_streaming_samples(
-                tpcc_threads,
-                pipeline_id_base,
-                self.output_dir.join("table_streaming.json"),
-            )?);
+            table_streaming_report =
+                Some(self.run_table_streaming_samples(tpcc_threads, pipeline_id_base)?);
             print_done("Table streaming", "finished");
         } else {
             print_skip("Table streaming", "disabled by flag");
         }
 
         print_combined_summary(table_copy_report.as_ref(), table_streaming_report.as_ref());
+
+        if self.baseline_dir.is_some() {
+            print_done(
+                "Baseline",
+                &format!(
+                    "compare with `cargo x benchmark-compare --previous-dir {} --current-dir {}`",
+                    self.report_dir(Checkout::Baseline).display(),
+                    self.output_dir.display()
+                ),
+            );
+        }
 
         Ok(())
     }
@@ -240,6 +307,15 @@ impl BenchmarkArgs {
 
         if self.samples == 0 {
             bail!("--samples must be greater than 0");
+        }
+
+        if let Some(baseline_dir) = &self.baseline_dir
+            && !baseline_dir.join("Cargo.toml").is_file()
+        {
+            bail!(
+                "--baseline-dir must be a checkout of this repository: {}",
+                baseline_dir.display()
+            );
         }
 
         if self.streaming_drain_quiet_ms == 0 {
@@ -472,52 +548,49 @@ impl BenchmarkArgs {
         table_ids: &str,
         expected_row_count: u64,
         pipeline_id_base: u64,
-        report_path: PathBuf,
     ) -> Result<Value> {
-        let mut measured_reports = Vec::with_capacity(usize::from(self.samples));
-        let total_samples = self.total_sample_count();
-        for sample_idx in 0..total_samples {
-            let pipeline_id = sample_pipeline_id(pipeline_id_base, 0, sample_idx)?;
-            let publication_name = format!("bench_pub_{pipeline_id}");
-            let sample_report_path =
-                self.sample_report_path("table_copy", sample_idx.saturating_add(1));
-            let sample_label = self.sample_label(sample_idx);
+        let mut measured_reports = SampleReports::default();
+        for sample_idx in 0..self.total_sample_count() {
+            for &checkout in self.sample_checkouts(sample_idx) {
+                let pipeline_id = sample_pipeline_id(
+                    pipeline_id_base,
+                    0,
+                    self.sample_run_index(checkout, sample_idx),
+                )?;
+                let publication_name = format!("bench_pub_{pipeline_id}");
+                let sample_report_path =
+                    self.sample_report_path("table_copy", checkout, sample_idx.saturating_add(1));
+                let sample_label = self.sample_label(checkout, sample_idx);
 
-            print_phase("Table copy", &format!("{sample_label} creating publication"));
-            self.create_publication(&publication_name, selected_tables)?;
-            print_phase("Table copy", &format!("{sample_label} running"));
-            let report = self.run_table_copy(
-                &publication_name,
-                table_ids,
-                expected_row_count,
-                &pipeline_id,
-                sample_report_path.clone(),
-            )?;
-            self.drop_publication(&publication_name)?;
-            remove_sample_report(&sample_report_path)?;
-            print_sample_result("table_copy", &sample_label, &report);
+                print_phase("Table copy", &format!("{sample_label} creating publication"));
+                self.create_publication(&publication_name, selected_tables)?;
+                print_phase("Table copy", &format!("{sample_label} running"));
+                let report = self.run_table_copy(
+                    checkout,
+                    &publication_name,
+                    table_ids,
+                    expected_row_count,
+                    &pipeline_id,
+                    sample_report_path.clone(),
+                )?;
+                self.drop_publication(&publication_name)?;
+                remove_sample_report(&sample_report_path)?;
+                print_sample_result("table_copy", &sample_label, &report);
 
-            if self.is_warmup_sample(sample_idx) {
-                print_skip("Table copy", &format!("{sample_label} discarded as warmup"));
-            } else {
-                measured_reports.push(report);
+                if self.is_warmup_sample(sample_idx) {
+                    print_skip("Table copy", &format!("{sample_label} discarded as warmup"));
+                } else {
+                    measured_reports.push(checkout, report);
+                }
             }
         }
 
-        let aggregate = aggregate_reports(
-            "table_copy",
-            usize::from(self.samples),
-            usize::from(self.warmup_samples),
-            &measured_reports,
-        )?;
-        write_json_report(&aggregate, &report_path)?;
-        print_benchmark_report("table_copy", &aggregate);
-        print_done("Report", &format!("wrote {}", report_path.display()));
-        Ok(aggregate)
+        self.write_aggregate_reports("table_copy", &measured_reports)
     }
 
     fn run_table_copy(
         &self,
+        checkout: Checkout,
         publication_name: &str,
         table_ids: &str,
         expected_row_count: u64,
@@ -541,58 +614,64 @@ impl BenchmarkArgs {
             expected_row_count.to_string(),
         ]);
 
-        run_benchmark_binary("table_copy", self.destination, &args, &report_path)
+        run_benchmark_binary(
+            "table_copy",
+            self.destination,
+            &args,
+            &report_path,
+            self.checkout_dir(checkout),
+        )
     }
 
     fn run_table_streaming_samples(
         &self,
         tpcc_threads: u16,
         pipeline_id_base: u64,
-        report_path: PathBuf,
     ) -> Result<Value> {
         let selected_tables = self.validated_tpcc_tables()?;
-        let mut measured_reports = Vec::with_capacity(usize::from(self.samples));
-        let total_samples = self.total_sample_count();
-        for sample_idx in 0..total_samples {
-            let pipeline_id = sample_pipeline_id(pipeline_id_base, 1, sample_idx)?;
-            let publication_name = format!("bench_streaming_pub_{pipeline_id}");
-            let sample_report_path =
-                self.sample_report_path("table_streaming", sample_idx.saturating_add(1));
-            let sample_label = self.sample_label(sample_idx);
+        let mut measured_reports = SampleReports::default();
+        for sample_idx in 0..self.total_sample_count() {
+            for &checkout in self.sample_checkouts(sample_idx) {
+                let pipeline_id = sample_pipeline_id(
+                    pipeline_id_base,
+                    1,
+                    self.sample_run_index(checkout, sample_idx),
+                )?;
+                let publication_name = format!("bench_streaming_pub_{pipeline_id}");
+                let sample_report_path = self.sample_report_path(
+                    "table_streaming",
+                    checkout,
+                    sample_idx.saturating_add(1),
+                );
+                let sample_label = self.sample_label(checkout, sample_idx);
 
-            print_phase("Table streaming", &format!("{sample_label} preparing"));
-            let report = self.run_table_streaming(
-                &publication_name,
-                tpcc_threads,
-                &pipeline_id,
-                &selected_tables,
-                sample_report_path.clone(),
-            )?;
-            self.drop_publication(&publication_name)?;
-            remove_sample_report(&sample_report_path)?;
-            print_sample_result("table_streaming", &sample_label, &report);
+                print_phase("Table streaming", &format!("{sample_label} preparing"));
+                let report = self.run_table_streaming(
+                    checkout,
+                    &publication_name,
+                    tpcc_threads,
+                    &pipeline_id,
+                    &selected_tables,
+                    sample_report_path.clone(),
+                )?;
+                self.drop_publication(&publication_name)?;
+                remove_sample_report(&sample_report_path)?;
+                print_sample_result("table_streaming", &sample_label, &report);
 
-            if self.is_warmup_sample(sample_idx) {
-                print_skip("Table streaming", &format!("{sample_label} discarded as warmup"));
-            } else {
-                measured_reports.push(report);
+                if self.is_warmup_sample(sample_idx) {
+                    print_skip("Table streaming", &format!("{sample_label} discarded as warmup"));
+                } else {
+                    measured_reports.push(checkout, report);
+                }
             }
         }
 
-        let aggregate = aggregate_reports(
-            "table_streaming",
-            usize::from(self.samples),
-            usize::from(self.warmup_samples),
-            &measured_reports,
-        )?;
-        write_json_report(&aggregate, &report_path)?;
-        print_benchmark_report("table_streaming", &aggregate);
-        print_done("Report", &format!("wrote {}", report_path.display()));
-        Ok(aggregate)
+        self.write_aggregate_reports("table_streaming", &measured_reports)
     }
 
     fn run_table_streaming(
         &self,
+        checkout: Checkout,
         publication_name: &str,
         tpcc_threads: u16,
         pipeline_id: &str,
@@ -636,7 +715,13 @@ impl BenchmarkArgs {
             duration_seconds.to_string(),
         ]);
 
-        run_benchmark_binary("table_streaming", self.destination, &args, &report_path)
+        run_benchmark_binary(
+            "table_streaming",
+            self.destination,
+            &args,
+            &report_path,
+            self.checkout_dir(checkout),
+        )
     }
 
     fn total_sample_count(&self) -> usize {
@@ -647,17 +732,91 @@ impl BenchmarkArgs {
         sample_idx < usize::from(self.warmup_samples)
     }
 
-    fn sample_label(&self, sample_idx: usize) -> String {
+    fn sample_label(&self, checkout: Checkout, sample_idx: usize) -> String {
+        let prefix = match checkout {
+            Checkout::Candidate => "",
+            Checkout::Baseline => "baseline ",
+        };
         let warmups = usize::from(self.warmup_samples);
         if sample_idx < warmups {
-            format!("warmup {}/{}", sample_idx + 1, warmups)
+            format!("{prefix}warmup {}/{}", sample_idx + 1, warmups)
         } else {
-            format!("sample {}/{}", sample_idx + 1 - warmups, self.samples)
+            format!("{prefix}sample {}/{}", sample_idx + 1 - warmups, self.samples)
         }
     }
 
-    fn sample_report_path(&self, benchmark: &str, sample_number: usize) -> PathBuf {
-        self.output_dir.join(format!(".{benchmark}_sample_{sample_number}.json"))
+    fn sample_report_path(
+        &self,
+        benchmark: &str,
+        checkout: Checkout,
+        sample_number: usize,
+    ) -> PathBuf {
+        self.report_dir(checkout).join(format!(".{benchmark}_sample_{sample_number}.json"))
+    }
+
+    /// Returns the checkouts one sample runs, in order.
+    ///
+    /// With a baseline, the order alternates between samples so that neither
+    /// checkout always runs first on warmer caches or larger tables.
+    fn sample_checkouts(&self, sample_idx: usize) -> &'static [Checkout] {
+        if self.baseline_dir.is_none() {
+            &[Checkout::Candidate]
+        } else if sample_idx.is_multiple_of(2) {
+            &[Checkout::Baseline, Checkout::Candidate]
+        } else {
+            &[Checkout::Candidate, Checkout::Baseline]
+        }
+    }
+
+    /// Returns an index unique to one checkout's run of one sample, used to
+    /// derive its pipeline ID.
+    fn sample_run_index(&self, checkout: Checkout, sample_idx: usize) -> usize {
+        match checkout {
+            Checkout::Candidate => sample_idx,
+            Checkout::Baseline => sample_idx + self.total_sample_count(),
+        }
+    }
+
+    /// Returns the directory a checkout's benchmark binaries run from, or
+    /// `None` for the current directory.
+    fn checkout_dir(&self, checkout: Checkout) -> Option<&Path> {
+        match checkout {
+            Checkout::Candidate => None,
+            Checkout::Baseline => self.baseline_dir.as_deref(),
+        }
+    }
+
+    /// Returns the directory a checkout's reports are written to.
+    fn report_dir(&self, checkout: Checkout) -> PathBuf {
+        match checkout {
+            Checkout::Candidate => self.output_dir.clone(),
+            Checkout::Baseline if self.baseline_dir.is_some() => self.output_dir.join("baseline"),
+            Checkout::Baseline => self.output_dir.clone(),
+        }
+    }
+
+    /// Aggregates and writes the measured samples of one benchmark, and
+    /// returns the candidate's aggregate.
+    fn write_aggregate_reports(&self, benchmark: &str, reports: &SampleReports) -> Result<Value> {
+        let sample_count = usize::from(self.samples);
+        let warmup_sample_count = usize::from(self.warmup_samples);
+
+        if self.baseline_dir.is_some() {
+            let baseline =
+                aggregate_reports(benchmark, sample_count, warmup_sample_count, &reports.baseline)?;
+            let report_path = self.report_dir(Checkout::Baseline).join(format!("{benchmark}.json"));
+            write_json_report(&baseline, &report_path)?;
+            print_done("Report", &format!("wrote baseline {}", report_path.display()));
+        }
+
+        let aggregate =
+            aggregate_reports(benchmark, sample_count, warmup_sample_count, &reports.candidate)?;
+        let report_path = self.report_dir(Checkout::Candidate).join(format!("{benchmark}.json"));
+        write_json_report(&aggregate, &report_path)?;
+        print_benchmark_report(benchmark, &aggregate);
+        print_done("Report", &format!("wrote {}", report_path.display()));
+
+        Ok(aggregate)
     }
 
     fn push_common_benchmark_args(&self, args: &mut Vec<String>) {
@@ -946,6 +1105,7 @@ fn sample_summary(reports: &[Value]) -> Value {
 
         let min = numbers.iter().copied().fold(f64::INFINITY, f64::min);
         let max = numbers.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let values = numbers.iter().copied().map(json_number).collect();
         let median = median(numbers);
         let spread_pct = if min > 0.0 { ((max - min) / min) * 100.0 } else { 0.0 };
         summary.insert(
@@ -955,6 +1115,9 @@ fn sample_summary(reports: &[Value]) -> Value {
                 ("median".to_owned(), json_number(median)),
                 ("max".to_owned(), json_number(max)),
                 ("spread_pct".to_owned(), json_number(spread_pct)),
+                // In sample order, so two reports from one comparison can be
+                // paired sample by sample.
+                ("values".to_owned(), Value::Array(values)),
             ])),
         );
     }
@@ -1131,8 +1294,12 @@ fn run_benchmark_binary(
     destination: Destination,
     binary_args: &[String],
     report_path: &Path,
+    workspace_dir: Option<&Path>,
 ) -> Result<Value> {
     let mut command = Command::new("cargo");
+    if let Some(workspace_dir) = workspace_dir {
+        command.current_dir(workspace_dir);
+    }
     command.args(["run", "--locked", "--quiet", "-p", "etl-benchmarks", "--release"]);
     if !matches!(destination, Destination::Null) {
         command.args(["--features", destination.as_arg()]);
@@ -1432,9 +1599,10 @@ mod tests {
         assert_eq!(aggregate["end_to_end_with_shutdown_estimated_mib_per_second"], 10);
         assert_eq!(aggregate["total_ms"], 1000);
         assert_eq!(aggregate["destination_stats"]["inserts"], 10);
-        assert_eq!(
-            aggregate["sample_summary"]["end_to_end_with_shutdown_events_per_second"]["spread_pct"],
-            50
-        );
+        let events_per_second =
+            &aggregate["sample_summary"]["end_to_end_with_shutdown_events_per_second"];
+        assert_eq!(events_per_second["spread_pct"], 50);
+        // Measured samples stay in run order so two reports can be paired.
+        assert_eq!(events_per_second["values"], json!([100, 80, 120]));
     }
 }

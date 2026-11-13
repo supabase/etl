@@ -67,6 +67,14 @@ on:
         description: Optional full commit SHA to benchmark (backfill); defaults to the selected workflow ref.
         required: false
         default: ""
+      baseline_commit:
+        description: Optional full commit SHA to benchmark as a baseline on the same runner; samples alternate between it and the selected commit.
+        required: false
+        default: ""
+      samples:
+        description: Measured samples per benchmark, after one warmup sample.
+        required: true
+        default: "3"
       bq_project_id:
         description: BigQuery project ID; defaults to the BENCHMARK_BQ_PROJECT_ID repository variable.
         required: false
@@ -98,7 +106,8 @@ env:
   POSTGRES_DB: bench
   POSTGRES_PORT: 5430
   POSTGRES_HOST: localhost
-  BENCHMARK_SAMPLES: 3
+  # Scheduled runs have no inputs; keep this fallback equal to the input default.
+  BENCHMARK_SAMPLES: ${{ inputs.samples || '3' }}
   BENCHMARK_WARMUP_SAMPLES: 1
   BENCH_CLICKHOUSE_URL: http://localhost:8123
   BENCH_CLICKHOUSE_USER: etl
@@ -132,6 +141,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       sha: ${{ steps.plan.outputs.sha }}
+      baseline_sha: ${{ steps.plan.outputs.baseline_sha }}
       trigger: ${{ steps.plan.outputs.trigger }}
       destinations: ${{ steps.plan.outputs.destinations }}
       runner: ${{ steps.plan.outputs.runner }}
@@ -140,12 +150,21 @@ jobs:
         id: plan
         env:
           COMMIT: ${{ inputs.commit }}
+          BASELINE_COMMIT: ${{ inputs.baseline_commit }}
           DESTINATION: ${{ inputs.destination || 'all' }}
           RUNNER: ${{ inputs.benchmark_runner || 'blacksmith-16vcpu-ubuntu-2404' }}
         run: |
           set -euo pipefail
           if [[ -n "$COMMIT" && ! "$COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
             echo '::error::Commit must be a full 40-character lowercase SHA'
+            exit 1
+          fi
+          if [[ -n "$BASELINE_COMMIT" && ! "$BASELINE_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo '::error::Baseline commit must be a full 40-character lowercase SHA'
+            exit 1
+          fi
+          if [[ ! "$BENCHMARK_SAMPLES" =~ ^[1-9][0-9]*$ ]]; then
+            echo '::error::Samples must be a positive integer'
             exit 1
           fi
 
@@ -172,6 +191,7 @@ jobs:
 
           {
             echo "sha=$sha"
+            echo "baseline_sha=$BASELINE_COMMIT"
             echo "trigger=$trigger"
             echo "destinations=$destinations"
             echo "runner=$RUNNER"
@@ -194,6 +214,8 @@ jobs:
       queue: max
     env:
       DESTINATION: ${{ matrix.destination }}
+      # Empty unless a same-runner baseline was requested.
+      BASELINE_SHA: ${{ needs.plan.outputs.baseline_sha }}
       BENCHMARK_TRIGGER: ${{ needs.plan.outputs.trigger }}
       BENCHMARK_RUNNER: ${{ needs.plan.outputs.runner }}
       # Only a successful nightly or manual job uploads under this name, so its
@@ -205,6 +227,16 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+
+      # After the source checkout, which cleans the workspace. The baseline is
+      # its own Cargo workspace, so builds in it do not touch the source's.
+      - name: Check out baseline
+        if: needs.plan.outputs.baseline_sha != ''
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ needs.plan.outputs.baseline_sha }}
+          path: baseline
           persist-credentials: false
 
       - name: Set up Rust
@@ -297,12 +329,14 @@ jobs:
             echo "| Setting | Value |"
             echo "| --- | --- |"
             echo "| Commit | $(git rev-parse HEAD) |"
+            echo "| Same-runner baseline | ${BASELINE_SHA:-none} |"
             echo "| Trigger | ${BENCHMARK_TRIGGER} |"
             echo "| Runner | ${BENCHMARK_RUNNER} |"
             echo "| Runner name | ${RUNNER_NAME} |"
             echo "| Runner OS | ${RUNNER_OS} |"
             echo "| Runner arch | ${RUNNER_ARCH} |"
             echo "| CPUs | $(nproc) |"
+            echo "| CPU model | $(lscpu | sed -n 's/^Model name: *//p' | head -n 1) |"
             echo "| Host memory | ${host_memory} |"
             echo "| Cgroup memory limit | ${cgroup_memory_limit} |"
             echo "| Warehouses | ${WAREHOUSES} |"
@@ -344,6 +378,10 @@ jobs:
             args+=(--tpcc-threads "$TPCC_THREADS_INPUT")
           fi
 
+          if [[ -n "$BASELINE_SHA" ]]; then
+            args+=(--baseline-dir "$GITHUB_WORKSPACE/baseline")
+          fi
+
           if [[ -n "$STREAMING_DURATION_SECONDS" ]]; then
             args+=(--streaming-duration-seconds "$STREAMING_DURATION_SECONDS")
           fi
@@ -382,7 +420,8 @@ jobs:
           set -euo pipefail
           COMMIT_SHA="$(git rev-parse HEAD)"
           COMMITTED_AT="$(git show -s --format=%cI HEAD)"
-          export COMMIT_SHA COMMITTED_AT
+          CPU_MODEL="$(lscpu | sed -n 's/^Model name: *//p' | head -n 1)"
+          export COMMIT_SHA COMMITTED_AT CPU_MODEL
 
           python3 <<'PY'
           import json
@@ -427,6 +466,8 @@ jobs:
                   "sha": os.environ["COMMIT_SHA"],
                   "committed_at": os.environ["COMMITTED_AT"],
               },
+              # Set when this run also measured a baseline on the same runner.
+              "baseline_commit": os.environ.get("BASELINE_SHA") or None,
               "workflow_sha": os.environ["GITHUB_SHA"],
               "github": {
                   "repository": os.environ["GITHUB_REPOSITORY"],
@@ -446,6 +487,7 @@ jobs:
                   "os": os.environ.get("RUNNER_OS"),
                   "arch": os.environ.get("RUNNER_ARCH"),
                   "cpus": os.cpu_count(),
+                  "cpu_model": os.environ.get("CPU_MODEL") or None,
                   "memory_bytes": memory_bytes(),
                   "cgroup_memory_limit": cgroup_memory_limit(),
               },
@@ -583,16 +625,24 @@ jobs:
               print()
           PY
 
+      # With a same-runner baseline, compare against it; otherwise against the
+      # previous run's artifact.
       - name: Compare benchmark results
-        if: needs.plan.outputs.trigger != 'backfill'
+        if: needs.plan.outputs.trigger != 'backfill' || needs.plan.outputs.baseline_sha != ''
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          if [[ -n "$BASELINE_SHA" ]]; then
+            previous=(--previous-dir target/bench-results/baseline)
+          else
+            previous=(--artifact-name "$ARTIFACT_NAME")
+          fi
+
           set +e
           cargo --locked xtask benchmark-compare \
             --current-dir target/bench-results \
-            --artifact-name "$ARTIFACT_NAME" \
+            "${previous[@]}" \
             --output target/bench-results/benchmark-comparison.md
           status=$?
           set -e
@@ -605,6 +655,16 @@ jobs:
         with:
           name: ${{ env.ARTIFACT_NAME }}
           path: target/bench-results/*.json
+          if-no-files-found: error
+
+      # A separate artifact, so the baseline never mixes into the reports that
+      # later runs download as their previous results.
+      - name: Upload same-runner baseline results
+        if: success() && needs.plan.outputs.baseline_sha != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: benchmark-baseline-${{ matrix.destination }}
+          path: target/bench-results/baseline/*.json
           if-no-files-found: error
 
       # Failed reports stay available for debugging under a name that is never
