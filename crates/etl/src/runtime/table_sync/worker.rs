@@ -6,7 +6,7 @@ use etl_postgres::slots::EtlReplicationSlot;
 use futures::FutureExt;
 use metrics::counter;
 use tokio::{
-    sync::{Mutex, MutexGuard, Notify, Semaphore},
+    sync::{Mutex, MutexGuard, Notify, OwnedMutexGuard, Semaphore},
     task::AbortHandle,
 };
 use tokio_util::sync::CancellationToken;
@@ -174,6 +174,9 @@ impl TableSyncWorkerStateInner {
     }
 }
 
+/// Lock on a [`TableSyncWorkerState`] that owns its handle.
+pub(crate) type TableSyncWorkerStateGuard = OwnedMutexGuard<TableSyncWorkerStateInner>;
+
 /// Thread-safe handle for table synchronization worker state management.
 ///
 /// [`TableSyncWorkerState`] provides a thread-safe wrapper around table
@@ -204,6 +207,20 @@ impl TableSyncWorkerState {
         };
 
         Self { inner: Arc::new(Mutex::new(inner)) }
+    }
+
+    /// Creates a worker state outside the pool for apply handoff tests.
+    #[cfg(test)]
+    pub(crate) fn new_for_test(table_id: TableId, table_state: TableState) -> Self {
+        Self::new(table_id, table_state)
+    }
+
+    /// Locks the state and returns a guard that owns the handle.
+    ///
+    /// Callers can move an owned guard into a value that must release it
+    /// before waiting on this state.
+    pub(crate) async fn lock_owned(&self) -> TableSyncWorkerStateGuard {
+        Arc::clone(&self.inner).lock_owned().await
     }
 
     /// Waits for the table to reach a specific table state type.

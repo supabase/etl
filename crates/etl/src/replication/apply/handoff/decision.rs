@@ -1,0 +1,460 @@
+//! Pure table-sync handoff decisions.
+//!
+//! Each function maps one observation of a syncing table to an action. None
+//! of them takes a lock, reads a store, or does I/O.
+//! [`crate::replication::apply::handoff`] documents the transition table they
+//! implement and executes their answers.
+//!
+//! The return types limit what a trigger can ask for. Only a table without a
+//! running worker can spawn one. The flush decision for a running worker
+//! returns an optional [`ReadyProof`] and nothing else, so it cannot ask for
+//! catchup. Promotion to `Ready` carries a [`ReadyProof`], which only
+//! [`ReadinessInputs::ready_proof`] constructs, so the COMMIT decisions, which
+//! receive no readiness inputs, cannot promote.
+
+use tokio_postgres::types::PgLsn;
+
+use crate::replication::state::TableState;
+
+/// Progress that decides whether a `SyncDone` table may become `Ready`.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ReadinessInputs {
+    /// LSN this connection has reached.
+    current_lsn: PgLsn,
+    /// Apply checkpoint persisted before this evaluation, if any.
+    persisted_checkpoint_lsn: Option<PgLsn>,
+    /// Whether this connection holds a complete decoder for the table.
+    has_materialized_decoding_state: bool,
+}
+
+impl ReadinessInputs {
+    /// Creates the readiness inputs for one table.
+    pub(super) fn new(
+        current_lsn: PgLsn,
+        persisted_checkpoint_lsn: Option<PgLsn>,
+        has_materialized_decoding_state: bool,
+    ) -> Self {
+        Self { current_lsn, persisted_checkpoint_lsn, has_materialized_decoding_state }
+    }
+
+    /// Returns a proof that `SyncDone` at `sync_done_lsn` may be stored as
+    /// `Ready`.
+    ///
+    /// The three checks cover separate safety obligations:
+    ///
+    /// - `current_lsn >= sync_done_lsn` proves that this connection reached the
+    ///   boundary where apply ownership resumes.
+    /// - `persisted_checkpoint_lsn >= sync_done_lsn` proves restart safety.
+    ///   Requiring the stored value, not the apply loop's in-memory checkpoint,
+    ///   makes `Ready(H) => persisted apply checkpoint >= H` hold across
+    ///   crashes and checkpoint-write failures. Startup selects the later of
+    ///   the replication-slot position and this checkpoint, so a later
+    ///   connection has a bootstrap snapshot at or beyond `SyncDone`. A fresh
+    ///   pgoutput connection emits relation metadata before its first row
+    ///   change, so that relation can resolve the newest stored schema at or
+    ///   before the bootstrap.
+    /// - `has_materialized_decoding_state` proves current-connection safety.
+    ///   PostgreSQL may have sent the relation before `SyncDone`, while table
+    ///   sync still owned the table. Apply skipped that relation, and
+    ///   PostgreSQL need not send it again on the same connection. If DML then
+    ///   arrives without a local decoder, apply can recover only while
+    ///   `SyncDone` still retains the exact snapshot and masks.
+    ///
+    /// Apply-side decoding state is cleared before table sync starts.
+    /// Consequently, a later
+    /// [`crate::replication::TableDecodingState::WithSchema`] proves that this
+    /// connection now has a complete decoder: relation-less DML restored it
+    /// from `SyncDone`, or an owned relation materialized it. Only then may
+    /// `Ready` discard the durable fallback.
+    ///
+    /// The decoder check does not make a table that is already `Ready` safer
+    /// across restart; the persisted-checkpoint condition provides that. A
+    /// restarted loop which still finds `SyncDone` applies this same check
+    /// only because it is now the current connection whose decoder must be
+    /// established before it stores `Ready`.
+    ///
+    /// A handled DDL records a pending relation while retaining any previous
+    /// masks. PostgreSQL's following relation materializes the new exact
+    /// snapshot and masks. A relation-less row instead combines the retained
+    /// masks with the stored new table schema and transitions to `WithSchema`.
+    ///
+    /// A table which lacks local decoding state remains in `SyncDone`; this
+    /// does not block owned changes at or after the boundary. Its first
+    /// relation or DML can materialize the decoder on demand.
+    pub(super) fn ready_proof(&self, sync_done_lsn: PgLsn) -> Option<ReadyProof> {
+        let persisted_checkpoint_lsn =
+            self.persisted_checkpoint_lsn.filter(|lsn| *lsn >= sync_done_lsn)?;
+        let ready = self.has_materialized_decoding_state && self.current_lsn >= sync_done_lsn;
+
+        ready.then_some(ReadyProof {
+            sync_done_lsn,
+            current_lsn: self.current_lsn,
+            persisted_checkpoint_lsn,
+        })
+    }
+}
+
+/// Evidence that a `SyncDone` table may be stored as `Ready`.
+///
+/// Only [`ReadinessInputs::ready_proof`] constructs it. It records the progress
+/// the checks passed with, so the transition can be logged.
+#[derive(Debug)]
+pub(super) struct ReadyProof {
+    /// `SyncDone` boundary the readiness checks were evaluated against.
+    sync_done_lsn: PgLsn,
+    /// LSN this connection had reached.
+    current_lsn: PgLsn,
+    /// Persisted apply checkpoint, at or beyond `sync_done_lsn`.
+    persisted_checkpoint_lsn: PgLsn,
+}
+
+impl ReadyProof {
+    /// Returns the `SyncDone` boundary the readiness checks covered.
+    pub(super) fn sync_done_lsn(&self) -> PgLsn {
+        self.sync_done_lsn
+    }
+
+    /// Returns the LSN this connection had reached.
+    pub(super) fn current_lsn(&self) -> PgLsn {
+        self.current_lsn
+    }
+
+    /// Returns the persisted apply checkpoint the checks passed with.
+    pub(super) fn persisted_checkpoint_lsn(&self) -> PgLsn {
+        self.persisted_checkpoint_lsn
+    }
+}
+
+/// Action for a syncing table whose sync worker is running.
+#[derive(Debug)]
+pub(super) enum ActiveAction {
+    /// Move `SyncWait` to `Catchup` at `catchup_lsn`, then wait for `SyncDone`.
+    StartCatchup {
+        /// LSN of the snapshot the table was copied from.
+        snapshot_lsn: PgLsn,
+        /// LSN this connection had reached.
+        current_lsn: PgLsn,
+        /// LSN the table-sync worker must stream up to.
+        catchup_lsn: PgLsn,
+    },
+    /// Wait for a worker already in `Catchup` to reach `SyncDone`.
+    AwaitCatchup {
+        /// LSN the table-sync worker is streaming up to.
+        catchup_lsn: PgLsn,
+    },
+    /// Store `Ready` under the worker's state lock.
+    PromoteToReady(ReadyProof),
+    /// Leave the table to its worker.
+    Keep,
+}
+
+/// Action for a syncing table without a running sync worker.
+#[derive(Debug)]
+pub(super) enum IdleAction {
+    /// Store `Ready`.
+    PromoteToReady(ReadyProof),
+    /// Start a table-sync worker for the table.
+    SpawnWorker,
+    /// Leave the table unchanged.
+    Keep,
+}
+
+/// Decides the action after a COMMIT for a table whose worker is running.
+///
+/// `SyncWait` enters catchup at the later of the copy snapshot and the commit,
+/// because the worker may have started from a position ahead of this loop.
+pub(super) fn active_after_commit(state: &TableState, current_lsn: PgLsn) -> ActiveAction {
+    match state {
+        TableState::SyncWait { lsn } => ActiveAction::StartCatchup {
+            snapshot_lsn: *lsn,
+            current_lsn,
+            catchup_lsn: (*lsn).max(current_lsn),
+        },
+        TableState::Catchup { lsn } => ActiveAction::AwaitCatchup { catchup_lsn: *lsn },
+        TableState::Init
+        | TableState::DataSync
+        | TableState::FinishedCopy
+        | TableState::SyncDone { .. }
+        | TableState::Ready
+        | TableState::Errored { .. } => ActiveAction::Keep,
+    }
+}
+
+/// Decides whether a durable flush promotes a table whose worker is running.
+///
+/// Returns the proof for storing `Ready`, or `None` to leave the table to its
+/// worker.
+pub(super) fn active_after_flush(
+    state: &TableState,
+    readiness: &ReadinessInputs,
+) -> Option<ReadyProof> {
+    match state {
+        TableState::SyncDone { lsn, .. } => readiness.ready_proof(*lsn),
+        TableState::Init
+        | TableState::DataSync
+        | TableState::FinishedCopy
+        | TableState::SyncWait { .. }
+        | TableState::Catchup { .. }
+        | TableState::Ready
+        | TableState::Errored { .. } => None,
+    }
+}
+
+/// Decides the action while quiescent for a table whose worker is running.
+///
+/// A quiescent loop does the COMMIT work for the table, or the flush work when
+/// the COMMIT decision keeps it.
+pub(super) fn active_when_quiescent(
+    state: &TableState,
+    readiness: &ReadinessInputs,
+) -> ActiveAction {
+    match active_after_commit(state, readiness.current_lsn) {
+        ActiveAction::Keep => active_after_flush(state, readiness)
+            .map_or(ActiveAction::Keep, ActiveAction::PromoteToReady),
+        action @ (ActiveAction::StartCatchup { .. }
+        | ActiveAction::AwaitCatchup { .. }
+        | ActiveAction::PromoteToReady(_)) => action,
+    }
+}
+
+/// Decides the action after a COMMIT for a table without a running worker.
+///
+/// `SyncDone` waits for a readiness evaluation; every other syncing state needs
+/// a worker. `Ready` and `Errored` are not syncing states, so the apply worker
+/// never passes them for a table without a worker.
+pub(super) fn idle_after_commit(state: &TableState) -> IdleAction {
+    match state {
+        TableState::SyncDone { .. } => IdleAction::Keep,
+        TableState::Init
+        | TableState::DataSync
+        | TableState::FinishedCopy
+        | TableState::SyncWait { .. }
+        | TableState::Catchup { .. }
+        | TableState::Ready
+        | TableState::Errored { .. } => IdleAction::SpawnWorker,
+    }
+}
+
+/// Decides the action after a durable flush, or while quiescent, for a table
+/// without a running worker.
+///
+/// `Ready` and `Errored` are not syncing states, so the apply worker never
+/// passes them for a table without a worker.
+pub(super) fn idle_after_flush(state: &TableState, readiness: &ReadinessInputs) -> IdleAction {
+    match state {
+        TableState::SyncDone { lsn, .. } => {
+            readiness.ready_proof(*lsn).map_or(IdleAction::Keep, IdleAction::PromoteToReady)
+        }
+        TableState::Init
+        | TableState::DataSync
+        | TableState::FinishedCopy
+        | TableState::SyncWait { .. }
+        | TableState::Catchup { .. }
+        | TableState::Ready
+        | TableState::Errored { .. } => IdleAction::SpawnWorker,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio_postgres::types::PgLsn;
+
+    use crate::{
+        error::ErrorKind,
+        etl_error,
+        replication::{
+            apply::handoff::{
+                Trigger,
+                decision::{
+                    ActiveAction, IdleAction, ReadinessInputs, active_after_commit,
+                    active_after_flush, active_when_quiescent, idle_after_commit, idle_after_flush,
+                },
+            },
+            state::{TableRetryPolicy, TableState},
+        },
+    };
+
+    /// LSNs whose pairwise orders cover every comparison the handoff makes,
+    /// including the maximum value.
+    const LSNS: [u64; 4] = [0, 1, 2, u64::MAX];
+
+    /// Effect of one handoff decision, independent of the action types.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Effect {
+        StartCatchup(PgLsn),
+        AwaitCatchup(PgLsn),
+        PromoteToReady(PgLsn),
+        SpawnWorker,
+        Keep,
+    }
+
+    impl From<ActiveAction> for Effect {
+        fn from(action: ActiveAction) -> Self {
+            match action {
+                ActiveAction::StartCatchup { catchup_lsn, .. } => Self::StartCatchup(catchup_lsn),
+                ActiveAction::AwaitCatchup { catchup_lsn } => Self::AwaitCatchup(catchup_lsn),
+                ActiveAction::PromoteToReady(proof) => Self::PromoteToReady(proof.sync_done_lsn()),
+                ActiveAction::Keep => Self::Keep,
+            }
+        }
+    }
+
+    impl From<IdleAction> for Effect {
+        fn from(action: IdleAction) -> Self {
+            match action {
+                IdleAction::PromoteToReady(proof) => Self::PromoteToReady(proof.sync_done_lsn()),
+                IdleAction::SpawnWorker => Self::SpawnWorker,
+                IdleAction::Keep => Self::Keep,
+            }
+        }
+    }
+
+    /// Returns every table state shape, with each LSN-bearing state at every
+    /// test LSN.
+    fn table_states() -> Vec<TableState> {
+        let mut states = vec![
+            TableState::Init,
+            TableState::DataSync,
+            TableState::FinishedCopy,
+            TableState::Ready,
+            TableState::Errored {
+                reason: "copy failed".to_owned(),
+                solution: None,
+                retry_policy: TableRetryPolicy::NoRetry,
+                source_err: etl_error!(ErrorKind::Unknown, "Copy failed"),
+            },
+        ];
+        for lsn in LSNS.map(PgLsn::from) {
+            states.push(TableState::SyncWait { lsn });
+            states.push(TableState::Catchup { lsn });
+            states.push(TableState::SyncDone { lsn, table_decoding_state: None });
+        }
+
+        states
+    }
+
+    /// Runs the decision the apply worker uses for a trigger and presence.
+    fn decide(
+        trigger: Trigger,
+        has_active_worker: bool,
+        state: &TableState,
+        current_lsn: PgLsn,
+        readiness: &ReadinessInputs,
+    ) -> Effect {
+        match (trigger, has_active_worker) {
+            (Trigger::AfterCommit, true) => active_after_commit(state, current_lsn).into(),
+            (Trigger::AfterCommit, false) => idle_after_commit(state).into(),
+            (Trigger::AfterFlush, true) => active_after_flush(state, readiness)
+                .map_or(Effect::Keep, |proof| Effect::PromoteToReady(proof.sync_done_lsn())),
+            (Trigger::Quiescent, true) => active_when_quiescent(state, readiness).into(),
+            (Trigger::AfterFlush | Trigger::Quiescent, false) => {
+                idle_after_flush(state, readiness).into()
+            }
+        }
+    }
+
+    /// Returns the specified handoff effect.
+    ///
+    /// One row per trigger and worker presence, transcribed from the
+    /// per-trigger handoff functions the decisions replaced; each row names its
+    /// source in commit `3cd6c009` so it can be audited. The decisions must
+    /// match it on every input.
+    fn specified_effect(
+        trigger: Trigger,
+        has_active_worker: bool,
+        state: &TableState,
+        current_lsn: PgLsn,
+        persisted_checkpoint_lsn: Option<PgLsn>,
+        has_materialized_decoding_state: bool,
+    ) -> Effect {
+        let ready = |sync_done_lsn: PgLsn| {
+            has_materialized_decoding_state
+                && current_lsn >= sync_done_lsn
+                && persisted_checkpoint_lsn.is_some_and(|lsn| lsn >= sync_done_lsn)
+        };
+
+        match (trigger, has_active_worker) {
+            // `process_single_syncing_table_after_commit_event`, active branch.
+            (Trigger::AfterCommit, true) => match state {
+                TableState::SyncWait { lsn } => Effect::StartCatchup((*lsn).max(current_lsn)),
+                TableState::Catchup { lsn } => Effect::AwaitCatchup(*lsn),
+                _ => Effect::Keep,
+            },
+            // `process_single_syncing_table_after_commit_event`, no-worker branch.
+            (Trigger::AfterCommit, false) => match state {
+                TableState::SyncDone { .. } => Effect::Keep,
+                _ => Effect::SpawnWorker,
+            },
+            // `process_single_syncing_table_after_flush`, active branch.
+            (Trigger::AfterFlush, true) => match state {
+                TableState::SyncDone { lsn, .. } if ready(*lsn) => Effect::PromoteToReady(*lsn),
+                _ => Effect::Keep,
+            },
+            // `process_single_syncing_table_after_flush`, no-worker branch.
+            (Trigger::AfterFlush, false) => match state {
+                TableState::SyncDone { lsn, .. } if ready(*lsn) => Effect::PromoteToReady(*lsn),
+                TableState::SyncDone { .. } => Effect::Keep,
+                _ => Effect::SpawnWorker,
+            },
+            // `process_single_syncing_table_when_quiescent`, active branch.
+            (Trigger::Quiescent, true) => match state {
+                TableState::SyncWait { lsn } => Effect::StartCatchup((*lsn).max(current_lsn)),
+                TableState::SyncDone { lsn, .. } if ready(*lsn) => Effect::PromoteToReady(*lsn),
+                TableState::Catchup { lsn } => Effect::AwaitCatchup(*lsn),
+                _ => Effect::Keep,
+            },
+            // `process_single_syncing_table_when_quiescent`, no-worker branch.
+            (Trigger::Quiescent, false) => match state {
+                TableState::SyncDone { lsn, .. } if ready(*lsn) => Effect::PromoteToReady(*lsn),
+                TableState::SyncDone { .. } => Effect::Keep,
+                _ => Effect::SpawnWorker,
+            },
+        }
+    }
+
+    #[test]
+    fn decisions_match_the_handoff_specification() {
+        let lsns = LSNS.map(PgLsn::from);
+        let persisted_checkpoints = std::iter::once(None).chain(lsns.map(Some));
+
+        for trigger in [Trigger::AfterCommit, Trigger::AfterFlush, Trigger::Quiescent] {
+            for has_active_worker in [true, false] {
+                for state in table_states() {
+                    for current_lsn in lsns {
+                        for persisted_checkpoint_lsn in persisted_checkpoints.clone() {
+                            for has_materialized_decoding_state in [false, true] {
+                                let readiness = ReadinessInputs::new(
+                                    current_lsn,
+                                    persisted_checkpoint_lsn,
+                                    has_materialized_decoding_state,
+                                );
+
+                                assert_eq!(
+                                    decide(
+                                        trigger,
+                                        has_active_worker,
+                                        &state,
+                                        current_lsn,
+                                        &readiness
+                                    ),
+                                    specified_effect(
+                                        trigger,
+                                        has_active_worker,
+                                        &state,
+                                        current_lsn,
+                                        persisted_checkpoint_lsn,
+                                        has_materialized_decoding_state,
+                                    ),
+                                    "{trigger:?}, active worker {has_active_worker}, {state:?}, \
+                                     current {current_lsn}, persisted \
+                                     {persisted_checkpoint_lsn:?}, decoder \
+                                     {has_materialized_decoding_state}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
