@@ -943,6 +943,15 @@ mod tests {
         }
     }
 
+    /// An escaped backslash ends its escape, so the closing quote after it
+    /// ends the string and the containers that follow count as nesting.
+    #[test]
+    fn json_past_nesting_limit_after_escaped_backslash_is_an_unsupported_source_value() {
+        let input = format!("[\"\\\\\", {}]", nested_json_array(MAX_JSON_NESTING_DEPTH));
+        let error = parse_cell_from_postgres_text(&Type::JSON, &input).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::UnsupportedSourceValue);
+    }
+
     /// Brackets inside strings are not nesting, so malformed JSON with deep
     /// brackets in a string stays a deserialization error.
     #[test]
