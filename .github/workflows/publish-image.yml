@@ -1,8 +1,8 @@
 name: Publish image
 
 on:
-  pull_request:
-    types: [closed]
+  # Release routing assumes one merged PR per push; keep merge queue batches at 1.
+  push:
     branches: [main]
   workflow_dispatch:
     inputs:
@@ -14,18 +14,50 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
   id-token: write
 
 jobs:
+  route:
+    name: Resolve publication route
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    outputs:
+      release: ${{ steps.pr.outputs.release }}
+      head-ref: ${{ steps.pr.outputs.head-ref }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Resolve merged PR
+        if: github.event_name == 'push'
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/actions/merged-pr/resolve.py
+
   image:
     name: Publish image
+    needs: route
     if: |
-      github.event_name == 'workflow_dispatch' || (
-        github.event.pull_request.merged == true &&
-        !contains(github.event.pull_request.labels.*.name, 'release')
-      )
+      github.event_name == 'workflow_dispatch' || needs.route.outputs.release == 'false'
     uses: ./.github/workflows/reusable-publish-image.yml
     with:
       commit: ${{ github.event_name == 'workflow_dispatch' && inputs.commit || '' }}
+    secrets:
+      PROD_AWS_ROLE: ${{ secrets.PROD_AWS_ROLE }}
+
+  release:
+    name: Publish release
+    needs: route
+    if: github.event_name == 'push' && needs.route.outputs.release == 'true'
+    permissions:
+      contents: write
+      id-token: write
+    uses: ./.github/workflows/release.yml
+    with:
+      head-ref: ${{ needs.route.outputs.head-ref }}
     secrets:
       PROD_AWS_ROLE: ${{ secrets.PROD_AWS_ROLE }}
