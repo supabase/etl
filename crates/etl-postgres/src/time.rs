@@ -1,15 +1,17 @@
 //! Postgres temporal parsing and wire-format helpers.
 
 use std::{
-    fmt,
+    fmt::{self, Write},
     str::FromStr,
     sync::LazyLock,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
 use thiserror::Error;
 pub use tokio_postgres::types::{Date, Timestamp};
+
+use crate::ascii::AsciiOutput;
 
 /// Postgres date format string for parsing dates in YYYY-MM-DD format.
 pub const DATE_FORMAT: &str = "%Y-%m-%d";
@@ -32,6 +34,10 @@ const POSTGRES_UTC_OFFSET_LIMIT_SECONDS: i32 = 16 * 60 * 60;
 /// (2000-01-01).
 const POSTGRES_EPOCH_OFFSET_SECONDS: u64 = 946_684_800;
 
+/// Nanoseconds in one second; chrono stores a leap second as a nanosecond
+/// count at or above this.
+const NANOSECONDS_PER_SECOND: u32 = 1_000_000_000;
+
 /// Postgres epoch (2000-01-01 00:00:00 UTC) for timestamp calculations.
 pub static POSTGRES_EPOCH: LazyLock<SystemTime> =
     LazyLock::new(|| UNIX_EPOCH + Duration::from_secs(POSTGRES_EPOCH_OFFSET_SECONDS));
@@ -47,6 +53,57 @@ pub enum ParseTimeError {
     InvalidSyntax,
 }
 
+/// Appends a time of day as chrono renders [`TIME_FORMAT`].
+///
+/// The fraction is omitted when zero, and otherwise has three, six, or nine
+/// digits, the shortest of those that loses nothing.
+fn push_time(output: &mut AsciiOutput<'_, '_>, time: NaiveTime) -> fmt::Result {
+    let nanosecond = time.nanosecond();
+    if nanosecond >= NANOSECONDS_PER_SECOND {
+        // Postgres never sends a leap second, so keep chrono's rendering of
+        // second 60 instead of reproducing it.
+        return write!(output, "{}", time.format(TIME_FORMAT));
+    }
+
+    output.push_decimal::<2>(time.hour())?;
+    output.push(b':')?;
+    output.push_decimal::<2>(time.minute())?;
+    output.push(b':')?;
+    output.push_decimal::<2>(time.second())?;
+
+    if nanosecond == 0 {
+        return Ok(());
+    }
+
+    output.push(b'.')?;
+    if nanosecond.is_multiple_of(1_000_000) {
+        output.push_decimal::<3>(nanosecond / 1_000_000)
+    } else if nanosecond.is_multiple_of(1_000) {
+        output.push_decimal::<6>(nanosecond / 1_000)
+    } else {
+        output.push_decimal::<9>(nanosecond)
+    }
+}
+
+/// Appends a date using astronomical year numbering.
+fn push_date(output: &mut AsciiOutput<'_, '_>, date: NaiveDate) -> fmt::Result {
+    let year = date.year();
+    match u32::try_from(year) {
+        Ok(year) if year <= 9999 => {
+            output.push_decimal::<4>(year)?;
+            output.push(b'-')?;
+            output.push_decimal::<2>(date.month())?;
+            output.push(b'-')?;
+            output.push_decimal::<2>(date.day())
+        }
+        // Native SQL parsers accept expanded positive years without chrono's
+        // leading `+`.
+        Ok(_) => write!(output, "{}{}", year, date.format("-%m-%d")),
+        // Years before 1 BCE are rare, so keep chrono's signed rendering.
+        Err(_) => write!(output, "{}", date.format(DATE_FORMAT)),
+    }
+}
+
 /// A Postgres time of day, including the distinct end-of-day value.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum PgTime {
@@ -54,6 +111,16 @@ pub enum PgTime {
     Value(NaiveTime),
     /// The end of the day, `24:00:00`, distinct from midnight.
     EndOfDay,
+}
+
+impl PgTime {
+    /// Appends the time of day, with the end of the day as `24:00:00`.
+    fn push_to(self, output: &mut AsciiOutput<'_, '_>) -> fmt::Result {
+        match self {
+            Self::Value(time) => push_time(output, time),
+            Self::EndOfDay => output.push_bytes(b"24:00:00"),
+        }
+    }
 }
 
 impl Default for PgTime {
@@ -85,22 +152,22 @@ impl FromStr for PgTime {
 
 impl fmt::Display for PgTime {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Value(time) => write!(f, "{}", time.format(TIME_FORMAT)),
-            Self::EndOfDay => f.write_str("24:00:00"),
-        }
+        let mut output = AsciiOutput::new(f);
+        self.push_to(&mut output)?;
+
+        output.finish()
     }
 }
 
 /// Formats a date using astronomical year numbering or an infinity literal.
 pub fn format_date(value: &Date<NaiveDate>) -> impl fmt::Display + '_ {
     fmt::from_fn(move |f| match value {
-        Date::Value(value) if value.year() > 9999 => {
-            // Native SQL parsers accept expanded positive years without
-            // chrono's leading `+`.
-            write!(f, "{}{}", value.year(), value.format("-%m-%d"))
+        Date::Value(value) => {
+            let mut output = AsciiOutput::new(f);
+            push_date(&mut output, *value)?;
+
+            output.finish()
         }
-        Date::Value(value) => write!(f, "{}", value.format(DATE_FORMAT)),
         Date::PosInfinity => f.write_str("infinity"),
         Date::NegInfinity => f.write_str("-infinity"),
     })
@@ -110,12 +177,14 @@ pub fn format_date(value: &Date<NaiveDate>) -> impl fmt::Display + '_ {
 /// literal.
 pub fn format_timestamp(value: &Timestamp<NaiveDateTime>) -> impl fmt::Display + '_ {
     fmt::from_fn(move |f| match value {
-        Timestamp::Value(value) => write!(
-            f,
-            "{} {}",
-            format_date(&Date::Value(value.date())),
-            value.time().format(TIME_FORMAT)
-        ),
+        Timestamp::Value(value) => {
+            let mut output = AsciiOutput::new(f);
+            push_date(&mut output, value.date())?;
+            output.push(b' ')?;
+            push_time(&mut output, value.time())?;
+
+            output.finish()
+        }
         Timestamp::PosInfinity => f.write_str("infinity"),
         Timestamp::NegInfinity => f.write_str("-infinity"),
     })
@@ -125,12 +194,15 @@ pub fn format_timestamp(value: &Timestamp<NaiveDateTime>) -> impl fmt::Display +
 /// literal.
 pub fn format_timestamptz(value: &Timestamp<DateTime<Utc>>) -> impl fmt::Display + '_ {
     fmt::from_fn(move |f| match value {
-        Timestamp::Value(value) => write!(
-            f,
-            "{} {}",
-            format_date(&Date::Value(value.date_naive())),
-            value.format("%H:%M:%S%.f%:z")
-        ),
+        Timestamp::Value(value) => {
+            let mut output = AsciiOutput::new(f);
+            push_date(&mut output, value.date_naive())?;
+            output.push(b' ')?;
+            push_time(&mut output, value.time())?;
+            output.push_bytes(b"+00:00")?;
+
+            output.finish()
+        }
         Timestamp::PosInfinity => f.write_str("infinity"),
         Timestamp::NegInfinity => f.write_str("-infinity"),
     })
@@ -181,8 +253,11 @@ impl FromStr for PgTimeTz {
 
 impl fmt::Display for PgTimeTz {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.time)?;
-        write_utc_offset(f, self.offset)
+        let mut output = AsciiOutput::new(f);
+        self.time.push_to(&mut output)?;
+        push_utc_offset(&mut output, self.offset)?;
+
+        output.finish()
     }
 }
 
@@ -275,22 +350,26 @@ fn parse_two_digit_bytes(bytes: &[u8]) -> Option<i32> {
     Some((i32::from(bytes[0] - b'0') * 10) + i32::from(bytes[1] - b'0'))
 }
 
-/// Writes a fixed offset the same way Postgres ISO output does.
-fn write_utc_offset(f: &mut fmt::Formatter<'_>, offset: FixedOffset) -> fmt::Result {
+/// Appends a fixed offset the same way Postgres ISO output does.
+fn push_utc_offset(output: &mut AsciiOutput<'_, '_>, offset: FixedOffset) -> fmt::Result {
     let seconds = offset.local_minus_utc();
-    let sign = if seconds < 0 { '-' } else { '+' };
-    let seconds = seconds.abs();
-    let hours = seconds / 3600;
+    output.push(if seconds < 0 { b'-' } else { b'+' })?;
+
+    let seconds = seconds.unsigned_abs();
     let minutes = (seconds % 3600) / 60;
     let remaining_seconds = seconds % 60;
 
-    if remaining_seconds != 0 {
-        write!(f, "{sign}{hours:02}:{minutes:02}:{remaining_seconds:02}")
-    } else if minutes != 0 {
-        write!(f, "{sign}{hours:02}:{minutes:02}")
-    } else {
-        write!(f, "{sign}{hours:02}")
+    output.push_decimal::<2>(seconds / 3600)?;
+    if minutes != 0 || remaining_seconds != 0 {
+        output.push(b':')?;
+        output.push_decimal::<2>(minutes)?;
     }
+    if remaining_seconds != 0 {
+        output.push(b':')?;
+        output.push_decimal::<2>(remaining_seconds)?;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

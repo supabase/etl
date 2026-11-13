@@ -1,6 +1,9 @@
 //! Stack-buffered ASCII output for formatting Postgres values.
 
-use std::{fmt, str};
+use std::{
+    fmt::{self, Write},
+    str,
+};
 
 /// Bytes of formatted output batched before each formatter write.
 ///
@@ -51,6 +54,18 @@ impl<'a, 'b> AsciiOutput<'a, 'b> {
         Ok(())
     }
 
+    /// Appends the low `WIDTH` decimal digits of `value`, zero-padded.
+    pub(crate) fn push_decimal<const WIDTH: usize>(&mut self, mut value: u32) -> fmt::Result {
+        let mut digits = [b'0'; WIDTH];
+        for digit in digits.iter_mut().rev() {
+            // The remainder is below ten, so the cast cannot truncate.
+            *digit = b'0' + (value % 10) as u8;
+            value /= 10;
+        }
+
+        self.push_bytes(&digits)
+    }
+
     /// Writes all pending output to the formatter.
     pub(crate) fn finish(mut self) -> fmt::Result {
         self.flush()
@@ -64,5 +79,14 @@ impl<'a, 'b> AsciiOutput<'a, 'b> {
         self.len = 0;
 
         Ok(())
+    }
+}
+
+impl Write for AsciiOutput<'_, '_> {
+    /// Writes text that need not be ASCII, after the pending output so order
+    /// is kept.
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        self.flush()?;
+        self.f.write_str(text)
     }
 }
