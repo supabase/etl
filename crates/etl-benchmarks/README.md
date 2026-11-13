@@ -398,6 +398,9 @@ rows or cells per pass, `--seed <n>` to change the generated fixtures, and
 `--json` for one JSON object per scenario. Judge each scenario on its own; a
 change often moves only one.
 
+Destination scenarios are compiled only with the destination's feature. For
+example, `bigquery_row_encode` needs `--features bigquery`.
+
 The binary uses jemalloc, as the replicator does, and installs the Prometheus
 recorder so metric calls pay the real registry cost. Instruction counts come
 from `proc_pid_rusage` and are reported on macOS only. On other platforms the
