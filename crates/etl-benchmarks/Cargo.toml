@@ -13,6 +13,9 @@ test = false
 doctest = false
 
 [[bin]]
+name = "hot_paths"
+
+[[bin]]
 name = "snowflake_encoder"
 required-features = ["snowflake"]
 
@@ -30,9 +33,11 @@ snowflake = [
 
 [dependencies]
 anyhow = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
 clap = { workspace = true, features = ["default", "std", "derive"] }
 clickhouse = { workspace = true, optional = true }
-etl = { workspace = true, features = ["test-utils", "tls-rustls-ring"] }
+etl = { workspace = true, features = ["benchmarking", "test-utils", "tls-rustls-ring"] }
 etl-config = { workspace = true }
 etl-destinations = { workspace = true, optional = true, features = ["tls-rustls-ring"] }
 etl-postgres = { workspace = true, features = ["sqlx", "tls-rustls-ring"] }
@@ -46,6 +51,12 @@ sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls-ring", "post
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "signal"] }
 tracing = { workspace = true, features = ["default"] }
 url = { workspace = true }
+
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = { workspace = true }
 
 [lints]
 workspace = true

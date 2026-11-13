@@ -17,8 +17,11 @@ Use the direct benchmark binaries only when developing the benchmark code itself
 
 - `table_copy`: initial table-copy throughput for selected TPC-C tables.
 - `table_streaming`: CDC throughput for a TPC-C transaction workload.
+- `hot_paths`: instructions and allocations per row or cell for decoding,
+  formatting, and metric hot paths, without Postgres or a destination. See
+  [Hot-Path Instruction Benchmark](#hot-path-instruction-benchmark).
 
-Both benchmarks support:
+`table_copy` and `table_streaming` support:
 
 - `null`: acknowledges and discards writes. Use this to measure source extraction,
   decoding, batching, and pipeline overhead without destination write cost.
@@ -357,6 +360,53 @@ Required environment variables (or their `--clickhouse-*` CLI equivalents):
 Optional:
 
 - `BENCH_CLICKHOUSE_PASSWORD`: ClickHouse password. Omit if the user has none.
+
+## Hot-Path Instruction Benchmark
+
+`hot_paths` counts the instructions and allocations of code that runs once per
+row or once per cell. Use it to compare two builds of nearly identical code:
+instruction counts vary by about 0.1% between runs, where wall time varies by
+several percent.
+
+```bash
+cargo run --locked --release -p etl-benchmarks --bin hot_paths -- --repeat 9
+```
+
+Each scenario builds its fixtures, runs one discarded warm-up pass, then measures
+whole passes and reports the median pass:
+
+| Column | Meaning |
+| --- | --- |
+| `instr/unit` | Instructions retired per row or cell. |
+| `spread` | Range of instruction counts across passes, as a percentage of the median. A difference between builds smaller than this is noise. |
+| `allocs/unit`, `bytes/unit` | Allocator calls (`alloc`, `alloc_zeroed`, `realloc`) and bytes requested. These are exact. |
+| `ns/unit` | Wall time, as a cross-check only. |
+| `checksum` | Hash of the output. It must match between the builds being compared; otherwise they did different work. |
+
+To compare a change, keep the baseline binary and run both:
+
+```bash
+cargo build --locked --release -p etl-benchmarks --bin hot_paths
+cp target/release/hot_paths target/release/hot_paths-baseline
+# apply the change, rebuild, then:
+target/release/hot_paths-baseline --filter numeric --repeat 9
+target/release/hot_paths --filter numeric --repeat 9
+```
+
+Use `--filter <text>` to select scenarios by name, `--units <n>` to change the
+rows or cells per pass, `--seed <n>` to change the generated fixtures, and
+`--json` for one JSON object per scenario. Judge each scenario on its own; a
+change often moves only one.
+
+The binary uses jemalloc, as the replicator does, and installs the Prometheus
+recorder so metric calls pay the real registry cost. Instruction counts come
+from `proc_pid_rusage` and are reported on macOS only. On other platforms the
+column shows `n/a`; run one scenario under `perf stat -e instructions:u` or
+Cachegrind instead, and subtract a `--repeat 1` run to remove setup.
+
+Scenarios isolate one code path with synthetic fixtures. They rank and confirm
+local changes; confirm a result that matters with `table_copy` or
+`table_streaming` before relying on it.
 
 ## GitHub Actions
 
