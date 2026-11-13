@@ -1785,6 +1785,7 @@ async fn literal_defaults_preserve_unicode_and_numeric_values() {
         .unwrap();
     let publication_name = "test_pub_bq_literal_defaults";
     database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
+
     for statement in [
         format!("insert into {} default values", table_name.as_quoted_identifier()),
         format!(
@@ -1837,6 +1838,7 @@ async fn literal_defaults_preserve_unicode_and_numeric_values() {
         )
         .await
         .unwrap();
+
     // Keep row values representable to isolate higher-scale default DDL from
     // the Storage Write API's separate numeric value handling.
     for statement in [
@@ -2425,6 +2427,7 @@ async fn schema_change_applies_rename_cycle_and_same_name_replacement() {
     if skip_if_missing_bigquery_env_vars() {
         return;
     }
+
     init_test_tracing();
     install_crypto_provider();
 

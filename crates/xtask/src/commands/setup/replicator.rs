@@ -257,6 +257,7 @@ destination:
                 } else {
                     format!("    service_account_key: {}\n", yaml_string(key))
                 };
+
                 format!(
                     "\
 destination:
@@ -352,9 +353,11 @@ pub(super) fn release_conflicting_apply_slot(config: &ReplicatorConfig) -> Resul
     let Some((database, active)) = row.split_once('|') else {
         bail!("Unexpected replication slot row: {row}");
     };
+
     if database == postgres.name {
         return Ok(());
     }
+
     if active == "t" {
         bail!(
             "Replication slot {slot_name} is active on database `{database}`. Stop that pipeline, \
@@ -370,6 +373,7 @@ pub(super) fn release_conflicting_apply_slot(config: &ReplicatorConfig) -> Resul
     if !status.success() {
         bail!("Failed to drop leftover replication slot {slot_name}");
     }
+
     println!("Dropped leftover replication slot {slot_name} (was bound to database `{database}`).");
     Ok(())
 }
@@ -388,9 +392,11 @@ fn psql_command(config: &PgConnectionConfig) -> Command {
         "-d",
         "postgres",
     ]);
+
     if let Some(password) = &config.password {
         command.env("PGPASSWORD", password.expose_secret());
     }
+
     command
 }
 
@@ -450,12 +456,14 @@ impl ConfigEnvGuard {
     fn set(directory: &Path, environment: &str) -> Self {
         let previous_config_dir = env::var_os("APP_CONFIG_DIR");
         let previous_environment = env::var_os("APP_ENVIRONMENT");
+
         // SAFETY: xtask commands are single-threaded, and nextest runs each
         // test in its own process.
         unsafe {
             env::set_var("APP_CONFIG_DIR", directory);
             env::set_var("APP_ENVIRONMENT", environment);
         }
+
         Self { previous_config_dir, previous_environment }
     }
 }
@@ -469,6 +477,7 @@ impl Drop for ConfigEnvGuard {
                 Some(value) => env::set_var("APP_CONFIG_DIR", value),
                 None => env::remove_var("APP_CONFIG_DIR"),
             }
+
             match &self.previous_environment {
                 Some(value) => env::set_var("APP_ENVIRONMENT", value),
                 None => env::remove_var("APP_ENVIRONMENT"),

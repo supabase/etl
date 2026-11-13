@@ -191,6 +191,7 @@ impl<T: TokenProvider> SqlClient<T> {
                 "Snowflake table '{table_name}' still has defaults on JSON columns after migration"
             )));
         }
+
         Ok(())
     }
 
@@ -203,6 +204,7 @@ impl<T: TokenProvider> SqlClient<T> {
         let fqn = self.fully_qualified_name(table_name);
         let response = self.execute_statement(&format!("show columns in table {fqn}")).await?;
         let names = parse_show_columns(&response)?;
+
         for &column_name in column_names {
             if !names.contains(&column_name) {
                 return Err(Error::MissingTableColumn {
@@ -211,6 +213,7 @@ impl<T: TokenProvider> SqlClient<T> {
                 });
             }
         }
+
         let columns = parse_table_columns(&response, names)?;
         json_columns_with_defaults(&response, &columns, column_names)?;
         Ok(())
@@ -308,6 +311,7 @@ impl<T: TokenProvider> SqlClient<T> {
                         ));
                     }
                 };
+
                 Ok((name.to_owned(), kind.to_owned(), comment.to_owned()))
             })
             .collect()
@@ -615,11 +619,14 @@ fn json_columns_with_defaults<'a>(
     if json_column_names.is_empty() {
         return Ok(Vec::new());
     }
+
     let mut conflicts = Vec::new();
+
     for &ShowColumn { name, data_type, default } in columns {
         if !json_column_names.contains(&name) {
             continue;
         }
+
         let typ = serde_json::from_str::<serde_json::Value>(data_type).ok();
         let typ = typ
             .as_ref()
@@ -635,6 +642,7 @@ fn json_columns_with_defaults<'a>(
                  the table to restore its JSON storage layout."
             )));
         }
+
         match default {
             serde_json::Value::Null => {}
             serde_json::Value::String(expression) if expression.is_empty() => {}
@@ -649,6 +657,7 @@ fn json_columns_with_defaults<'a>(
             }
         }
     }
+
     Ok(conflicts)
 }
 
@@ -674,6 +683,7 @@ fn validate_cdc_metadata(columns: &[ShowColumn<'_>]) -> Result<()> {
             CDC_MISSING_COLUMNS_COLUMN => "ARRAY",
             _ => continue,
         };
+
         let metadata: serde_json::Value = serde_json::from_str(data_type).map_err(|_| {
             Error::UnsupportedLayout(format!("Column '{name}' has malformed type metadata"))
         })?;
@@ -688,6 +698,7 @@ fn validate_cdc_metadata(columns: &[ShowColumn<'_>]) -> Result<()> {
             )));
         }
     }
+
     Ok(())
 }
 
@@ -825,6 +836,7 @@ mod tests {
                     Err(Error::HttpStatus { status: StatusCode::UNAUTHORIZED, .. })
                 )),
             }
+
             assert_eq!(server.await.unwrap(), vec!["token-0", "token-0", "token-1"]);
             assert_eq!(auth.invalidations(), 1);
         }
@@ -915,12 +927,14 @@ mod tests {
                 Err(Error::Config(_))
             ));
         }
+
         for typ in ["not-json", "{}", r#"{"type":null}"#, r#"{"type":1}"#] {
             let response = column_response(&[("payload", typ, json!(null))]);
             assert!(
                 matches!(validate_table_response(&response, "events", &["payload"], &["payload"]), Err(Error::Sql { statement_handle: Some(handle), .. }) if handle == "test-statement")
             );
         }
+
         for default in [json!(false), json!({})] {
             let response = column_response(&[("payload", r#"{"type":"VARIANT"}"#, default)]);
             assert!(matches!(
@@ -928,6 +942,7 @@ mod tests {
                 Err(Error::Sql { .. })
             ));
         }
+
         let missing =
             statement_response(&["column_name"], vec![vec![serde_json::json!("payload")]]);
         assert!(validate_table_response(&missing, "events", &["payload"], &["payload"]).is_err());
@@ -1060,6 +1075,7 @@ mod tests {
         for column in &mut response.result_set_meta_data.as_mut().unwrap().row_type {
             column.name.make_ascii_uppercase();
         }
+
         let expected = ["_cdc_operation", "_cdc_sequence_number", "payload", "unrelated"];
 
         assert!(validate_table_response(&response, "events", &expected, &[]).unwrap().is_empty());
@@ -1089,6 +1105,7 @@ mod tests {
             },
             "data": [["payload", r#"{"type":"VARIANT"}"#, null]]
         });
+
         for (pointer, value, message) in [
             ("/resultSetMetaData", json!(null), "SHOW COLUMNS omitted result metadata"),
             ("/data", json!(null), "SHOW COLUMNS omitted result data"),
@@ -1173,10 +1190,12 @@ mod tests {
             )
         };
         let expected = ["id", "_cdc_operation", "_cdc_sequence_number", "_cdc_missing_columns"];
+
         for default in [serde_json::Value::Null, "".into()] {
             let response = response("ARRAY", true, default);
             validate_table_response(&response, "events", &expected, &[]).unwrap();
         }
+
         for (typ, nullable, default) in
             [("TEXT", true, ""), ("ARRAY", false, ""), ("ARRAY", true, "ARRAY_CONSTRUCT()")]
         {
@@ -1186,6 +1205,7 @@ mod tests {
                 Err(Error::UnsupportedLayout(_))
             ));
         }
+
         let malformed = response("ARRAY", false, "".into());
         let mut malformed = malformed;
         malformed.data.as_mut().unwrap()[0][1] = "{invalid".into();

@@ -99,6 +99,7 @@ async fn read_replica_replays_multiple_test_databases() {
         eprintln!("Skipping test: PostgreSQL 16+ required for logical decoding on standbys");
         return;
     }
+
     let schema_a = setup_test_database_schema(&primary_a, TableSelection::UsersOnly).await;
 
     let primary_b = spawn_source_database().await;

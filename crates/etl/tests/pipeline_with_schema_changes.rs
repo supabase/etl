@@ -159,6 +159,7 @@ async fn run_relation_schema_change(change: RelationSchemaChange) {
         RelationSchemaChange::ChangeColumnDefault => "schema_change_default",
         RelationSchemaChange::ChangeColumnNullability => "schema_change_nullability",
     };
+
     let (database, table_name, table_id, store, destination, pipeline, _pipeline_id, _publication) =
         create_database_and_sync_done_pipeline_with_table(
             table_suffix,
@@ -277,11 +278,15 @@ async fn run_relation_schema_change(change: RelationSchemaChange) {
     let Event::Relation(r) = get_last_relation_event(&events, table_id) else {
         panic!("expected relation event");
     };
+
     assert_replicated_schema_column_names_types(&r.replicated_table_schema, &expected_columns);
+
     let Event::Insert(i) = get_last_insert_event(&events, table_id) else {
         panic!("expected insert event");
     };
+
     assert_eq!(i.table_row.values().len(), expected_columns.len());
+
     match change {
         RelationSchemaChange::ChangeColumnDefault => {
             assert_eq!(i.table_row.values()[2], Cell::I32(42));
@@ -291,6 +296,7 @@ async fn run_relation_schema_change(change: RelationSchemaChange) {
         }
         _ => {}
     }
+
     assert_eq!(
         i.replicated_table_schema.inner().snapshot_id,
         r.replicated_table_schema.inner().snapshot_id
@@ -298,6 +304,7 @@ async fn run_relation_schema_change(change: RelationSchemaChange) {
 
     let relation_age =
         r.replicated_table_schema.column_schemas().find(|column| column.name == "age");
+
     match change {
         RelationSchemaChange::DropColumn => assert!(relation_age.is_none()),
         RelationSchemaChange::ChangeColumnDefault => {
@@ -313,6 +320,7 @@ async fn run_relation_schema_change(change: RelationSchemaChange) {
     let snapshots = table_schemas.get(&table_id).unwrap();
     let stored_schema = assert_only_schema_snapshot(snapshots, &expected_columns);
     let stored_age = stored_schema.column_schemas.iter().find(|column| column.name == "age");
+
     match change {
         RelationSchemaChange::DropColumn => assert!(stored_age.is_none()),
         RelationSchemaChange::ChangeColumnDefault => {
@@ -323,6 +331,7 @@ async fn run_relation_schema_change(change: RelationSchemaChange) {
         }
         _ => {}
     }
+
     assert_eq!(snapshots[0].0, r.replicated_table_schema.inner().snapshot_id);
 }
 
@@ -469,20 +478,25 @@ async fn relationless_noop_schema_changes_reuse_previous_relation_masks() {
     let Event::Insert(insert) = get_last_insert_event(&events, table_id) else {
         panic!("expected insert event");
     };
+
     let Event::Truncate(truncate) = get_last_truncate_event(&events, table_id) else {
         panic!("expected truncate event");
     };
+
     let Event::Relation(warm_relation) = &relations[0] else {
         panic!("expected warm relation event");
     };
+
     let Event::Relation(insert_relation) = get_relation_before_last_insert(&events, table_id)
     else {
         panic!("expected relation event before last insert");
     };
+
     let Event::Relation(truncate_relation) = get_relation_before_last_truncate(&events, table_id)
     else {
         panic!("expected relation event before last truncate");
     };
+
     assert_eq!(insert.table_row.values()[1], Cell::String("Alice".to_owned()));
     assert_eq!(truncate.truncated_tables.len(), 1);
     assert_eq!(truncate.truncated_tables[0].id(), table_id);
@@ -505,10 +519,12 @@ async fn relationless_noop_schema_changes_reuse_previous_relation_masks() {
             }
             _ => continue,
         };
+
         assert_eq!(schema.inner(), initial.inner());
         assert_eq!(schema.replication_mask(), initial.replication_mask());
         assert_eq!(schema.identity_mask(), initial.identity_mask());
     }
+
     let ages = grouped[&(EventType::Insert, table_id)]
         .iter()
         .map(|event| match event {
@@ -639,6 +655,7 @@ async fn alter_table_without_dml_stores_schema_snapshot() {
     let Event::Relation(relation) = get_last_relation_event(&events, table_id) else {
         panic!("expected relation event");
     };
+
     assert_replicated_schema_column_names_types(
         &relation.replicated_table_schema,
         &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4), ("email", Type::TEXT)],
@@ -656,6 +673,7 @@ async fn alter_table_without_dml_stores_schema_snapshot() {
     let Event::Insert(insert) = get_last_insert_event(&events, table_id) else {
         panic!("expected insert event");
     };
+
     assert_eq!(insert.table_row.values().len(), 4);
     assert_eq!(
         insert.replicated_table_schema.inner().snapshot_id,
@@ -764,6 +782,7 @@ async fn default_expressions_round_trip_through_schema_changes_and_defaulted_ins
     let Event::Relation(relation) = get_last_relation_event(&events, table_id) else {
         panic!("expected relation event");
     };
+
     assert_replicated_schema_column_names_types(
         &relation.replicated_table_schema,
         &[
@@ -823,6 +842,7 @@ async fn default_expressions_round_trip_through_schema_changes_and_defaulted_ins
     let Event::Insert(insert) = get_last_insert_event(&events, table_id) else {
         panic!("expected insert event");
     };
+
     let values = insert.table_row.values();
     assert_eq!(values.len(), 13);
     assert!(matches!(values[0], Cell::I64(_)));
@@ -1064,6 +1084,7 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
     let Event::Relation(r) = get_last_relation_event(&events, table_id) else {
         panic!("expected relation event");
     };
+
     assert_replicated_schema_column_names_types(
         &r.replicated_table_schema,
         &[
@@ -1074,9 +1095,11 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
             ("created_at", Type::TIMESTAMP),
         ],
     );
+
     let Event::Insert(i) = get_last_insert_event(&events, table_id) else {
         panic!("expected insert event");
     };
+
     assert_eq!(i.table_row.values().len(), 5);
     assert_eq!(
         i.replicated_table_schema.inner().snapshot_id,
@@ -1190,6 +1213,7 @@ async fn partitioned_table_schema_change_updates_relation_message() {
     let Event::Relation(r) = get_last_relation_event(&events, parent_table_id) else {
         panic!("expected relation event");
     };
+
     assert_replicated_schema_column_names_types(
         &r.replicated_table_schema,
         &[
@@ -1204,6 +1228,7 @@ async fn partitioned_table_schema_change_updates_relation_message() {
     let Event::Insert(i) = get_last_insert_event(&events, parent_table_id) else {
         panic!("expected insert event");
     };
+
     assert_eq!(i.table_row.values().len(), 4);
     assert_eq!(
         i.replicated_table_schema.inner().snapshot_id,
@@ -1311,8 +1336,10 @@ async fn ddl_metric_labels_preserve_supported_tags_and_bound_unknown_tags() {
 
     let unexpected_tags = ["unexpected_a".to_owned(), "unexpected_b".to_owned(), "x".repeat(4096)];
     let transaction = client.transaction().await.unwrap();
+
     for command_tag in &unexpected_tags {
         payload["command_tag"] = command_tag.clone().into();
+
         // Unknown tags retain existing behavior for tracked and untracked
         // tables.
         for oid in [table_id.into_inner(), 0] {
@@ -1355,6 +1382,7 @@ async fn ddl_metric_labels_preserve_supported_tags_and_bound_unknown_tags() {
     let Event::Insert(insert) = get_last_insert_event(&events, table_id) else {
         panic!("expected insert event");
     };
+
     assert_eq!(insert.table_row.values(), &[Cell::I64(1), Cell::I32(7)]);
 
     let metrics = metrics_handle.render();
@@ -1378,6 +1406,7 @@ async fn ddl_metric_labels_preserve_supported_tags_and_bound_unknown_tags() {
         (DDL_COLUMN_COUNT, "unknown", None, unknown_count),
     ];
     assert_eq!(samples.len(), expected.len());
+
     for (metric, command_tag, outcome, count) in expected {
         let matching: Vec<_> = samples
             .iter()

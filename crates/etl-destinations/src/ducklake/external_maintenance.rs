@@ -140,11 +140,14 @@ where
                              keeping foreground mutations paused"
                         );
                     }
+
                     time::sleep(config.poll_interval).await;
+
                     continue;
                 }
 
                 expire_snapshots_gate.initialize_from_state_once(&state);
+
                 match reconcile_pause(&store, &config, &destination, &mut held_pause, &state).await
                 {
                     Ok(()) => {
@@ -172,6 +175,7 @@ where
                     timeout_ms = config.store_timeout.as_millis() as u64,
                     "failed to read ducklake external maintenance state"
                 );
+
                 if let Err(error) =
                     release_expired_pause_if_needed(&store, &config, &destination, &mut held_pause)
                         .await
@@ -188,6 +192,7 @@ where
                     timeout_ms = config.store_timeout.as_millis() as u64,
                     "timed out reading ducklake external maintenance state"
                 );
+
                 if let Err(error) =
                     release_expired_pause_if_needed(&store, &config, &destination, &mut held_pause)
                         .await
@@ -224,6 +229,7 @@ where
             "ducklake maintenance state disappeared, resuming foreground mutations"
         );
         release_held_pause(held, "state_missing");
+
         if let Err(error) = store.clear_replicator_status().await {
             warn!(
                 error = %error,
@@ -279,6 +285,7 @@ where
         if let Some(held) = held_pause.as_mut() {
             refresh_pools_if_required(destination, held).await?;
         }
+
         if let Some(held) = held_pause.take() {
             info!(
                 run_id = %held.run_id,
@@ -287,6 +294,7 @@ where
             release_held_pause(held, "cleared");
             report_running(store, config.store_timeout).await;
         }
+
         return Ok(());
     };
 
@@ -299,15 +307,18 @@ where
             held.operations = operations;
             record_external_maintenance_pause_active(held.operations, true);
         }
+
         if !held.quiesced_reported
             && report_quiesced(store, &held.run_id, held.quiesced_at, config.store_timeout).await
         {
             held.quiesced_reported = true;
         }
+
         return Ok(());
     }
 
     let mut pool_refresh_required = false;
+
     if let Some(held) = held_pause.take() {
         pool_refresh_required = held.pool_refresh_required;
         info!(
@@ -341,8 +352,10 @@ where
         );
         record_external_maintenance_pause_active(operations, false);
         report_running(store, config.store_timeout).await;
+
         return Ok(());
     };
+
     if pause.expires_at <= Utc::now() {
         info!(
             run_id = %pause.run_id,
@@ -363,6 +376,7 @@ where
             "expired",
         );
         report_running(store, config.store_timeout).await;
+
         return Ok(());
     }
 
@@ -426,6 +440,7 @@ where
     let Some(expired) = held_pause.take() else {
         return Ok(());
     };
+
     release_held_pause(expired, "expired");
     report_running(store, config.store_timeout).await;
 
@@ -516,24 +531,31 @@ fn bounded_active_pause_request(
 
 fn operation_label_values(operations: ExternalMaintenanceOperations) -> Vec<&'static str> {
     let mut labels = Vec::with_capacity(ALL_PAUSE_OPERATION_LABELS.len());
+
     if operations.inline_flush {
         labels.push(OPERATION_INLINE_FLUSH);
     }
+
     if operations.merge_adjacent_files {
         labels.push(OPERATION_MERGE_ADJACENT_FILES);
     }
+
     if operations.rewrite_data_files {
         labels.push(OPERATION_REWRITE_DATA_FILES);
     }
+
     if operations.expire_snapshots {
         labels.push(OPERATION_EXPIRE_SNAPSHOTS);
     }
+
     if operations.cleanup_old_files {
         labels.push(OPERATION_CLEANUP_OLD_FILES);
     }
+
     if labels.is_empty() {
         labels.push(OPERATION_UNKNOWN);
     }
+
     labels
 }
 
@@ -542,6 +564,7 @@ fn record_external_maintenance_pause_active(
     active: bool,
 ) {
     let active_operations = operation_label_values(operations);
+
     for operation in ALL_PAUSE_OPERATION_LABELS {
         let value = if active && active_operations.contains(&operation) { 1.0 } else { 0.0 };
         gauge!(
@@ -556,6 +579,7 @@ fn record_external_maintenance_pause_duration(held: &HeldPause, outcome: &'stati
     let duration_seconds =
         Utc::now().signed_duration_since(held.quiesced_at).num_milliseconds().max(0) as f64
             / 1_000.0;
+
     for operation in operation_label_values(held.operations) {
         histogram!(
             ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_PAUSE_DURATION_SECONDS,
@@ -571,6 +595,7 @@ impl ExpireSnapshotsRequestGate {
         if self.initialized_from_state {
             return;
         }
+
         self.initialized_from_state = true;
 
         let Some(completed_at) =
@@ -615,6 +640,7 @@ async fn maybe_request_operations<S, M>(
     if state.active_run.is_some() {
         return;
     }
+
     if completed_run_in_cooldown(state, config.request_cooldown) {
         return;
     }
@@ -635,6 +661,7 @@ async fn maybe_request_operations<S, M>(
                 debug!("ducklake expire-snapshots request suppressed by local daily gate");
                 requested.expire_snapshots = false;
             }
+
             (requested, sample.copy_phase_active, sample.rewrite_data_files_reason)
         }
         Err(error) => {
@@ -704,6 +731,7 @@ async fn maybe_request_operations<S, M>(
             if requested.expire_snapshots && !already_requested.expire_snapshots {
                 expire_snapshots_gate.record_requested(Utc::now());
             }
+
             record_external_maintenance_triggers(
                 requested,
                 already_requested,
@@ -796,6 +824,7 @@ where
     M: ExternalMaintenanceStore,
 {
     let state = status.state;
+
     match time::timeout(timeout, store.report_replicator_status(status)).await {
         Ok(Ok(())) => true,
         Ok(Err(error)) => {
@@ -982,6 +1011,7 @@ mod tests {
             rewrite_data_files: true,
             ..ExternalMaintenanceOperations::default()
         };
+
         for reason in
             [DataFileRewriteReason::ActiveDataFiles, DataFileRewriteReason::DeletedRowRatio]
         {
@@ -1102,6 +1132,7 @@ mod tests {
             assert!(successful_maintenance_run(&state, "run-1", operations, quiesced_at));
             assert!(!successful_maintenance_run(&state, "run-2", operations, quiesced_at));
         }
+
         assert!(!successful_maintenance_run(
             &state,
             "run-1",

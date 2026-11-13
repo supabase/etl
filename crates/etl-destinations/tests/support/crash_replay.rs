@@ -285,6 +285,7 @@ impl CrashReplayCoverage {
             Fault::LostAcknowledgement(FaultedWrite::Copy) => &self.lost_copy_acknowledgements,
             Fault::RejectedWrite(FaultedWrite::Copy) => &self.rejected_copy_writes,
         };
+
         counter.fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -312,9 +313,11 @@ async fn start_pipeline<T: CrashReplayTarget>(
     copy_fault: Option<FaultAction>,
 ) -> Result<(CasePipeline<T::Destination>, TestDestinationWrapper<T::Destination>), TestCaseError> {
     let destination = TestDestinationWrapper::wrap(target.build_destination(store.clone()).await);
+
     if let Some(action) = copy_fault {
         destination.inject_fault(FaultyOp::WriteTableRows, action).await;
     }
+
     let mut pipeline =
         create_workload_pipeline(&database.config, pipeline_id, store.clone(), destination.clone());
     pipeline
@@ -338,6 +341,7 @@ impl Deliveries {
     /// Keeps what a destination instance acknowledged and releases it.
     async fn record<D>(&mut self, destination: TestDestinationWrapper<D>) {
         self.events.extend(destination.get_events().await);
+
         for (table_id, rows) in destination.get_table_rows().await {
             self.copied_rows.entry(table_id).or_default().extend(rows);
         }
@@ -373,6 +377,7 @@ fn compare_current_rows(
     source: &BTreeMap<i64, WorkloadRecord>,
 ) -> Result<(), TestCaseError> {
     let mut current = BTreeMap::new();
+
     for row in rows {
         let id = row.id();
         if let Some(previous) = current.insert(id, row) {
@@ -381,6 +386,7 @@ fn compare_current_rows(
             )));
         }
     }
+
     prop_assert_eq!(&current, source, "table {} destination state differs from the source", table);
 
     Ok(())
@@ -397,6 +403,7 @@ fn assert_replay_copies_allowed(
 ) -> Result<usize, TestCaseError> {
     let mut first_copies = HashMap::<(VersionOrigin, i64, &str), &StoredVersion>::new();
     let mut copies = 0;
+
     for version in versions {
         let key = (version.origin, version.id, version.position.as_str());
         let Some(first) = first_copies.get(&key) else {
@@ -477,6 +484,7 @@ async fn run_case_on_target<T: CrashReplayTarget>(
         Some((FaultedWrite::Stream, action)) => (None, Some(action)),
         None => (None, None),
     };
+
     // A copy write that landed must be cleared before the retry copies again.
     // A refused one may leave nothing to clear, and a retry without stored
     // destination metadata skips the reset. No other fault may recopy.
@@ -489,6 +497,7 @@ async fn run_case_on_target<T: CrashReplayTarget>(
     let mut store = open_store(pipeline_id, database).await?;
     let (mut pipeline, mut destination) =
         start_pipeline(database, pipeline_id, target, &store, copy_fault).await?;
+
     for table_id in tables.ids() {
         wait_for_table_sync_complete(&store, *table_id, WORKLOAD_TIMEOUT).await.map_err(
             |error| TestCaseError::fail(format!("failed to wait for table sync: {error}")),
@@ -499,9 +508,11 @@ async fn run_case_on_target<T: CrashReplayTarget>(
             EtlReplicationSlot::for_table_sync_worker(pipeline_id, *table_id).try_into().unwrap();
         wait_for_sync_slot_removal(database, &sync_slot_name).await?;
     }
+
     target.after_tables_synced(tables).await?;
 
     let mut runner = WorkloadRunner::new(client, tables);
+
     for tx in case.workload.before_fault() {
         runner.execute_and_wait(tx, TxPhase::BeforeFault, &destination).await?;
     }
@@ -513,6 +524,7 @@ async fn run_case_on_target<T: CrashReplayTarget>(
 
     let mut deliveries = Deliveries::default();
     let mut copy_writes_after_fault = destination.write_table_rows_called().await;
+
     match case.fault {
         Fault::Crash(timing) => {
             let held_acknowledgement = match timing {
@@ -582,6 +594,7 @@ async fn run_case_on_target<T: CrashReplayTarget>(
             if let Some(action) = stream_fault.take() {
                 destination.inject_fault(FaultyOp::WriteEvents, action).await;
             }
+
             runner.execute_and_wait(case.workload.fault_tx(), TxPhase::Fault, &destination).await?;
         }
     }
@@ -597,6 +610,7 @@ async fn run_case_on_target<T: CrashReplayTarget>(
             }
         }
     }
+
     let history = runner.into_history();
 
     // Apply promotes a table to `Ready` only once a change on the current
@@ -619,6 +633,7 @@ async fn run_case_on_target<T: CrashReplayTarget>(
         .map_err(|error| TestCaseError::fail(format!("pipeline shutdown failed: {error}")))?;
 
     let mut dropped_for_copy = false;
+
     for table_id in tables.ids() {
         let table_state = store
             .get_table_state(*table_id)
@@ -634,6 +649,7 @@ async fn run_case_on_target<T: CrashReplayTarget>(
         );
         dropped_for_copy |= destination.was_table_dropped_for_copy(*table_id).await;
     }
+
     if let Some(expected_drop) = expected_drop {
         prop_assert_eq!(
             dropped_for_copy,
@@ -642,6 +658,7 @@ async fn run_case_on_target<T: CrashReplayTarget>(
             case.fault
         );
     }
+
     prop_assert_eq!(
         destination.write_table_rows_called().await,
         copy_writes_after_fault,
@@ -687,6 +704,7 @@ async fn run_case<T: CrashReplayTarget>(
     let result =
         run_case_on_target(&database, &tables, &pipeline_id, &target, case, coverage).await;
     target.teardown().await;
+
     if result.is_ok() {
         coverage.record_fault(case.fault);
     }

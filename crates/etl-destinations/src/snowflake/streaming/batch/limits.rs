@@ -51,8 +51,10 @@ pub(crate) const ROW_FRAME_WRITE_BUFFER_BYTES: usize = 64 * 1024;
 /// `input_len` bytes of input, including the raw-block fallback.
 pub(crate) const fn zstd_compress_bound(input_len: usize) -> usize {
     const BLOCK_BYTES: usize = 128 * 1024;
+
     let small_input_margin =
         if input_len < BLOCK_BYTES { (BLOCK_BYTES - input_len) >> 11 } else { 0 };
+
     input_len + (input_len >> 8) + small_input_margin
 }
 

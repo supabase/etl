@@ -140,12 +140,14 @@ impl StartArgs {
                         let project = (shard > 1)
                             .then(|| format!("etl-stack-pg-{}-shard-{shard}", args.pg_version));
                         let project_and_port = project.as_deref().map(|project| (project, port));
+
                         // Only the first shard owns the destination services.
                         let services = if shard == 1 && !args.source_only {
                             &[][..]
                         } else {
                             &SOURCE_POSTGRES_SERVICES[..]
                         };
+
                         args.start_cluster(project_and_port, port, services, tls_files)?;
                         args.wait_for_pg(project_and_port, port)?;
                         args.wait_for_pg(project_and_port, port + READ_REPLICA_PORT_OFFSET)
@@ -158,6 +160,7 @@ impl StartArgs {
             for handle in handles {
                 handle.join().expect("Postgres startup thread panicked")?;
             }
+
             Ok(())
         })?;
 
@@ -189,6 +192,7 @@ impl StartArgs {
             for service in SOURCE_POSTGRES_SERVICES {
                 self.install_tls_files(project_and_port, tls_files, service)?;
             }
+
             self.docker_compose_up(project_and_port, &SOURCE_POSTGRES_SERVICES, true, true)?;
         }
 
@@ -283,9 +287,11 @@ impl StartArgs {
         }
 
         cmd.args(["up", "-d"]);
+
         if force_recreate {
             cmd.arg("--force-recreate");
         }
+
         cmd.args(services);
 
         let status = cmd.status().context("failed to run docker compose")?;

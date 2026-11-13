@@ -208,6 +208,7 @@ async fn execute_query_attempt(
     deadline: Instant,
 ) -> EtlResult<QueryResponse> {
     let request_id = request.request_id.as_deref().unwrap_or("unknown");
+
     // Tokio can poll an immediately-ready future before observing expiry.
     // Never start another remote job after the shared budget has elapsed.
     if Instant::now() >= deadline {
@@ -422,6 +423,7 @@ mod tests {
                 } else {
                     serde_json::from_slice(&bytes).unwrap()
                 };
+
                 requests.push((request_line, request_body));
 
                 let body = body.to_string();
@@ -498,6 +500,7 @@ mod tests {
         assert_eq!(requests[4], requests[5]);
         assert_eq!(requests[6], requests[7]);
         assert!(requests[6].0.contains("pageToken=next-page"));
+
         for index in [2, 4, 5, 6, 7] {
             assert!(requests[index].0.contains("location=europe-west1"));
             assert!(requests[index].0.contains("maxResults=1"));
@@ -505,10 +508,12 @@ mod tests {
         }
 
         let mut rows = ResultSet::new_from_query_response(response);
+
         for expected in [1, 2] {
             assert!(rows.next_row());
             assert_eq!(rows.get_i64(0).unwrap(), Some(expected));
         }
+
         assert!(!rows.next_row());
     }
 
@@ -543,6 +548,7 @@ mod tests {
                     }}),
                 )
             };
+
             let (client, server) = query_http_fixture(vec![response]).await;
             let mut request = QueryRequest::new("select 1");
             request.dry_run = Some(dry_run);
@@ -661,10 +667,12 @@ mod tests {
         assert_eq!(polls, 2);
         assert!(completed.page_token.is_none());
         let mut rows = ResultSet::new_from_query_response(completed);
+
         for expected in ["first", "second", "third"] {
             assert!(rows.next_row());
             assert_eq!(rows.get_string(0).unwrap().as_deref(), Some(expected));
         }
+
         assert!(!rows.next_row());
     }
 
@@ -736,6 +744,7 @@ mod tests {
                 if stalled {
                     std::future::pending::<()>().await;
                 }
+
                 Ok(QueryResponse { job_complete: Some(false), ..Default::default() })
             })
             .await
@@ -878,11 +887,13 @@ mod tests {
 
             assert_eq!(request_ids.len(), expected_attempts, "{reason}");
             assert_eq!(request_ids[0], "caller-request-id");
+
             for pair in request_ids.windows(2) {
                 assert_ne!(pair[0], pair[1]);
                 assert_eq!(pair[1].len(), 32);
                 assert!(pair[1].bytes().all(|byte| byte.is_ascii_hexdigit()));
             }
+
             assert_eq!(result.is_ok(), failures < expected_attempts, "{reason}");
         }
     }
@@ -892,6 +903,7 @@ mod tests {
     fn query_backoff_respects_minimum_and_cap() {
         for seconds in [1, 2, 4, 8, 16, 32] {
             let base = Duration::from_secs(seconds);
+
             for _ in 0..100 {
                 let delay = query_retry_delay(base);
                 assert!(delay >= base);

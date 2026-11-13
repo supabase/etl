@@ -24,19 +24,24 @@ pub fn random_text(len: usize, seed: u64) -> String {
 pub fn structured_text(len: usize, seed: u64, random_len: usize) -> String {
     let random = random_text((len / 256 + 1) * random_len, seed);
     let mut payload = String::with_capacity(len + 256);
+
     for chunk in random.as_bytes().chunks_exact(random_len) {
         let start = payload.len();
         payload.push_str("{\"token\":\"");
         payload.push_str(std::str::from_utf8(chunk).unwrap());
         payload.push_str("\",\"padding\":\"");
+
         while payload.len() < start + 253 {
             payload.push('0');
         }
+
         payload.push_str("\"}\n");
+
         if payload.len() >= len {
             break;
         }
     }
+
     payload.truncate(len);
     payload
 }

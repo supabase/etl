@@ -52,15 +52,18 @@ impl ChaosArgs {
         let labels = parse_selector(&self.selector)?;
         let client = ChaosClient::new(&self.namespace).await?;
         let client = if self.print { client.with_dry_run() } else { client };
+
         if self.delete {
             self.scenario.delete(&client, &labels).await?;
             println!("Chaos deleted.");
         } else {
             self.scenario.run(&client, labels, &self.direction).await?;
+
             if !self.print {
                 println!("Chaos applied.");
             }
         }
+
         Ok(())
     }
 }
@@ -203,6 +206,7 @@ impl ChaosClient {
             println!("{}", serde_json::to_string_pretty(&chaos)?);
             return Ok(());
         }
+
         assert_safe_context();
         let name = chaos.metadata.name.clone().unwrap();
 

@@ -110,6 +110,7 @@ impl DuckLakeMetadataPool {
                 }
             }
         }
+
         query(self.direct.clone()).await
     }
 }
@@ -173,6 +174,7 @@ mod tests {
         let pool = DuckLakeMetadataPool::new(direct.clone(), Some(&url))
             .unwrap()
             .with_fallback_counter(Counter::from_arc(Arc::clone(&fallbacks)));
+
         for _ in 0..2 {
             pool.read("list_tables", |pool| async move {
                 let options = pool.connect_options();
@@ -185,6 +187,7 @@ mod tests {
             .await
             .unwrap();
         }
+
         pool.pooler.as_ref().unwrap().close().await;
         assert!(!direct.is_closed());
         assert_eq!(direct.options().get_max_connections(), 1);
@@ -206,6 +209,7 @@ mod tests {
         let error = pool
             .read("list_tables", |pool| {
                 calls.fetch_add(1, Ordering::Relaxed);
+
                 async move {
                     assert_eq!(pool.connect_options().get_host(), "direct.example.com");
                     Err::<(), _>(Error::RowNotFound)
@@ -257,6 +261,7 @@ mod tests {
         let value = pool
             .read("list_tables", |pool| {
                 calls.fetch_add(1, Ordering::Relaxed);
+
                 async move {
                     if pool.connect_options().get_host() == "direct.example.com" {
                         Ok(42)
@@ -302,6 +307,7 @@ mod tests {
         let error = pool
             .read("table_storage_metrics", |pool| {
                 calls.fetch_add(1, Ordering::Relaxed);
+
                 async move {
                     if pool.connect_options().get_host() == "pooler.example.com" {
                         Err::<(), _>(Error::PoolTimedOut)

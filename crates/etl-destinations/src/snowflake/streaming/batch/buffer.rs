@@ -73,6 +73,7 @@ impl BoundedBuffer {
             self.overflow.get_or_insert(required);
             return Err(io::Error::other(LimitExceeded));
         }
+
         let target = required.max(self.bytes.capacity().saturating_mul(2)).min(self.limit);
         self.bytes.reserve_exact(target - self.bytes.len());
         self.bytes.extend_from_slice(data);
@@ -100,6 +101,7 @@ impl io::Write for BoundedBuffer {
             self.bytes.extend_from_slice(data);
             return Ok(());
         }
+
         self.write_growing(data, required).map(drop)
     }
 
@@ -149,9 +151,11 @@ mod tests {
     #[test]
     fn capacity_never_exceeds_the_limit() {
         let mut buffer = BoundedBuffer::new(10_000);
+
         for _ in 0..100 {
             buffer.write_all(&[7; 100]).unwrap();
         }
+
         assert_eq!(buffer.len(), 10_000);
         assert!(buffer.capacity() <= 10_000);
     }

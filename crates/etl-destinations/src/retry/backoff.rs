@@ -262,6 +262,7 @@ mod tests {
             },
             || {
                 attempts += 1;
+
                 async {
                     Err::<(), _>(TestError { attempt: 0, retryability: Retryability::Permanent })
                 }

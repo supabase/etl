@@ -93,6 +93,7 @@ impl SlotCreationMonitor {
     /// Starts the single sampler, which the pipeline must abort and join.
     pub(crate) fn spawn_slot_creation_metrics_task(&self) -> AbortOnDropHandle<()> {
         let lifetime = SlotCreationSamplerLifetime(self.clone());
+
         {
             let mut state = self.state.lock().unwrap();
             state.observing = true;
@@ -102,6 +103,7 @@ impl SlotCreationMonitor {
         spawn_best_effort_task("slot creation monitor", async move {
             let mut interval = tokio::time::interval(REFRESH_INTERVAL);
             interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
             loop {
                 interval.tick().await;
                 let state = lifetime.0.state.lock().unwrap();
@@ -224,6 +226,7 @@ mod tests {
             tokio::task::yield_now().await;
             assert_eq!(age(&metrics.render(), "41", "apply"), age_seconds);
         }
+
         let rendered = metrics.render();
         assert_eq!(age(&rendered, "41", "table_sync"), 0.0);
         assert!(
@@ -296,9 +299,11 @@ mod tests {
     async fn completions_before_first_scrape_preserve_duration_and_outcome() {
         let metrics = etl_telemetry::metrics::init_metrics_handle().unwrap();
         let monitor = SlotCreationMonitor::new("44".into());
+
         for (seconds, outcome) in [(2, Some(true)), (3, Some(false)), (5, None)] {
             let attempt = monitor.start(WorkerType::Apply);
             tokio::time::advance(Duration::from_secs(seconds)).await;
+
             if let Some(succeeded) = outcome {
                 attempt.finish(succeeded);
             } else {
@@ -307,6 +312,7 @@ mod tests {
         }
 
         let rendered = metrics.render();
+
         for (outcome, seconds) in [("success", 2.0), ("error", 3.0), ("cancelled", 5.0)] {
             let labels = [("pipeline_id", "44"), ("worker_type", "apply"), ("outcome", outcome)];
             assert_eq!(
@@ -326,6 +332,7 @@ mod tests {
                 Some(seconds)
             );
         }
+
         assert!(monitor.state.lock().unwrap().attempts.is_empty());
     }
 
@@ -373,6 +380,7 @@ mod tests {
             client.create_table_copy_slot(&copy_slot, table_id, &Default::default()).await.unwrap();
         transaction.commit().await.unwrap();
         let rendered = metrics.render();
+
         for (worker, outcome) in
             [("apply", "success"), ("apply", "error"), ("table_sync", "success")]
         {
@@ -386,6 +394,7 @@ mod tests {
             );
             assert_eq!(age(&rendered, "47", worker), 0.0);
         }
+
         client.delete_slot_if_exists(&copy_slot).await.unwrap();
         client.delete_slot_if_exists(&main_slot).await.unwrap();
         abort_and_join(task).await.unwrap();

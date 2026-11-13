@@ -267,6 +267,7 @@ fn file_maintenance_reason(
     if copy_phase_active {
         return None;
     }
+
     DataFileRewriteReason::for_table(
         active_data_files,
         deleted_row_ratio,
@@ -296,6 +297,7 @@ fn index_table_sorting_config(
                 "A table sorting schema name must not be empty"
             ));
         }
+
         if table.table.is_empty() {
             return Err(etl_error!(
                 ErrorKind::ConfigError,
@@ -317,6 +319,7 @@ fn index_table_sorting_config(
             }
 
             let mut column_names = HashSet::with_capacity(columns.len());
+
             for column in columns {
                 if column.name.is_empty() {
                     return Err(etl_error!(
@@ -328,6 +331,7 @@ fn index_table_sorting_config(
                         )
                     ));
                 }
+
                 if !column_names.insert(column.name.as_str()) {
                     return Err(etl_error!(
                         ErrorKind::ConfigError,
@@ -369,6 +373,7 @@ fn resolve_table_sort_columns(
         DuckLakeSortBy::Columns { columns } => {
             let replicated_columns: HashSet<_> =
                 table_schema.column_schemas().map(|column| column.name.as_str()).collect();
+
             for column in columns {
                 if !replicated_columns.contains(column.name.as_str()) {
                     return Err(etl_error!(
@@ -378,6 +383,7 @@ fn resolve_table_sort_columns(
                     ));
                 }
             }
+
             Ok(Some(
                 columns
                     .iter()
@@ -427,6 +433,7 @@ fn resolve_table_sort_columns(
                     format!("Table `{table_name}` has no primary key")
                 ));
             }
+
             columns.sort_unstable_by_key(|(ordinal, _)| *ordinal);
 
             Ok(Some(columns.into_iter().map(|(_, column)| column).collect()))
@@ -443,10 +450,12 @@ fn active_sort_order_matches(
         && active.iter().zip(desired).all(|(active, desired)| {
             let expression_matches = active.expression == desired.name
                 || active.expression == quote_identifier(&desired.name);
+
             let direction = match desired.direction {
                 DuckLakeSortDirection::Asc => "ASC",
                 DuckLakeSortDirection::Desc => "DESC",
             };
+
             let null_order = match desired.nulls.unwrap_or(DuckLakeSortNulls::Last) {
                 DuckLakeSortNulls::First => "NULLS_FIRST",
                 DuckLakeSortNulls::Last => "NULLS_LAST",
@@ -969,9 +978,11 @@ where
         let sampler =
             self.metrics_sampler.as_ref().as_ref().and_then(|sampler| sampler.handle.lock().take());
         self.tasks.shutdown().await?;
+
         if let Some(sampler) = sampler {
             abort_and_join(sampler).await?;
         }
+
         drain_duckdb_blocking_operations(Arc::clone(&self.blocking_slots), self.pool_size).await;
 
         Ok(())
@@ -1056,6 +1067,7 @@ fn validate_ducklake_replica_identity(
             "delete" => "DuckLake delete requires a replica identity",
             _ => "DuckLake mutation requires a replica identity",
         };
+
         return Err(etl_error!(
             ErrorKind::SourceReplicaIdentityError,
             description,
@@ -1077,6 +1089,7 @@ fn ducklake_table_columns_sql(table_name: &DuckLakeTableName, nullable_only: boo
             format!("p.schema_name = {} and p.parent_schema_oid is null", quote_literal(namespace))
         }
     };
+
     let nullable_filter = if nullable_only { " and c.is_nullable" } else { "" };
     format!(
         "select c.column_name from duckdb_columns() c join duckdb_schemas() s on c.database_oid = \
@@ -1115,6 +1128,7 @@ fn read_ducklake_table_column_names_blocking(
         )
     })?;
     let mut column_names = Vec::new();
+
     while let Some(row) = rows.next().map_err(|source| {
         classified_error_with_detail(
             ErrorKind::DestinationQueryFailed,
@@ -1235,10 +1249,12 @@ fn push_table_mutation_segment(
 /// Returns a deterministic hash for generated DuckLake identifiers.
 fn stable_ducklake_identifier_hash(value: &str) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+
     for byte in value.as_bytes() {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
+
     hash
 }
 
@@ -1345,9 +1361,11 @@ fn plan_ducklake_schema_ddl_with_nullability(
                             ),
                             error_description: "DuckLake alter table rename dropped column failed",
                         });
+
                         if nullable_column_names.remove(&before_column_schema.name) {
                             nullable_column_names.insert(tombstone_name.clone());
                         }
+
                         column_names[index] = tombstone_name;
                     }
                     (Some(_), Some(_)) => {
@@ -1440,6 +1458,7 @@ fn plan_ducklake_schema_ddl_with_nullability(
                             );
                             continue;
                         };
+
                         statements.push(DuckLakeSchemaDdlStatement {
                             sql,
                             error_description: "DuckLake alter table set default failed",
@@ -1450,6 +1469,7 @@ fn plan_ducklake_schema_ddl_with_nullability(
                 }
 
                 let mut destination_column_schema = after_column_schema.clone();
+
                 if *reason == ColumnPresenceChangeReason::ReplicationMask {
                     destination_column_schema.default_expression = None;
                     if after_column_schema.default_expression.is_some() {
@@ -1462,6 +1482,7 @@ fn plan_ducklake_schema_ddl_with_nullability(
                         );
                     }
                 }
+
                 statements.push(DuckLakeSchemaDdlStatement {
                     sql: build_add_column_sql_ducklake(table_name, &destination_column_schema),
                     error_description: "DuckLake alter table add column failed",
@@ -1487,9 +1508,11 @@ fn plan_ducklake_schema_ddl_with_nullability(
                             ),
                             error_description: "DuckLake alter table rename column failed",
                         });
+
                         if nullable_column_names.remove(&before.name) {
                             nullable_column_names.insert(after.name.clone());
                         }
+
                         column_names[index] = after.name.clone();
                     }
                     (None, Some(_)) => {
@@ -1555,6 +1578,7 @@ fn plan_ducklake_schema_ddl_with_nullability(
             {
                 let before = alteration.before_column_schema();
                 let after = alteration.after_column_schema();
+
                 if find_ducklake_column(&column_names, &before.name).is_none() {
                     debug!(
                         table = %table_name,
@@ -1592,6 +1616,7 @@ fn plan_ducklake_schema_ddl_with_nullability(
             {
                 let before = alteration.before_column_schema();
                 let after = alteration.after_column_schema();
+
                 if find_ducklake_column(&column_names, &before.name).is_none() {
                     debug!(
                         table = %table_name,
@@ -1623,6 +1648,7 @@ fn plan_ducklake_schema_ddl_with_nullability(
                         );
                         continue;
                     };
+
                     statements.push(DuckLakeSchemaDdlStatement {
                         sql,
                         error_description: "DuckLake alter table set default failed",
@@ -1727,6 +1753,7 @@ where
 
             if missing_indexes.peek().copied() == Some(column_index) {
                 missing_indexes.next();
+
                 if is_identity {
                     return Err(etl_error!(
                         ErrorKind::SourceReplicaIdentityError,
@@ -1738,6 +1765,7 @@ where
                         )
                     ));
                 }
+
                 continue;
             }
 
@@ -1990,6 +2018,7 @@ where
                 "Pool size must be at least 1"
             ));
         }
+
         copy_buffer_config.validate().map_err(|error| {
             classified_error(
                 ErrorKind::ConfigError,
@@ -1997,6 +2026,7 @@ where
                 error,
             )
         })?;
+
         if table_sorting.tables.iter().any(|table| table.sort_by != DuckLakeSortBy::None)
             && external_maintenance.mode == DuckLakeMaintenanceMode::Disabled
         {
@@ -2006,6 +2036,7 @@ where
                 "Set DuckLake maintenance_mode to `kubernetes` or `postgres`"
             ));
         }
+
         table_partitioning.validate().map_err(|source| {
             classified_error(
                 ErrorKind::ConfigError,
@@ -2039,11 +2070,13 @@ where
         let expire_snapshots_older_than = Arc::<str>::from(
             resolve_expire_snapshots_older_than(expire_snapshots_older_than.as_deref()).to_owned(),
         );
+
         if let crate::ducklake::config::DuckDbExtensionStrategy::VendoredLocal { platform_dir } =
             extension_strategy
         {
             info!(platform = platform_dir, "using vendored duckdb extensions");
         }
+
         let setup_plan = Arc::new(build_setup_plan(
             &catalog_url,
             &data_path,
@@ -2131,10 +2164,12 @@ where
                         )
                     ));
                 }
+
                 Ok(())
             },
         )
         .await?;
+
         let metadata_schema = match metadata_schema {
             Some(metadata_schema) => metadata_schema,
             None => {
@@ -2146,6 +2181,7 @@ where
                 .await?
             }
         };
+
         let metadata_schema = Arc::<str>::from(metadata_schema);
         let direct_pg_pool = build_ducklake_catalog_pg_pool(&catalog_url)?;
         let metadata_pg_pool =
@@ -2251,6 +2287,7 @@ where
             )
             .into(),
         );
+
         match external_maintenance.mode {
             DuckLakeMaintenanceMode::Disabled => {
                 info!("ducklake external maintenance watcher disabled by configuration");
@@ -2357,6 +2394,7 @@ where
                         let err = RedactedDuckDbError::from(err);
                         tracing::error!(error = %err, "error rollback");
                     }
+
                     Err(error)
                 }
             }
@@ -2428,6 +2466,7 @@ where
                         let err = RedactedDuckDbError::from(err);
                         tracing::error!(error = %err, "error rollback");
                     }
+
                     Err(error)
                 }
             }
@@ -2560,10 +2599,13 @@ where
         let table_write_permit = self.acquire_table_write_slot(&table_name).await?;
         let checkpoint_guard = self.acquire_mutation_guard().await;
         let write_guard = DuckLakeWriteGuard::new(&table_write_permit, &checkpoint_guard);
+
         if !copy_complete {
             self.ensure_copy_writes_direct_to_parquet(&table_name, write_guard.clone()).await?;
         }
+
         let replay_epoch = self.read_table_replay_epoch(&table_name).await?;
+
         let prepared_batch = match (batch_id, copy_complete) {
             (Some(batch_id), false) => prepare_copy_table_batch(
                 replicated_table_schema,
@@ -2581,6 +2623,7 @@ where
                 ));
             }
         };
+
         apply_table_batch_with_retry(
             self.copy_pool()?,
             Arc::clone(&self.blocking_slots),
@@ -2588,6 +2631,7 @@ where
             write_guard.clone(),
         )
         .await?;
+
         if copy_complete {
             self.restore_streaming_data_inlining(&table_name, write_guard).await?;
         }
@@ -2606,6 +2650,7 @@ where
         let table_name = self.prepare_table_for_writes(replicated_table_schema).await?;
         self.ensure_applied_batches_table_exists().await?;
         let table_write_permit = self.acquire_table_write_slot(&table_name).await?;
+
         if !table_rows.is_empty() {
             let checkpoint_guard = self.acquire_mutation_guard().await;
             self.ensure_copy_writes_direct_to_parquet(
@@ -2614,6 +2659,7 @@ where
             )
             .await?;
         }
+
         let replay_epoch = self.read_table_replay_epoch(&table_name).await?;
 
         if self.failed_copy_buffers.lock().contains(&table_name) {
@@ -2627,6 +2673,7 @@ where
                     "Table copy batch ID and rows are inconsistent"
                 ));
             }
+
             let copy_complete = prepare_copy_complete_table_batch(table_name.clone(), replay_epoch);
             let handle = self.copy_buffers.lock().get(&table_name).cloned();
             let Some(handle) = handle else {
@@ -2643,6 +2690,7 @@ where
                     DuckLakeWriteGuard::new(&table_write_permit, &checkpoint_guard),
                 )
                 .await?;
+
                 return Ok(());
             };
 
@@ -2653,6 +2701,7 @@ where
                 self.invalidate_copy_buffer(&table_name);
                 return Err(error);
             }
+
             self.restore_streaming_data_inlining(
                 &table_name,
                 (Arc::clone(&table_write_permit), Arc::clone(&handle)),
@@ -2660,6 +2709,7 @@ where
             .await?;
             handle.reservations.lock().clear();
             self.copy_buffers.lock().remove(&table_name);
+
             return Ok(());
         }
 
@@ -2704,6 +2754,7 @@ where
                 if flushed {
                     accumulator.flush(conn, None)?;
                 }
+
                 Ok((appended, flushed))
             },
         )
@@ -2716,6 +2767,7 @@ where
                 return Err(error);
             }
         };
+
         if flushed {
             handle.reservations.lock().clear();
         } else if !appended {
@@ -2734,6 +2786,7 @@ where
         if let Some(handle) = self.copy_buffers.lock().get(table_name).cloned() {
             return Ok(handle);
         }
+
         if self.failed_copy_buffers.lock().contains(table_name) {
             return Err(Self::invalidated_copy_buffer_error(table_name));
         }
@@ -2746,9 +2799,11 @@ where
             Arc::clone(&self.copy_session_slots).acquire_owned().await.map_err(|_| {
                 etl_error!(ErrorKind::InvalidState, "DuckLake copy session semaphore closed")
             })?;
+
         if let Some(handle) = self.copy_buffers.lock().get(table_name).cloned() {
             return Ok(handle);
         }
+
         if self.failed_copy_buffers.lock().contains(table_name) {
             return Err(Self::invalidated_copy_buffer_error(table_name));
         }
@@ -2821,6 +2876,7 @@ where
             self.invalidate_copy_buffer(table_name);
             return Err(error);
         }
+
         handle.reservations.lock().clear();
 
         let reservation = Arc::clone(&self.copy_buffer_capacity)
@@ -2911,6 +2967,7 @@ where
                 )
             })?;
         let table_name = self.stored_table_name(metadata.table_id())?;
+
         let metadata = if metadata.is_pending() {
             self.recover_pending_metadata(
                 table_id,
@@ -3002,6 +3059,7 @@ where
             );
             return Err(error);
         }
+
         self.reconcile_missing_replicated_columns(&table_name, new_replicated_table_schema).await?;
         self.reconcile_table_sorting(&table_name, new_replicated_table_schema).await?;
         self.reconcile_existing_table_partitioning(&table_name, new_replicated_table_schema)
@@ -3096,6 +3154,7 @@ where
                         "ducklake schema change rollback failed"
                     );
                 }
+
                 return Err(error);
             }
 
@@ -3113,6 +3172,7 @@ where
         if !self.table_sorting.contains_key(table_name) {
             return Ok(());
         }
+
         let table_write_permit = self.acquire_table_write_slot(table_name).await?;
         let checkpoint_guard = self.acquire_mutation_guard().await;
         let write_guard = DuckLakeWriteGuard::new(&table_write_permit, &checkpoint_guard);
@@ -3130,6 +3190,7 @@ where
         if !self.table_sorting.contains_key(table_name) {
             return Ok(());
         }
+
         let desired =
             resolve_table_sort_columns(self.table_sorting.as_ref(), table_name, table_schema)?;
         let namespace_filter = table_namespace_filter(self.metadata_schema.as_ref());
@@ -3175,9 +3236,11 @@ where
         let ddl = match desired {
             Some(columns) => {
                 let mut statements = Vec::with_capacity(2);
+
                 if !active_sort_order_matches(&active, &columns) {
                     statements.push(build_set_sorted_by_sql_ducklake(table_name, &columns));
                 }
+
                 // Keep foreground insert latency unchanged. Flush and
                 // compaction still use the table's active sort order.
                 let schema = quote_postgres_identifier(self.metadata_schema.as_ref());
@@ -3204,14 +3267,17 @@ where
                 if !sort_on_insert_disabled {
                     statements.push(build_disable_sort_on_insert_sql_ducklake(table_name));
                 }
+
                 if statements.is_empty() {
                     return Ok(());
                 }
+
                 statements.join(";\n")
             }
             None if !active.is_empty() => build_reset_sorted_by_sql_ducklake(table_name),
             None => return Ok(()),
         };
+
         let table_name = table_name.clone();
 
         run_duckdb_blocking(self.streaming_pool()?, Arc::clone(&self.blocking_slots), move |conn| {
@@ -3241,6 +3307,7 @@ where
         if !self.table_partitioning.contains_key(table_name) {
             return Ok(());
         }
+
         let table_write_permit = self.acquire_table_write_slot(table_name).await?;
         let checkpoint_guard = self.acquire_mutation_guard().await;
         let write_guard = DuckLakeWriteGuard::new(&table_write_permit, &checkpoint_guard);
@@ -3260,11 +3327,13 @@ where
             // partitions.
             return Ok(());
         };
+
         let columns = table_schema
             .column_schemas()
             .map(|column| (column.name.as_str(), column))
             .collect::<HashMap<_, _>>();
         let mut desired = Vec::with_capacity(keys.len());
+
         for key in keys {
             let column = columns.get(key.column()).ok_or_else(|| {
                 etl_error!(
@@ -3285,11 +3354,13 @@ where
                     )
                 ));
             }
+
             desired.push(DuckLakePartitionColumn::new(
                 DUCKLAKE_COLUMN_NAME_MAPPING.map_name(key.column()),
                 key.transform(),
             ));
         }
+
         let schema = quote_postgres_identifier(self.metadata_schema.as_ref());
         let namespace_filter = table_namespace_filter(self.metadata_schema.as_ref());
         let sql = format!(
@@ -3321,6 +3392,7 @@ where
         {
             return Ok(());
         }
+
         let ddl = build_partition_by_sql_ducklake(table_name, &desired);
         run_duckdb_blocking(self.streaming_pool()?, Arc::clone(&self.blocking_slots), move |conn| {
             let _write_guard = write_guard;
@@ -3363,6 +3435,7 @@ where
         if !self.pending_table_layouts.lock().contains(table_name) {
             return;
         }
+
         let result = async {
             self.reconcile_table_sorting(table_name, table_schema).await?;
             self.reconcile_existing_table_partitioning(table_name, table_schema).await
@@ -3401,6 +3474,7 @@ where
             )
             .await?
         };
+
         if ducklake_columns.is_empty() {
             return Err(etl_error!(
                 ErrorKind::DestinationTableMissing,
@@ -3411,6 +3485,7 @@ where
                 )
             ));
         }
+
         let missing_columns = missing_replicated_columns_ducklake(&ducklake_columns, target_schema);
 
         if missing_columns.is_empty() {
@@ -3494,6 +3569,7 @@ where
                         "ducklake tombstone cleanup rollback failed"
                     );
                 }
+
                 return Err(error);
             }
 
@@ -3543,6 +3619,7 @@ where
             };
 
             let table_name = self.stored_table_name(metadata.table_id())?;
+
             if metadata.is_pending() {
                 self.recover_pending_metadata(table_id, &table_name, metadata, None).await?;
                 continue;
@@ -3554,6 +3631,7 @@ where
                 || self.table_partitioning.contains_key(&table_name)
             {
                 self.pending_table_layouts.lock().insert(table_name.clone());
+
                 match self.target_schema_for_recovery(table_id, &metadata, None).await {
                     Ok(schema) => self.retry_pending_table_layout(&table_name, &schema).await,
                     Err(error) => {
@@ -3565,6 +3643,7 @@ where
                     }
                 }
             }
+
             self.applied_tables.lock().insert(table_name);
         }
 
@@ -3579,9 +3658,11 @@ where
         if self.table_sorting.is_empty() && self.table_partitioning.is_empty() {
             return;
         }
+
         if self.layout_reconciliation_started.swap(true, Ordering::AcqRel) {
             return;
         }
+
         let jitter = Duration::from_secs(
             rand::rng().random_range(0..=DUCKLAKE_LAYOUT_RECONCILIATION_JITTER_SECS),
         );
@@ -3638,6 +3719,7 @@ where
                 );
             }
         }
+
         Ok(())
     }
 
@@ -3647,24 +3729,29 @@ where
         let Some(metadata) = self.store.get_destination_table_metadata(table_id).await? else {
             return Ok(());
         };
+
         let table_name = self.stored_table_name(metadata.table_id())?;
         if !self.table_sorting.contains_key(&table_name)
             && !self.table_partitioning.contains_key(&table_name)
         {
             return Ok(());
         }
+
         let table_write_permit = self.acquire_table_write_slot(&table_name).await?;
         let checkpoint_guard = self.acquire_mutation_guard().await;
         let write_guard = DuckLakeWriteGuard::new(&table_write_permit, &checkpoint_guard);
+
         // Re-read after taking the lock: initial copy or source DDL may have
         // changed the table since the scan. Foreground paths own their
         // recovery.
         let Some(metadata) = self.store.get_destination_table_metadata(table_id).await? else {
             return Ok(());
         };
+
         if !metadata.is_applied() || self.stored_table_name(metadata.table_id())? != table_name {
             return Ok(());
         }
+
         let result = async {
             let schema = self.target_schema_for_recovery(table_id, &metadata, None).await?;
             self.reconcile_table_sorting_with_guard(&table_name, &schema, write_guard.clone())
@@ -3681,6 +3768,7 @@ where
         } else {
             self.pending_table_layouts.lock().insert(table_name);
         }
+
         result
     }
 
@@ -3710,6 +3798,7 @@ where
                 let Some(event) = event_iter.next() else {
                     break;
                 };
+
                 match event {
                     Event::Insert(insert) => {
                         let table_id = insert.replicated_table_schema.id();
@@ -3734,6 +3823,7 @@ where
                         let table_row = update.updated_table_row;
                         let old_table_row = update.old_table_row;
                         let segments = table_id_to_mutations.entry(table_id).or_default();
+
                         if let Some(old_row) = old_table_row {
                             let mutation = TrackedTableMutation::new(
                                 event_position,
@@ -3792,6 +3882,7 @@ where
                             "delete",
                         )?;
                         let event_position = delete.event_position();
+
                         let Some(old_row) = delete.old_table_row else {
                             return Err(etl_error!(
                                 ErrorKind::SourceReplicaIdentityError,
@@ -3803,6 +3894,7 @@ where
                                 )
                             ));
                         };
+
                         let table_id = delete.replicated_table_schema.id();
                         let mutation = TrackedTableMutation::new(
                             event_position,
@@ -3849,6 +3941,7 @@ where
                                 );
                                 continue;
                             }
+
                             // Schema reconciliation also acquires the table
                             // write slot.
                             drop(replay_table_write_permit);
@@ -3871,6 +3964,7 @@ where
                                     "ducklake waited for checkpoint gate before streaming write"
                                 );
                             }
+
                             let is_first_streaming_batch = last_event_position.is_none();
                             info!(
                                 table = %destination_table_name,
@@ -3920,9 +4014,11 @@ where
                 TableId,
                 (ReplicatedTableSchema, Vec<TrackedTruncateEvent>),
             > = HashMap::new();
+
             while let Some(Event::Truncate(_)) = event_iter.peek() {
                 if let Some(Event::Truncate(truncate)) = event_iter.next() {
                     let event_position = truncate.event_position();
+
                     for replicated_table_schema in truncate.truncated_tables {
                         let table_id = replicated_table_schema.id();
                         match truncate_table_ids.entry(table_id) {
@@ -3971,6 +4067,7 @@ where
                             );
                             return Ok(());
                         }
+
                         // Schema reconciliation also acquires the table write
                         // slot.
                         drop(replay_table_write_permit);
@@ -4051,6 +4148,7 @@ where
             move |conn| -> EtlResult<()> {
                 let _checkpoint_guard = checkpoint_guard;
                 debug!(table = %table_name, "ducklake create table begin");
+
                 match conn.execute_batch(&ddl) {
                     Ok(()) => {}
                     Err(error) if is_create_table_conflict(&error, table_name.table()) => {}
@@ -4063,6 +4161,7 @@ where
                         ));
                     }
                 }
+
                 debug!(table = %table_name, "ducklake create table finished");
                 Ok(())
             },
@@ -4191,8 +4290,10 @@ where
                 ));
             }
         }
+
         self.reconcile_missing_replicated_columns(table_name, &target_schema).await?;
         self.reconcile_table_sorting(table_name, &target_schema).await?;
+
         if matches!(metadata.table_schema(), DestinationTableSchema::Creating { .. }) {
             self.reconcile_table_partitioning(table_name, &target_schema).await?;
         } else {
@@ -4222,6 +4323,7 @@ where
                 "Recreate the destination and replication state to change the namespace"
             ));
         }
+
         Ok(table)
     }
 
@@ -4248,9 +4350,11 @@ where
                 metadata,
                 replicated_table_schema,
             )?;
+
             if metadata.is_applied() {
                 self.retry_pending_table_layout(&table_name, replicated_table_schema).await;
                 self.applied_tables.lock().insert(table_name.clone());
+
                 return Ok(table_name);
             }
         }
@@ -4283,9 +4387,11 @@ where
                 metadata,
                 replicated_table_schema,
             )?;
+
             if metadata.is_applied() {
                 self.retry_pending_table_layout(&table_name, replicated_table_schema).await;
                 self.applied_tables.lock().insert(table_name.clone());
+
                 return Ok(table_name);
             }
         }
@@ -4324,6 +4430,7 @@ where
         else {
             return Ok(None);
         };
+
         if !metadata.is_applied() {
             return Ok(None);
         }
@@ -4520,6 +4627,7 @@ where
             Some(table_name) => table_name,
             None => self.ensure_table_ready_for_streaming_schema(replicated_table_schema).await?,
         };
+
         let table_write_permit = self.acquire_table_write_slot(&table_name).await?;
         let replay_epoch = self.read_table_replay_epoch(&table_name).await?;
         let checkpoint_guard = self.acquire_mutation_guard().await;
@@ -4893,6 +5001,7 @@ pub fn release_paused_copy_append_for_tests() {
     let Some(resume) = PAUSED_COPY_APPEND_RESUME.lock().take() else {
         return;
     };
+
     let (resumed, resume_ready) = &*resume;
     let mut resumed = resumed.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     *resumed = true;
@@ -5056,6 +5165,7 @@ mod tests {
                 Some(DataFileRewriteReason::DeletedRowRatio)
             );
         }
+
         assert_eq!(file_maintenance_reason(false, 1, 0.95, 40), None);
         assert_eq!(file_maintenance_reason(false, 1, 0.0, 40), None);
         assert_eq!(file_maintenance_reason(false, 0, 1.0, 40), None);
@@ -5069,6 +5179,7 @@ mod tests {
             rewrite_data_files_enabled: false,
             ..ExternalMaintenanceOperationPolicy::default()
         };
+
         for files in [1, 2] {
             let sample = ExternalMaintenanceOperationSample::for_file_metrics(
                 false, files, 0.98, 40, policy,
@@ -5183,6 +5294,7 @@ mod tests {
             let Err(error) = result else {
                 panic!("invalidated DuckLake pool handle should not return a pool");
             };
+
             assert_eq!(error.kind(), ErrorKind::DestinationConnectionFailed);
             assert_eq!(error.description(), Some("DuckLake connection pools are unavailable"));
         }
@@ -6059,6 +6171,7 @@ mod tests {
             ("macos", "aarch64" | "arm64") => "osx_arm64",
             _ => return None,
         };
+
         let env_override = std::env::var_os("ETL_DUCKDB_EXTENSION_ROOT").map(PathBuf::from);
         let candidate_roots = env_override
             .into_iter()
@@ -6382,7 +6495,9 @@ mod tests {
                 texts.push(current.to_string());
                 source = current.source();
             }
+
             assert!(texts[1].contains("password='[redacted]'"));
+
             for text in &texts {
                 // Every password field is redacted, whatever its quoting.
                 assert!(
@@ -6529,6 +6644,7 @@ mod tests {
                 if metrics.active_data_files >= 1 {
                     break metrics;
                 }
+
                 assert!(
                     Instant::now() < deadline,
                     "timed out waiting for storage metrics after materialization"
@@ -6603,6 +6719,7 @@ mod tests {
                 if metrics.active_data_files_total >= 1 {
                     break metrics;
                 }
+
                 assert!(
                     Instant::now() < deadline,
                     "timed out waiting for active data files total after materialization"

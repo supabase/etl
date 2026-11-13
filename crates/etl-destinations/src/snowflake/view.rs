@@ -49,6 +49,7 @@ impl CompanionView {
         } else {
             format!("{table}_CURRENT")
         };
+
         Self {
             pending: format!("{name}_PENDING"),
             name,
@@ -87,15 +88,18 @@ impl CompanionView {
                         source: Box::new(error),
                     });
                 }
+
                 warn!(
                     table_name = table,
                     "snowflake table has no companion view: materialization requires a supported \
                      primary-key identity and source names outside the _cdc_ prefix"
                 );
+
                 return Ok(());
             }
             Err(error) => return Err(error),
         };
+
         let mut columns = schema
             .column_schemas()
             .map(|column| {
@@ -128,9 +132,11 @@ impl CompanionView {
             Some((name, comment)) if name == self.name && comment == marker => Ok(()),
             Some((name, _)) => {
                 self.create(sql, &name, &columns, &query, &marker, true).await?;
+
                 if name == self.pending {
                     self.rename(sql, &self.pending, &self.name).await?;
                 }
+
                 Ok(())
             }
             None => self.create(sql, &self.name, &columns, &query, &marker, false).await,
@@ -145,6 +151,7 @@ impl CompanionView {
         {
             self.rename(sql, &self.name, &self.pending).await?;
         }
+
         Ok(())
     }
 
@@ -153,6 +160,7 @@ impl CompanionView {
         if let Some((name, _)) = self.existing(sql, false).await? {
             sql.execute_ddl(&format!("drop view {}", sql.fully_qualified_name(&name))).await?;
         }
+
         Ok(())
     }
 
@@ -165,10 +173,12 @@ impl CompanionView {
     ) -> Result<Option<(String, String)>> {
         let objects = sql.objects_starting_with(&self.name).await?;
         let mut existing = None;
+
         for (name, kind, comment) in objects {
             if name != self.name && name != self.pending {
                 continue;
             }
+
             let signature = comment.strip_prefix(&self.owner);
             if kind != "VIEW"
                 || !signature.is_some_and(|value| {
@@ -181,8 +191,10 @@ impl CompanionView {
                          unused destination namespace or resolve the collision"
                     )));
                 }
+
                 continue;
             }
+
             if existing.is_some() {
                 return Err(Error::Config(format!(
                     "Snowflake companion view '{}' has both public and pending objects; resolve \
@@ -190,8 +202,10 @@ impl CompanionView {
                     self.name
                 )));
             }
+
             existing = Some((name, comment));
         }
+
         Ok(existing)
     }
 
@@ -272,13 +286,16 @@ mod tests {
             })
             .flatten()
             .collect::<std::collections::HashSet<_>>();
+
         for length in [239, 240] {
             let name = "é".repeat(length);
             let view = CompanionView::new("1".into(), TableId::new(1), &name);
             assert_eq!(view.name.starts_with("_ETL_"), length == 240);
             assert!(view.pending.chars().count() <= 255);
         }
+
         let mut views = std::collections::HashSet::new();
+
         for name in &raw {
             let view = CompanionView::new("1".into(), TableId::new(1), name);
             assert!(view.pending.chars().count() <= 255);

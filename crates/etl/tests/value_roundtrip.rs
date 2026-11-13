@@ -217,6 +217,7 @@ async fn float_values_roundtrip_through_text_codec() {
         else {
             return Err(TestCaseError::fail("expected f64 cell"));
         };
+
         prop_assert!(f64_matches(*f64v, parsed64), "float8 {f64v:?} parsed as {parsed64:?}");
 
         let Cell::F32(parsed32) = parse_text_cell(&Type::FLOAT4, &rendered[1]).map_err(|err| {
@@ -225,6 +226,7 @@ async fn float_values_roundtrip_through_text_codec() {
         else {
             return Err(TestCaseError::fail("expected f32 cell"));
         };
+
         prop_assert!(f32_matches(*f32v, parsed32), "float4 {f32v:?} parsed as {parsed32:?}");
         Ok(())
     });
@@ -250,12 +252,14 @@ async fn float8_array_values_roundtrip_through_text_codec() {
         };
 
         prop_assert_eq!(parsed.len(), values.len());
+
         for (expected, parsed) in values.iter().zip(&parsed) {
             prop_assert!(
                 opt_f64_matches(*expected, *parsed),
                 "float8[] {expected:?} parsed as {parsed:?}"
             );
         }
+
         Ok(())
     });
 }
@@ -556,6 +560,7 @@ async fn copy_single_row(client: &Client, query: &str) -> Result<Vec<u8>, tokio_
     let stream = client.copy_out(query).await?;
     let mut bytes = Vec::new();
     futures::pin_mut!(stream);
+
     while let Some(chunk) = stream.next().await {
         bytes.extend_from_slice(&chunk?);
     }
@@ -588,6 +593,7 @@ async fn postgres_copy_chunks_are_exact_text_row_payloads() {
         .unwrap();
     futures::pin_mut!(stream);
     let mut rows = Vec::new();
+
     while let Some(row) = stream.next().await {
         rows.push(row.unwrap().to_vec());
     }
@@ -780,6 +786,7 @@ async fn json_nested_past_serde_recursion_limit_is_an_unsupported_source_value()
 
     let depth = SERDE_JSON_MAX_DEPTH + 1;
     let document = format!("{}{}", "[".repeat(depth), "]".repeat(depth));
+
     for typ in [Type::JSON, Type::JSONB] {
         let rendered: String = client
             .query_one(&format!("select ($1::text::{typ})::text"), &[&document])
@@ -864,6 +871,7 @@ async fn check_array_element_law(
         };
 
         let mut expected = Vec::with_capacity(element_texts.len());
+
         for text in &element_texts {
             let element = match text {
                 Some(text) => Some(parse_text_cell(&element_type, text).map_err(|err| {
@@ -871,6 +879,7 @@ async fn check_array_element_law(
                 })?),
                 None => None,
             };
+
             expected.push(element);
         }
 

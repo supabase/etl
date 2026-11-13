@@ -238,6 +238,7 @@ where
     ) -> EtlResult<()> {
         let copy_complete = table_rows.is_empty();
         write_table_rows_with_status(self, replicated_table_schema, table_rows).await?;
+
         if !copy_complete {
             write_table_rows_with_status(self, replicated_table_schema, Vec::new()).await?;
         }
@@ -511,6 +512,7 @@ async fn assert_pending_layout_failure_does_not_block_writes(sorting: bool) {
         store.clone(),
     )
     .copy_buffer(DuckLakeCopyBufferConfig { enabled: false, ..Default::default() });
+
     if sorting {
         builder = builder
             .external_maintenance(DuckLakeExternalMaintenanceConfig::postgres("layout-test"))
@@ -548,6 +550,7 @@ async fn assert_pending_layout_failure_does_not_block_writes(sorting: bool) {
             ),
         ]));
     }
+
     let destination = builder.build().await.unwrap();
     destination.startup().await.unwrap();
 
@@ -562,6 +565,7 @@ async fn assert_pending_layout_failure_does_not_block_writes(sorting: bool) {
             .await
             .unwrap();
     }
+
     for id in [4, 5] {
         destination
             .write_events(vec![Event::Insert(InsertEvent {
@@ -573,6 +577,7 @@ async fn assert_pending_layout_failure_does_not_block_writes(sorting: bool) {
             .await
             .unwrap();
     }
+
     if !sorting {
         sqlx::query(sqlx::AssertSqlSafe(format!(
             "alter table {prefix}.ducklake_partition_info drop constraint \
@@ -591,6 +596,7 @@ async fn assert_pending_layout_failure_does_not_block_writes(sorting: bool) {
             .await
             .unwrap();
     }
+
     destination.shutdown().await.unwrap();
     drop(destination);
 
@@ -602,11 +608,13 @@ async fn assert_pending_layout_failure_does_not_block_writes(sorting: bool) {
     .fetch_all(&catalog)
     .await
     .unwrap();
+
     if sorting {
         assert!(active_partitions.is_empty());
     } else {
         assert_eq!(active_partitions, vec!["bucket(8)"]);
     }
+
     let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
     assert_eq!(count_rows(&conn, &table_name), if sorting { 5 } else { 6 });
     assert!(
@@ -629,9 +637,11 @@ async fn wait_for_concurrent_destination_tasks(tasks: Vec<tokio::task::JoinHandl
 
 fn qualified_lake_table_name(table_name: &DuckLakeTableName) -> String {
     let mut parts = vec![quote_identifier("lake").into_owned()];
+
     if let Some(namespace) = table_name.namespace() {
         parts.push(quote_identifier(namespace).into_owned());
     }
+
     parts.push(quote_identifier(table_name.schema()).into_owned());
     parts.push(quote_identifier(table_name.table()).into_owned());
     parts.join(".")
@@ -855,6 +865,7 @@ async fn namespaced_projects_isolate_copy_cdc_replay_and_truncate() {
     let replicated = make_replicated_table_schema(&schema);
     let mut destinations = Vec::new();
     let mut stores = Vec::new();
+
     for (namespace, label) in [("project_a", "first"), ("project_b", "second")] {
         let store = MemoryStore::new();
         store.store_table_schema(schema.clone()).await.unwrap();
@@ -886,6 +897,7 @@ async fn namespaced_projects_isolate_copy_cdc_replay_and_truncate() {
         stores.push(store);
         destinations.push(destination);
     }
+
     let a = DuckLakeTableName::new("public", "orders").with_namespace(Some("project_a".to_owned()));
     let b = DuckLakeTableName::new("public", "orders").with_namespace(Some("project_b".to_owned()));
     let conn =
@@ -915,9 +927,11 @@ async fn namespaced_projects_isolate_copy_cdc_replay_and_truncate() {
     assert!(conn.prepare(&format!("select email from {}", qualified_lake_table_name(&b))).is_err());
     drop(conn);
     destinations[0].truncate_table(&evolved).await.unwrap();
+
     for destination in &destinations {
         destination.shutdown().await.unwrap();
     }
+
     drop(destinations);
     let redirected = DuckLakeDestination::builder(
         lake.catalog_url.clone(),
@@ -973,6 +987,7 @@ async fn namespaced_projects_reconcile_partitioning_and_sorting_independently() 
     let lake = create_test_lake("namespaced_layouts").await;
     let schema = make_schema(1, "public", "orders");
     let replicated = make_replicated_table_schema(&schema);
+
     for namespace in ["project_a", "project_b"] {
         let store = MemoryStore::new();
         store.store_table_schema(schema.clone()).await.unwrap();
@@ -1053,6 +1068,7 @@ async fn namespaced_tables_preserve_identifier_components() {
     .build()
     .await
     .unwrap();
+
     for (id, schema_name, name) in
         [(1, "public", "orders"), (2, "Mixed.Schema", "odd\" table"), (3, "public", "other")]
     {
@@ -1071,6 +1087,7 @@ async fn namespaced_tables_preserve_identifier_components() {
             open_lake_conn_when_tables_visible(&lake.catalog_url, &lake.data_url, &[&table]).await;
         assert_eq!(count_rows(&conn, &table), 1);
     }
+
     destination.shutdown().await.unwrap();
 }
 
@@ -1328,6 +1345,7 @@ async fn buffered_copy_combines_batches_at_terminal_barrier() {
         .unwrap();
         assert_eq!(status, DestinationWriteStatus::Accepted);
     }
+
     assert_eq!(count_table_files_async(&data, &table_name).await, 0);
 
     let status = write_table_rows_with_status(&destination, &replicated_table_schema, Vec::new())
@@ -2437,6 +2455,7 @@ async fn write_table_rows_deduplicates_redelivered_batch_id() {
         .await
         .unwrap();
     }
+
     write_table_rows_with_status(&destination, &replicated_table_schema, Vec::new()).await.unwrap();
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
@@ -2502,6 +2521,7 @@ async fn concurrent_same_table_copy_batches_complete() {
             destination.write_table_rows_for_tests(&replicated_table_schema, first_batch).await
         })
     };
+
     let task_b = {
         let destination = Arc::clone(&destination);
         let replicated_table_schema = replicated_table_schema.clone();
@@ -5552,6 +5572,7 @@ async fn concurrent_writes_with_single_slot_complete() {
             destination.write_table_rows_for_tests(&replicated_table_schema_a, rows_a).await
         })
     };
+
     let task_b = {
         let destination = Arc::clone(&destination);
         let replicated_table_schema_b = replicated_table_schema_b.clone();
@@ -5591,6 +5612,7 @@ async fn concurrent_first_writes_with_default_pool_complete() {
         .collect::<Vec<_>>();
 
     let store = MemoryStore::new();
+
     for schema in schemas {
         store.store_table_schema(schema).await.unwrap();
     }
@@ -5611,6 +5633,7 @@ async fn concurrent_first_writes_with_default_pool_complete() {
     );
 
     let mut tasks = Vec::new();
+
     for (index, replicated_table_schema) in replicated_table_schemas.into_iter().enumerate() {
         let destination = Arc::clone(&destination);
         tasks.push(tokio::spawn(async move {
@@ -5657,6 +5680,7 @@ async fn concurrent_truncates_with_default_pool_complete() {
         .collect::<Vec<_>>();
 
     let store = MemoryStore::new();
+
     for schema in schemas {
         store.store_table_schema(schema).await.unwrap();
     }
@@ -5696,6 +5720,7 @@ async fn concurrent_truncates_with_default_pool_complete() {
     drop(conn);
 
     let mut tasks = Vec::new();
+
     for replicated_table_schema in replicated_table_schemas {
         let destination = Arc::clone(&destination);
         tasks.push(tokio::spawn(async move {
@@ -5811,6 +5836,7 @@ async fn surviving_full_identity_deletes(
     const PATHS: [&str; 3] = ["copied", "flushed", "inlined"];
 
     let mut columns = vec![ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false)];
+
     for (index, (case, pg_type, typmod, _)) in cases.iter().enumerate() {
         let ordinal = i32::try_from(index).unwrap() + 2;
         columns.push(ColumnSchema::new(
@@ -5821,6 +5847,7 @@ async fn surviving_full_identity_deletes(
             true,
         ));
     }
+
     let schema = TableSchema::new(
         TableId::new(table_id),
         TableName::new("public".to_owned(), table.to_owned()),
@@ -6014,6 +6041,7 @@ async fn full_identity_delete_matches_stored_value_on_every_write_path() {
     ];
 
     let mut surviving = Vec::new();
+
     for (table_id, table, cases) in [
         (900, "full_identity_arrow", &arrow_cases),
         (901, "full_identity_json", &json_cases),
@@ -6044,6 +6072,7 @@ async fn partition_layout_reconciles_without_rewriting_historical_files() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
     let mut previous_files = Vec::<String>::new();
+
     for (index, keys) in [
         Some(vec![DuckLakePartitionColumn::new(
             "id".to_owned(),
@@ -6129,9 +6158,11 @@ async fn partition_layout_reconciles_without_rewriting_historical_files() {
         destination.shutdown().await.unwrap();
         drop(destination);
         let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
+
         if index == 0 {
             conn.execute_batch("alter table lake.public.events set sorted by (id)").unwrap();
         }
+
         assert_eq!(count_rows(&conn, &table_name), i64::try_from(index + 1).unwrap());
         let metadata = sqlx::PgPool::connect(lake.catalog_url.as_str()).await.unwrap();
         let metadata_schema: String = sqlx::query_scalar(
@@ -6172,6 +6203,7 @@ async fn partition_layout_reconciles_without_rewriting_historical_files() {
         .fetch_all(&metadata)
         .await
         .unwrap();
+
         if index == 4 {
             assert!(sorts.is_empty());
         } else {
@@ -6179,6 +6211,7 @@ async fn partition_layout_reconciles_without_rewriting_historical_files() {
             assert!(sorts[0].0.contains(if matches!(index, 1 | 2) { "name" } else { "id" }));
             assert_eq!(sorts[0].1, if matches!(index, 1 | 2) { "DESC" } else { "ASC" });
         }
+
         metadata.close().await;
         assert!(previous_files.iter().all(|path| files.contains(path)));
         assert!(!files.is_empty());
@@ -6341,6 +6374,7 @@ async fn partition_layout_handles_source_schema_changes() {
         let mut columns = vec![
             ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
         ];
+
         if change != "drop" {
             columns.push(ColumnSchema::new(
                 if change == "rename" { "label" } else { "name" }.to_owned(),
@@ -6350,6 +6384,7 @@ async fn partition_layout_handles_source_schema_changes() {
                 true,
             ));
         }
+
         let new_schema = TableSchema::with_snapshot_id(
             old_schema.id,
             old_schema.name.clone(),
@@ -6421,6 +6456,7 @@ async fn partition_layout_handles_source_schema_changes() {
                 })])
                 .await
         };
+
         if change == "drop" {
             // DuckLake itself rejects dropping an active partition key. The
             // stale-rule fallback must not swallow this physical DDL error.
@@ -6429,8 +6465,10 @@ async fn partition_layout_handles_source_schema_changes() {
                 store.get_destination_table_metadata(old_schema.id).await.unwrap().unwrap();
             assert!(metadata.is_pending());
             destination.shutdown().await.unwrap();
+
             continue;
         }
+
         result.unwrap();
         let metadata = store.get_destination_table_metadata(old_schema.id).await.unwrap().unwrap();
         assert!(metadata.is_applied());
@@ -6441,11 +6479,13 @@ async fn partition_layout_handles_source_schema_changes() {
         let restarted = build().await.unwrap();
         restarted.startup().await.unwrap();
         let mut row = vec![Cell::I32(2)];
+
         match change {
             "rename" => row.push(Cell::Timestamp(etl::data::Timestamp::Value(timestamp))),
             "retype" => row.push(Cell::String("2026-11-04 15:30:00".to_owned())),
             _ => {}
         }
+
         restarted
             .write_events(vec![Event::Insert(InsertEvent {
                 commit_lsn: PgLsn::from(101_u64),
@@ -6514,6 +6554,7 @@ async fn startup_layout_failure_is_isolated_and_retried() {
         store.store_table_schema(healthy).await.unwrap();
         store.store_table_schema(broken).await.unwrap();
         let initial = new_test_destination(&lake.catalog_url, &lake.data_url, store.clone()).await;
+
         for schema in [&healthy_replicated, &broken_replicated] {
             initial
                 .write_table_rows_for_tests(
@@ -6523,8 +6564,10 @@ async fn startup_layout_failure_is_isolated_and_retried() {
                 .await
                 .unwrap();
         }
+
         initial.shutdown().await.unwrap();
         drop(initial);
+
         {
             let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
             conn.execute_batch("alter table lake.public.broken rename name to other").unwrap();
@@ -6533,6 +6576,7 @@ async fn startup_layout_failure_is_isolated_and_retried() {
         let mut builder =
             DuckLakeDestination::builder(lake.catalog_url.clone(), lake.data_url.clone(), 1, store)
                 .copy_buffer(DuckLakeCopyBufferConfig { enabled: false, ..Default::default() });
+
         if sorting {
             builder = builder
                 .external_maintenance(DuckLakeExternalMaintenanceConfig::postgres("layout-test"))
@@ -6561,6 +6605,7 @@ async fn startup_layout_failure_is_isolated_and_retried() {
                 ),
             ]));
         }
+
         let destination = builder.build().await.unwrap();
         destination.startup().await.unwrap();
         destination
@@ -6578,10 +6623,12 @@ async fn startup_layout_failure_is_isolated_and_retried() {
             .await
             .unwrap_err();
         assert_eq!(error.kind(), ErrorKind::DestinationQueryFailed);
+
         {
             let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
             conn.execute_batch("alter table lake.public.broken rename other to name").unwrap();
         }
+
         destination
             .write_table_rows_for_tests(
                 &broken_replicated,
@@ -6592,12 +6639,14 @@ async fn startup_layout_failure_is_isolated_and_retried() {
         destination.shutdown().await.unwrap();
         drop(destination);
         let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
+
         for table in ["healthy", "broken"] {
             assert_eq!(
                 count_rows(&conn, &DuckLakeTableName::new("public".to_owned(), table.to_owned())),
                 2
             );
         }
+
         let info_table = if sorting { "ducklake_sort_info" } else { "ducklake_partition_info" };
         let active_layouts: i64 = conn
             .query_row(
@@ -6622,12 +6671,15 @@ async fn periodic_layout_reconciliation_repairs_drift_without_resetting_tables()
     let lake = create_test_lake("periodic_layout_reconciliation").await;
     let store = MemoryStore::new();
     let mut schemas = Vec::new();
+
     for (id, name) in [(1, "events"), (2, "broken"), (3, "unmanaged")] {
         let schema = make_schema(id, "public", name);
         schemas.push(make_replicated_table_schema(&schema));
         store.store_table_schema(schema).await.unwrap();
     }
+
     let initial = new_test_destination(&lake.catalog_url, &lake.data_url, store.clone()).await;
+
     for schema in &schemas {
         initial
             .write_table_rows_for_tests(
@@ -6637,8 +6689,10 @@ async fn periodic_layout_reconciliation_repairs_drift_without_resetting_tables()
             .await
             .unwrap();
     }
+
     initial.shutdown().await.unwrap();
     drop(initial);
+
     {
         let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
         conn.execute_batch(
@@ -6647,6 +6701,7 @@ async fn periodic_layout_reconciliation_repairs_drift_without_resetting_tables()
         )
         .unwrap();
     }
+
     let destination = DuckLakeDestination::builder(
         lake.catalog_url.clone(),
         lake.data_url.clone(),
@@ -6695,6 +6750,7 @@ async fn periodic_layout_reconciliation_repairs_drift_without_resetting_tables()
         )
         .await
         .unwrap();
+
     {
         let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
         conn.execute_batch(
@@ -6703,6 +6759,7 @@ async fn periodic_layout_reconciliation_repairs_drift_without_resetting_tables()
         )
         .unwrap();
     }
+
     // Advance only the timer boundary; database I/O below uses normal time.
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(60 * 60 + 61)).await;
@@ -6733,15 +6790,18 @@ async fn periodic_layout_reconciliation_repairs_drift_without_resetting_tables()
             if matched {
                 break;
             }
+
             tokio::task::yield_now().await;
         }
     })
     .await
     .unwrap();
+
     {
         let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
         conn.execute_batch("alter table lake.public.broken rename other to id").unwrap();
     }
+
     destination.reconcile_table_layouts_for_tests().await.unwrap();
     let snapshot_sql = format!("select max(snapshot_id) from {prefix}.ducklake_snapshot");
     let before: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(snapshot_sql.clone()))
@@ -6790,6 +6850,7 @@ async fn periodic_layout_reconciliation_repairs_drift_without_resetting_tables()
         )
         .unwrap();
     assert!(!pending_exists);
+
     for schema in schemas {
         let table = table_name_to_ducklake_table_name(schema.name()).unwrap();
         assert_eq!(count_rows(&conn, &table), 1);
@@ -6797,6 +6858,7 @@ async fn periodic_layout_reconciliation_repairs_drift_without_resetting_tables()
             store.get_destination_table_metadata(schema.id()).await.unwrap().unwrap().is_applied()
         );
     }
+
     metadata.close().await;
 }
 
@@ -6809,11 +6871,13 @@ async fn periodic_layout_reconciliation_repairs_drift_without_resetting_tables()
 async fn transaction_pooler_catalog_roundtrip() {
     let direct = Url::parse(&std::env::var("TESTS_DUCKLAKE_DIRECT_URL").unwrap()).unwrap();
     let pooler = Url::parse(&std::env::var("TESTS_DUCKLAKE_POOLER_URL").unwrap()).unwrap();
+
     let writer = if std::env::var_os("TESTS_DUCKLAKE_POOLED_WRITER").is_some() {
         pooler.clone()
     } else {
         direct.clone()
     };
+
     // The pooled-writer experiment changes catalog_url itself; its
     // session-dependent coordination path remains outside this experiment.
     let test_coordination = writer == direct;
@@ -6919,6 +6983,7 @@ async fn catalog_pooler_roundtrip(direct: Url, writer: Url, pooler: Url, test_co
     } else {
         builder
     };
+
     let destination = builder.build().await.unwrap();
 
     if test_coordination {
@@ -6930,6 +6995,7 @@ async fn catalog_pooler_roundtrip(direct: Url, writer: Url, pooler: Url, test_co
                 if coordination_store.load_state().await.is_ok_and(|state| state.exists) {
                     break;
                 }
+
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         })
@@ -6958,6 +7024,7 @@ async fn catalog_pooler_roundtrip(direct: Url, writer: Url, pooler: Url, test_co
         )
         .await
         .unwrap();
+
     // Background catalog reads must actually use the pooler, while the copy
     // retry and replay reset above must keep their epoch queries direct.
     // With coordination, the maintenance watcher reads pooled metadata on its
@@ -6966,6 +7033,7 @@ async fn catalog_pooler_roundtrip(direct: Url, writer: Url, pooler: Url, test_co
     if !test_coordination {
         destination.sample_metrics_for_tests().await.unwrap();
     }
+
     tokio::time::timeout(Duration::from_secs(60), guard.wait_for_prepared_query()).await.unwrap();
     destination.shutdown().await.unwrap();
     drop(destination);

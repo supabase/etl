@@ -60,6 +60,7 @@ static SECRET_OPTION_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 /// literal, URL userinfo, and DuckDB secret options.
 pub fn redact_credentials(message: &str) -> Cow<'_, str> {
     let mut redacted = Cow::Borrowed(message);
+
     for (regex, replacement) in [
         (&*PASSWORD_FIELD_REGEX, PASSWORD_FIELD_REPLACEMENT),
         (&*URL_PASSWORD_REGEX, URL_PASSWORD_REPLACEMENT),
@@ -70,6 +71,7 @@ pub fn redact_credentials(message: &str) -> Cow<'_, str> {
             Cow::Owned(replaced) => Some(replaced),
             Cow::Borrowed(_) => None,
         };
+
         if let Some(replaced) = replaced {
             redacted = Cow::Owned(replaced);
         }

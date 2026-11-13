@@ -31,6 +31,7 @@ mod tests {
     #[test]
     fn version_check_rejects_other_releases_and_development_labels() {
         let conn = duckdb::Connection::open_in_memory().unwrap();
+
         for version in ["1.5.6", "2.0.1", "2.1.0", "2.0.0-dev"] {
             let error = conn.execute_batch(&duckdb_version_check_sql(version)).unwrap_err();
             let message = error.to_string();

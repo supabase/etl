@@ -152,6 +152,7 @@ where
                 && has_table_id
             {
                 truncate_event.truncated_tables.retain(|s| s.id() != table_id);
+
                 if truncate_event.truncated_tables.is_empty() {
                     return false;
                 }
@@ -198,6 +199,7 @@ where
         async_result: WriteEventsResult,
     ) -> EtlResult<()> {
         let mut table_schemas = HashMap::new();
+
         for event in &events {
             match event {
                 Event::Insert(event) => {

@@ -36,6 +36,7 @@ pub fn check_event_conditions(events: &[Event], conditions: &[EventCondition]) -
 
 pub fn group_events_by_type(events: &[Event]) -> HashMap<EventType, Vec<Event>> {
     let mut grouped = HashMap::new();
+
     for event in events {
         let event_type = EventType::from(event);
         grouped.entry(event_type).or_insert_with(Vec::new).push(event.clone());
@@ -48,8 +49,10 @@ pub fn group_events_by_type_and_table_id(
     events: &[Event],
 ) -> HashMap<(EventType, TableId), Vec<Event>> {
     let mut grouped = HashMap::new();
+
     for event in events {
         let event_type = EventType::from(event);
+
         // This grouping works on DML operations and Relation events.
         let table_ids = match event {
             Event::Relation(event) => vec![event.replicated_table_schema.id()],
@@ -61,6 +64,7 @@ pub fn group_events_by_type_and_table_id(
             }
             _ => vec![],
         };
+
         for table_id in table_ids {
             grouped
                 .entry((event_type.clone(), table_id))

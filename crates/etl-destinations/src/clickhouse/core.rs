@@ -180,6 +180,7 @@ fn ensure_clickhouse_renames_are_supported(table_name: &str, plan: &SchemaPlan) 
         let SchemaOperation::AlterColumn { alteration } = operation else {
             continue;
         };
+
         if alteration.kind() != ColumnAlterationKind::Rename {
             continue;
         }
@@ -215,6 +216,7 @@ fn clickhouse_add_column_definition(
     reason: ColumnPresenceChangeReason,
 ) -> (ColumnSchema, bool) {
     let mut destination_column_schema = after_column_schema.clone();
+
     if reason == ColumnPresenceChangeReason::ReplicationMask {
         destination_column_schema.default_expression = None;
         return (destination_column_schema, true);
@@ -257,6 +259,7 @@ fn ensure_clickhouse_type_changes_are_supported(
         let SchemaOperation::AlterColumn { alteration } = operation else {
             continue;
         };
+
         if alteration.kind() != ColumnAlterationKind::Type {
             continue;
         }
@@ -281,6 +284,7 @@ fn ensure_clickhouse_type_changes_are_supported(
                 )
             ));
         }
+
         if is_wall_clock_timestamp(&before.typ) != is_wall_clock_timestamp(&after.typ) {
             return Err(etl_error!(
                 ErrorKind::SourceSchemaError,
@@ -456,9 +460,11 @@ fn reject_legacy_merge_tree_layout(
     let Some((last_column, legacy_columns)) = expected_columns.split_last() else {
         return Ok(());
     };
+
     let [.., operation, lsn] = actual_columns else {
         return Ok(());
     };
+
     if last_column.name != CDC_TX_ORDINAL_COLUMN_NAME
         || operation.name != CDC_OPERATION_COLUMN_NAME
         || operation.type_name != "String"
@@ -513,6 +519,7 @@ fn row_binary_layout_from_clickhouse_columns(
     let expected_names =
         || summarize_column_names(expected_columns.iter().map(|c| c.name.as_str()));
     let actual_names = || summarize_column_names(actual_columns.iter().map(|c| c.name.as_str()));
+
     if actual_columns.len() != expected_columns.len() {
         return Err(etl_error!(
             ErrorKind::CorruptedTableSchema,
@@ -763,6 +770,7 @@ impl std::fmt::Display for ClickHouseOperationKind {
             ClickHouseOperationKind::Ddl => "DDL",
             ClickHouseOperationKind::Insert => "insert",
         };
+
         f.write_str(name)
     }
 }
@@ -903,6 +911,7 @@ impl<S> Clone for DestinationWriter<S> {
 /// Transaction markers touch no table.
 fn batch_table_ids(events: &[Event]) -> BTreeSet<TableId> {
     let mut table_ids = BTreeSet::new();
+
     for event in events {
         match event {
             Event::Insert(insert) => {
@@ -923,6 +932,7 @@ fn batch_table_ids(events: &[Event]) -> BTreeSet<TableId> {
             Event::Begin(_) | Event::Commit(_) => {}
         }
     }
+
     table_ids
 }
 
@@ -975,9 +985,11 @@ impl EventBatchFences {
         };
 
         let mut guards = Vec::with_capacity(fences.len());
+
         for fence in fences {
             guards.push(fence.lock_owned().await);
         }
+
         guards
     }
 }
@@ -1155,6 +1167,7 @@ where
         let Some(existing) = self.client.table_engine(clickhouse_table_name).await? else {
             return Ok(());
         };
+
         let configured = self.inserter_config.engine.as_clickhouse_str();
         if clickhouse_engine_matches(&existing, configured) {
             return Ok(());
@@ -1180,9 +1193,11 @@ where
     /// of rows that outrank copy rows.
     async fn ensure_table_absent(&self, clickhouse_table_name: &str) -> EtlResult<()> {
         let mut names = vec![clickhouse_table_name.to_owned()];
+
         if matches!(self.inserter_config.engine, ClickHouseEngine::ReplacingMergeTree) {
             names.push(format!("{clickhouse_table_name}{CURRENT_VIEW_SUFFIX}"));
         }
+
         for name in names {
             if self.client.table_engine(&name).await?.is_some() {
                 return Err(etl_error!(
@@ -1199,6 +1214,7 @@ where
                 ));
             }
         }
+
         Ok(())
     }
 
@@ -1220,6 +1236,7 @@ where
             let view_ddl = create_current_view_sql(clickhouse_table_name, &destination_columns);
             self.client.execute_ddl(DdlKind::CreateView, &view_ddl).await?;
         }
+
         Ok(())
     }
 
@@ -1300,6 +1317,7 @@ where
             || try_stringify_table_name(schema.name()),
             |metadata| Ok(metadata.table_id().to_owned()),
         )?;
+
         if let Some(metadata) = &metadata {
             ensure_destination_schema_matches_metadata("ClickHouse", table_id, metadata, schema)?;
         }
@@ -1416,6 +1434,7 @@ where
                 );
                 let plan = old_schema.plan_schema_change(schema, CLICKHOUSE_COLUMN_NAME_MAPPING)?;
                 ensure_clickhouse_renames_are_supported(clickhouse_table_name, &plan)?;
+
                 for endpoint_schema in [&old_schema, schema] {
                     reject_legacy_merge_tree_layout(
                         clickhouse_table_name,
@@ -1423,6 +1442,7 @@ where
                         &actual_columns,
                     )?;
                 }
+
                 let actual_user_column_names =
                     clickhouse_user_column_names(&actual_columns, self.inserter_config.engine)?;
                 let old_column_names: Vec<_> = old_schema
@@ -1623,6 +1643,7 @@ where
             let clickhouse_table_name = metadata.table_id().to_owned();
             self.recover_pending_metadata(table_id, &clickhouse_table_name, new_schema, metadata)
                 .await?;
+
             return Ok(());
         }
 
@@ -1682,6 +1703,7 @@ where
         let plan = current_schema.plan_schema_change(new_schema, CLICKHOUSE_COLUMN_NAME_MAPPING)?;
         ensure_clickhouse_renames_are_supported(clickhouse_table_name, &plan)?;
         ensure_clickhouse_type_changes_are_supported(clickhouse_table_name, &plan)?;
+
         if matches!(self.inserter_config.engine, ClickHouseEngine::ReplacingMergeTree) {
             reject_pk_alters_under_replacing_merge_tree(
                 clickhouse_table_name,
@@ -1690,6 +1712,7 @@ where
                 new_schema,
             )?;
         }
+
         // Applied metadata proves the table is at the current layout, so the
         // current endpoint alone identifies a closed-alpha MergeTree table.
         // Reject it before any cache, metadata, or DDL mutation so the operator
@@ -1762,10 +1785,12 @@ where
         let is_replacing_merge_tree =
             matches!(self.inserter_config.engine, ClickHouseEngine::ReplacingMergeTree);
         ensure_clickhouse_type_changes_are_supported(clickhouse_table_name, plan)?;
+
         if plan.is_empty() {
             if is_replacing_merge_tree {
                 self.refresh_current_view(clickhouse_table_name, after_schema).await?;
             }
+
             return Ok(());
         }
 
@@ -1838,6 +1863,7 @@ where
                     let preceding_column_name = insertion_index
                         .checked_sub(1)
                         .map(|index| user_column_names[index].clone());
+
                     if *reason == ColumnPresenceChangeReason::ReplicationMask
                         && after_column_schema.default_expression.is_some()
                     {
@@ -1849,6 +1875,7 @@ where
                              schema"
                         );
                     }
+
                     self.client
                         .add_column(
                             clickhouse_table_name,
@@ -1862,11 +1889,13 @@ where
                 SchemaOperation::AlterColumn { alteration } => {
                     let before = alteration.before_column_schema();
                     let after = alteration.after_column_schema();
+
                     match alteration.kind() {
                         ColumnAlterationKind::Rename => {
                             self.client
                                 .rename_column(clickhouse_table_name, &before.name, &after.name)
                                 .await?;
+
                             if let Some(name) =
                                 user_column_names.iter_mut().find(|name| **name == before.name)
                             {
@@ -1947,6 +1976,7 @@ where
                 let Some(event) = event_iter.next() else {
                     break;
                 };
+
                 match event {
                     Event::Insert(insert) => {
                         let event_position = insert.event_position();
@@ -2005,6 +2035,7 @@ where
                                 expand_key_row(source_old_key_row, &delete.replicated_table_schema)?
                             }
                         };
+
                         let table_id = delete.replicated_table_schema.id();
                         let entry = pending
                             .entry(table_id)
@@ -2035,6 +2066,7 @@ where
 
             // Collect and deduplicate truncate events.
             let mut truncate_schemas: HashMap<TableId, ReplicatedTableSchema> = HashMap::new();
+
             while let Some(Event::Truncate(_)) = event_iter.peek() {
                 if let Some(Event::Truncate(truncate_event)) = event_iter.next() {
                     for schema in truncate_event.truncated_tables {
@@ -2068,6 +2100,7 @@ where
 
         let mut prepared: Vec<(TableId, String, Arc<RowBinaryLayout>, Vec<PendingRow>)> =
             Vec::with_capacity(pending.len());
+
         for (table_id, (schema, rows)) in pending {
             let (clickhouse_table_name, layout) = self.prepare_table_for_writes(&schema).await?;
             prepared.push((table_id, clickhouse_table_name, layout, rows));
@@ -2075,6 +2108,7 @@ where
 
         let mut tasks: TaskGroup<()> = TaskGroup::new();
         let engine = self.inserter_config.engine;
+
         for (table_id, clickhouse_table_name, layout, rows) in prepared {
             let client = self.client.clone();
             let table_cache = Arc::clone(&self.table_cache);
@@ -2425,6 +2459,7 @@ fn clickhouse_rows_for_update(
 ) -> EtlResult<ClickHouseRowsForUpdate> {
     let destination_updated_row =
         clickhouse_full_update_row(replicated_table_schema, source_updated_row)?;
+
     if replicated_table_schema.primary_key_column_schemas().next().is_none() {
         return Ok(ClickHouseRowsForUpdate {
             destination_old_key_tombstone: None,
@@ -3052,6 +3087,7 @@ mod tests {
             forward.await.unwrap();
             backward.await.unwrap();
         };
+
         // The timeout only bounds the failure path; see the test doc.
         tokio::time::timeout(Duration::from_secs(1), both)
             .await
@@ -3169,12 +3205,14 @@ mod tests {
             ],
         ));
         let replication_mask = ReplicationMask::all(&table_schema);
+
         let identity_mask = match identity_type {
             IdentityType::Full => IdentityMask::from_bytes(vec![1, 1]),
             IdentityType::PrimaryKey => IdentityMask::from_bytes(vec![1, 0]),
             IdentityType::AlternativeKey => IdentityMask::from_bytes(vec![0, 1]),
             IdentityType::Missing => IdentityMask::from_bytes(vec![0, 0]),
         };
+
         ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
     }
 
@@ -3193,6 +3231,7 @@ mod tests {
             ],
         ));
         let replication_mask = ReplicationMask::all(&table_schema);
+
         let identity_mask = match identity_type {
             IdentityType::Full => IdentityMask::from_bytes(vec![1, 1]),
             IdentityType::PrimaryKey => IdentityMask::from_bytes(vec![1, 0]),
@@ -3911,6 +3950,7 @@ mod tests {
     #[test]
     fn reject_pk_alters_under_replacing_merge_tree_rejects_pk_membership_and_order_changes() {
         let current_schema = replicated_schema_for_pk_alters();
+
         for (tenant_key_position, id_key_position, value_key_position) in
             [(Some(2), Some(1), None), (Some(1), Some(2), Some(3)), (Some(1), None, None)]
         {

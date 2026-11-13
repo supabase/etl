@@ -276,6 +276,7 @@ pub(crate) fn build_column_schemas(
         .into_iter()
         .map(|column| {
             let typ = convert_type_oid_to_type(column.atttypid);
+
             // A domain resolves to another type; other types resolve to
             // themselves and need no base.
             let base_type =
@@ -285,6 +286,7 @@ pub(crate) fn build_column_schemas(
                     }
                     _ => None,
                 };
+
             let default_expression = column.default_expression.and_then(|expression| {
                 let replicated = replicated_column_default(
                     column.atttypid,
@@ -557,6 +559,7 @@ fn detect_relation_schema_mismatch(
     {
         let name = relation_column.name()?;
         let typ = u32::try_from(relation_column.type_id()).ok().map(convert_type_oid_to_type);
+
         let kind = if name != decoder_column.name {
             RelationSchemaMismatchKind::NameOrder
         } else if typ.as_ref() == Some(&decoder_column.typ) {
@@ -766,6 +769,7 @@ pub(crate) fn convert_tuple_to_row<'a>(
     }
 
     let mut values = Vec::with_capacity(column_count);
+
     for (index, (column_schema, tuple_data)) in column_schemas.zip(tuple_data.iter()).enumerate() {
         let ConvertedTupleCell::Present(value) =
             convert_tuple_data_to_cell(index, column_schema, tuple_data, None)?
@@ -825,6 +829,7 @@ fn convert_update_tuple_to_updated_table_row(
     let mut partial_row = false;
 
     let mut identity_columns = replicated_table_schema.identity_column_schemas().peekable();
+
     for (index, (column_schema, tuple_data)) in
         replicated_table_schema.column_schemas().zip(tuple_data.iter()).enumerate()
     {
@@ -835,9 +840,11 @@ fn convert_update_tuple_to_updated_table_row(
             identity_column.ordinal_position == column_schema.ordinal_position
         });
         let old_value = old_row_resolver.value_for_column(is_identity)?;
+
         if is_identity {
             let _ = identity_columns.next();
         }
+
         match convert_tuple_data_to_cell(index, column_schema, tuple_data, old_value)? {
             ConvertedTupleCell::Present(value) if partial_row => {
                 present_values.push(value);
@@ -854,6 +861,7 @@ fn convert_update_tuple_to_updated_table_row(
                     present_values.append(&mut full_values);
                     partial_row = true;
                 }
+
                 // Missing indexes stay in replicated-column order so consumers
                 // can align the sparse row against the attached replicated
                 // schema without guessing positions.
@@ -1015,6 +1023,7 @@ fn convert_dense_key_tuple_to_row<'a>(
                 )
             );
         };
+
         values.push(value);
     }
 
@@ -1048,6 +1057,7 @@ fn convert_full_width_key_tuple_to_row<'a>(
                 "Replica-identity column iterator ended unexpectedly"
             );
         };
+
         let ConvertedTupleCell::Present(value) =
             convert_tuple_data_to_cell(i, identity_column, tuple_data, None)?
         else {
@@ -1060,6 +1070,7 @@ fn convert_full_width_key_tuple_to_row<'a>(
                 )
             );
         };
+
         values.push(value);
     }
 
@@ -1244,12 +1255,14 @@ mod tests {
         let ReplicationMessage::XLogData(xlog_data) = replication_message else {
             panic!("encoded replication message should be XLogData");
         };
+
         assert_eq!(xlog_data.wal_start(), wal_start);
 
         let logical_message = LogicalReplicationMessage::parse(xlog_data.data()).unwrap();
         let LogicalReplicationMessage::Message(message) = logical_message else {
             panic!("encoded logical message should be Message");
         };
+
         let commit_lsn = PgLsn::from(180);
 
         assert_eq!(
@@ -2254,6 +2267,7 @@ mod tests {
                 columns[0].replicated = true;
                 columns[0].identity = full_identity;
             }
+
             if !columns.iter().any(|column| column.identity) {
                 columns.iter_mut().find(|column| column.replicated).unwrap().identity = true;
             }
@@ -2265,6 +2279,7 @@ mod tests {
                     (changed, new_null, new_int, new_text),
                     toasted,
                 ) = raw_column;
+
                 // Key identities come from a primary key or a unique index over
                 // `NOT NULL` columns.
                 if column.identity && !full_identity {
@@ -2277,6 +2292,7 @@ mod tests {
                     ModelColumnType::Text => ModelValue::Text(text.clone()),
                 };
                 column.old = (!(column.nullable && *old_null)).then(|| value(old_int, old_text));
+
                 column.new = if !changed {
                     column.old.clone()
                 } else if column.nullable && *new_null {
@@ -2284,6 +2300,7 @@ mod tests {
                 } else {
                     Some(value(new_int, new_text))
                 };
+
                 column.unchanged_toast = *toasted
                     && typ == ModelColumnType::Text
                     && column.replicated
@@ -2306,6 +2323,7 @@ mod tests {
                         ModelColumnType::Int8 => Type::INT8,
                         ModelColumnType::Text => Type::TEXT,
                     };
+
                     let column_schema = ColumnSchema::new(
                         format!("c{index}"),
                         typ,
@@ -2313,6 +2331,7 @@ mod tests {
                         i32::try_from(index + 1).unwrap(),
                         column.nullable,
                     );
+
                     if column.identity && !self.full_identity {
                         primary_key_position += 1;
                         column_schema.with_primary_key(primary_key_position)
@@ -2438,6 +2457,7 @@ mod tests {
             let sends_key_tuple = self.sends_key_tuple();
             let mut present_values = Vec::new();
             let mut missing_column_indexes = Vec::new();
+
             for (index, column) in self.replicated_columns().enumerate() {
                 let recoverable = self.full_identity || (sends_key_tuple && column.identity);
                 if column.unchanged_toast && !recoverable {
@@ -2490,6 +2510,7 @@ mod tests {
     ) -> postgres_replication::protocol::UpdateBody {
         let old_side = old_side.map(test_tuple);
         let new_tuple = test_tuple(new_tuple);
+
         if full_identity {
             parse_update_body_from_parts(42, old_side.as_deref(), None, &new_tuple)
         } else {
@@ -2505,6 +2526,7 @@ mod tests {
         old_side: &[ModelTupleCell],
     ) -> postgres_replication::protocol::DeleteBody {
         let old_side = test_tuple(old_side);
+
         if full_identity {
             parse_delete_body_from_parts(42, Some(&old_side), None)
         } else {

@@ -192,6 +192,7 @@ impl CrashReplayTarget for ClickHouseTarget {
         table: &TableName,
     ) -> Result<Option<Vec<StoredVersion>>, TestCaseError> {
         let table = clickhouse_table_name(table);
+
         let versions = match self.engine {
             ClickHouseEngine::MergeTree => {
                 let sql = format!(
@@ -250,6 +251,7 @@ impl CrashReplayTarget for ClickHouseTarget {
             Some(dropped) => DUPLICATE_BLOCKS_DROPPED.fetch_add(dropped, Ordering::Relaxed),
             None => UNMEASURED_CASES.fetch_add(1, Ordering::Relaxed),
         };
+
         self.database.drop_database().await;
     }
 }

@@ -98,6 +98,7 @@ async fn boundary_underscore_names_survive_lifecycle(engine: ClickHouseEngine) {
     let cases = table_name_schemas();
     let destination = database.build_destination_with_engine(store.clone(), engine).await;
     let mut original_metadata = Vec::new();
+
     for (schema, name) in &cases {
         store.store_table_schema(schema.inner().clone()).await.unwrap();
         write_table_rows_via_trait(
@@ -111,9 +112,11 @@ async fn boundary_underscore_names_survive_lifecycle(engine: ClickHouseEngine) {
         assert_eq!(metadata.table_id(), name);
         original_metadata.push(metadata);
     }
+
     destination.shutdown().await.unwrap();
 
     let restarted = database.build_destination_with_engine(store.clone(), engine).await;
+
     for ((schema, name), metadata) in cases.iter().zip(&original_metadata) {
         write_events_via_trait(
             &restarted,
@@ -136,6 +139,7 @@ async fn boundary_underscore_names_survive_lifecycle(engine: ClickHouseEngine) {
             database.query::<(i32, String)>(&query).await,
             vec![(1, "copied".to_owned()), (2, "streamed".to_owned())]
         );
+
         if matches!(engine, ClickHouseEngine::ReplacingMergeTree) {
             assert_eq!(
                 database
@@ -190,6 +194,7 @@ async fn boundary_underscore_names_survive_lifecycle(engine: ClickHouseEngine) {
     .await
     .unwrap();
     restarted.shutdown().await.unwrap();
+
     for (index, (_, name)) in cases.iter().enumerate() {
         let query = current_state_query(engine, name, "id, name", &["id"], "id");
         assert_eq!(
@@ -263,6 +268,7 @@ async fn unsupported_boundary_names_fail_before_destination_setup() {
     let database = setup_clickhouse_database().await;
     let store = MemoryStore::new();
     let destination = database.build_destination(store.clone()).await;
+
     for (index, (source_schema, source_table)) in [
         ("public".to_owned(), "_café".to_owned()),
         ("schéma".to_owned(), "_orders".to_owned()),
@@ -279,10 +285,12 @@ async fn unsupported_boundary_names_fail_before_destination_setup() {
             vec![ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1)],
         )));
         store.store_table_schema(schema.inner().clone()).await.unwrap();
+
         for rows in [vec![], vec![TableRow::new(vec![Cell::I32(1)])]] {
             let error = write_table_rows_via_trait(&destination, &schema, rows).await.unwrap_err();
             assert_eq!(error.kind(), ErrorKind::ValidationError);
         }
+
         let error = write_events_via_trait(
             &destination,
             WriteEventsDurability::RequireDurable,
@@ -300,6 +308,7 @@ async fn unsupported_boundary_names_fail_before_destination_setup() {
         assert_eq!(error.kind(), ErrorKind::ValidationError);
         assert!(store.get_destination_table_metadata(schema.id()).await.unwrap().is_none());
     }
+
     destination.shutdown().await.unwrap();
     assert!(database.query::<String>("show tables").await.is_empty());
 }
@@ -332,6 +341,7 @@ impl PropertyTable {
 
         let mut columns =
             vec![ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1)];
+
         for (index, (name, typ, nullable)) in value_columns.iter().enumerate() {
             let ordinal = i32::try_from(index + 2).expect("column ordinal fits in i32");
             columns.push(ColumnSchema::new(
@@ -342,6 +352,7 @@ impl PropertyTable {
                 *nullable,
             ));
         }
+
         let table_schema = TableSchema::new(
             TableId::new(1),
             TableName::new("test".to_owned(), table.to_owned()),
@@ -437,6 +448,7 @@ fn expected_hex(bytes: &[u8]) -> String {
 fn expected_time_string(time: &NaiveTime) -> String {
     let micros = time.nanosecond() / 1_000;
     let base = format!("{:02}:{:02}:{:02}", time.hour(), time.minute(), time.second());
+
     if micros == 0 {
         base
     } else if micros.is_multiple_of(1_000) {
@@ -479,21 +491,27 @@ fn pg_numeric() -> impl Strategy<Value = PgNumeric> {
     (any::<bool>(), digits(38), option::of(digits(20)), option::of(-25i32..=25)).prop_map(
         |(negative, int_digits, frac_digits, exponent)| {
             let mut literal = String::new();
+
             if negative {
                 literal.push('-');
             }
+
             for digit in int_digits {
                 literal.push(char::from(b'0' + digit));
             }
+
             if let Some(frac_digits) = frac_digits {
                 literal.push('.');
+
                 for digit in frac_digits {
                     literal.push(char::from(b'0' + digit));
                 }
             }
+
             if let Some(exponent) = exponent {
                 literal.push_str(&format!("e{exponent}"));
             }
+
             literal.parse().expect("generated numeric literal is valid")
         },
     )
@@ -736,10 +754,13 @@ async fn string_mapped_values_roundtrip_through_destination() {
             if let (Some(stored), Some(written)) = (&row.vn, vn) {
                 assert_numeric_reparses(stored, written)?;
             }
+
             assert_numeric_reparses(&row.wn, wn)?;
+
             if let (Some(stored), Some(written)) = (&row.vj, vj) {
                 assert_json_parses_back(stored, written)?;
             }
+
             assert_json_parses_back(&row.wj, wj)?;
             Ok(())
         },
@@ -899,6 +920,7 @@ async fn array_values_roundtrip_through_destination() {
         prop_assert_eq!(&row.ai, ai);
         prop_assert_eq!(&row.at, at);
         prop_assert_eq!(row.af.len(), af.len());
+
         for (expected, stored) in af.iter().zip(&row.af) {
             prop_assert!(
                 opt_f64_matches(*expected, *stored),
@@ -907,6 +929,7 @@ async fn array_values_roundtrip_through_destination() {
                 stored
             );
         }
+
         let expected_ab: Vec<Option<String>> =
             ab.iter().map(|element| element.as_deref().map(expected_hex)).collect();
         prop_assert_eq!(&row.ab, &expected_ab);
@@ -984,6 +1007,7 @@ async fn publication_added_array_columns_read_empty_for_existing_rows() {
     // A publication column-list change stores a new snapshot of the same
     // columns.
     let mut snapshots = Vec::new();
+
     for snapshot_id in [test_snapshot_id(100, 100), test_snapshot_id(200, 200)] {
         snapshots.push(
             store
@@ -1001,6 +1025,7 @@ async fn publication_added_array_columns_read_empty_for_existing_rows() {
                 .unwrap(),
         );
     }
+
     let before = ReplicatedTableSchema::from_mask(
         Arc::clone(&snapshots[0]),
         ReplicationMask::from_bytes(vec![1, 0]),
@@ -1161,6 +1186,7 @@ async fn destination_behind_flaky_proxy(
             let upstream = upstream.clone();
             tokio::spawn(async move {
                 let mut client = tokio::io::BufReader::new(client);
+
                 if fail {
                     // Answer after the request head, as a proxy does: hyper
                     // rejects a response that arrives before its request.
@@ -1170,12 +1196,14 @@ async fn destination_behind_flaky_proxy(
                     while client.read_line(&mut line).await? > 2 {
                         line.clear();
                     }
+
                     client.get_mut().write_all(response.as_bytes()).await?;
                     tokio::io::copy(&mut client, &mut tokio::io::sink()).await?;
                 } else {
                     let mut server = tokio::net::TcpStream::connect(&upstream[..]).await?;
                     tokio::io::copy_bidirectional(client.get_mut(), &mut server).await?;
                 }
+
                 std::io::Result::Ok(())
             });
         }
@@ -1603,6 +1631,7 @@ async fn partial_key_change_restart_replay_inner(engine: ClickHouseEngine) {
         database.query::<(i64, String)>(&current_query).await,
         vec![(9, "unaffected".to_owned())]
     );
+
     let tombstone_query = match engine {
         ClickHouseEngine::MergeTree => {
             "select id from public_replay where cdc_operation = 'DELETE'"
@@ -1611,6 +1640,7 @@ async fn partial_key_change_restart_replay_inner(engine: ClickHouseEngine) {
             "select id from public_replay where _etl_deleted = 1"
         }
     };
+
     assert_eq!(database.query::<i64>(tombstone_query).await, vec![1]);
 
     // WHEN: the constraint is removed and the key change replays on restart.
@@ -1749,9 +1779,11 @@ async fn store_computed_schema(
         ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
         ColumnSchema::new("value".to_owned(), Type::TEXT, -1, 2, value_nullable),
     ];
+
     if with_note {
         columns.push(ColumnSchema::new("note".to_owned(), Type::TEXT, -1, 3, true));
     }
+
     let schema = store
         .store_table_schema(TableSchema::with_snapshot_id(
             TableId::new(4250),
@@ -2923,8 +2955,10 @@ async fn yield_until(condition: impl Fn() -> bool) {
         if condition() {
             return;
         }
+
         tokio::task::yield_now().await;
     }
+
     panic!("condition not reached within the yield budget");
 }
 
@@ -3774,6 +3808,7 @@ async fn replayed_truncate_waits_for_abandoned_insert_on_same_table() {
         assert!(matches!(replay_reached.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
         tokio::task::yield_now().await;
     }
+
     assert!(!replay_handle.is_finished());
 
     // Releasing the abandoned insert lets it land first. Only then does the

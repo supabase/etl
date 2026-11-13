@@ -449,6 +449,7 @@ mod tests {
                 3 => SizedToken { value: 4, bytes: 100 },
                 _ => return Poll::Ready(None),
             };
+
             self.emitted += 1;
 
             Poll::Ready(Some(Ok(item)))

@@ -418,6 +418,7 @@ async fn cancelled_checkpoint_delete_reloads_before_cache_access() {
             "create trigger hold_delete before delete on etl.replication_progress
              for each statement execute function test.hold_delete()"
         };
+
         client
             .batch_execute(&format!(
                 "create function test.hold_delete() returns trigger language plpgsql as $$
@@ -452,6 +453,7 @@ async fn cancelled_checkpoint_delete_reloads_before_cache_access() {
         } else {
             store.clone()
         };
+
         let read =
             tokio::spawn(async move { reader.get_replication_checkpoint(WorkerType::Apply).await });
 
@@ -696,6 +698,7 @@ async fn cache_preparation_loads_every_domain() {
         drop(store);
 
         let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+
         if explicit_load {
             store.load_cache().await.unwrap();
         } else {
@@ -1133,6 +1136,7 @@ async fn schema_store_exclusive_checkpoint_preserves_replayed_transaction_schema
         table_schema.column_schemas[1].name = column_name.to_owned();
         store.store_table_schema(table_schema.clone()).await.unwrap();
     }
+
     store.upsert_replication_checkpoint(WorkerType::Apply, PgLsn::from(300)).await.unwrap();
 
     // Adjacent COMMIT records can make the persisted end equal the next
@@ -1154,6 +1158,7 @@ async fn schema_store_exclusive_checkpoint_preserves_replayed_transaction_schema
     // history and lookup from the rebuilt cache.
     let reloaded_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
     reloaded_store.load_cache().await.unwrap();
+
     for snapshot_id in [later_transaction, second_message, first_message, predecessor] {
         let schema =
             reloaded_store.get_table_schema(&table_id, snapshot_id).await.unwrap().unwrap();
@@ -1175,10 +1180,12 @@ async fn schema_store_exclusive_checkpoint_preserves_replayed_transaction_schema
 
     let final_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
     final_store.load_cache().await.unwrap();
+
     for snapshot_id in [later_transaction, second_message] {
         let schema = final_store.get_table_schema(&table_id, snapshot_id).await.unwrap().unwrap();
         assert_eq!(schema.snapshot_id, snapshot_id);
     }
+
     assert!(final_store.get_table_schema(&table_id, first_message).await.unwrap().is_none());
 }
 
@@ -1193,6 +1200,7 @@ async fn schema_store_loads_retained_schemas_once() {
     for schema in &schemas {
         store_schema_versions(&store, schema, &[0, 100, 200]).await;
     }
+
     drop(store);
 
     let store = PostgresStore::new("1", database.config.clone()).await.unwrap();
@@ -1242,6 +1250,7 @@ async fn schema_store_prunes_obsolete_versions_from_database_and_cache() {
 
     let other_table_id = TableId::new(67890);
     let other_table_name = TableName::new("public".to_owned(), "other_table".to_owned());
+
     for snapshot_id in [0u64, 150] {
         let columns = vec![
             test_column("id", PgType::INT4, -1, 1, false, true),
@@ -1254,6 +1263,7 @@ async fn schema_store_prunes_obsolete_versions_from_database_and_cache() {
 
     let untouched_table_id = TableId::new(24680);
     let untouched_table_name = TableName::new("public".to_owned(), "untouched_table".to_owned());
+
     for snapshot_id in [0u64, 50] {
         let columns = vec![
             test_column("id", PgType::INT4, -1, 1, false, true),

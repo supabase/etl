@@ -83,11 +83,13 @@ async fn describe_read_replica(monitor_config: &PgConnectionConfig) -> String {
     };
 
     let mut report = String::from("replica diagnostics:");
+
     for (label, sql) in REPLICA_DIAGNOSTIC_QUERIES {
         let section = match client.simple_query(sql).await {
             Ok(messages) => format_diagnostic_rows(&messages),
             Err(error) => format!("query failed: {error}"),
         };
+
         report.push_str(&format!("\n  {label}:\n    {section}"));
     }
 

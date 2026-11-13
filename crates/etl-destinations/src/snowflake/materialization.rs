@@ -58,12 +58,14 @@ pub(super) fn view_query(table: &str, schema: &ReplicatedTableSchema) -> Result<
 /// Builds the shared query over an already quoted table reference.
 fn query(table: &str, schema: &ReplicatedTableSchema) -> Result<String> {
     validate_primary_key_identity(schema)?;
+
     if schema.column_schemas().any(|column| column.name.starts_with("_cdc_")) {
         return Err(Error::Config(
             "Source column names beginning with _cdc_ are reserved by the materialization query"
                 .to_owned(),
         ));
     }
+
     let columns =
         schema.destination_column_schemas(SNOWFLAKE_COLUMN_NAME_MAPPING).collect::<Vec<_>>();
     let keys = columns
@@ -77,14 +79,18 @@ fn query(table: &str, schema: &ReplicatedTableSchema) -> Result<String> {
     let mut resolved = vec![keys.clone()];
     let mut output = Vec::with_capacity(columns.len() + 3);
     let mut unresolved = Vec::new();
+
     for (i, column) in columns.iter().enumerate() {
         let name = quote_identifier(&column.name);
+
         let value = if column.primary_key() && type_name(&column.typ) == "VARCHAR" {
             format!("collate({name}, 'utf8')")
         } else {
             name.clone()
         };
+
         projection.push(format!("{value} as c{i}"));
+
         if column.primary_key() {
             // Keep UTF-8 key equality without changing the output collation.
             projection.push(format!("{name} as o{i}"));
@@ -103,6 +109,7 @@ fn query(table: &str, schema: &ReplicatedTableSchema) -> Result<String> {
             unresolved.push(format!("iff(k{i} = 0, {}, null)", quote_string_literal(&column.name)));
         }
     }
+
     projection.push(format!("{} as op", quote_identifier(CDC_OPERATION_COLUMN)));
     projection.push(format!("collate({}, 'utf8') as seq", quote_identifier(CDC_SEQUENCE_COLUMN)));
     projection.push(format!(
@@ -118,11 +125,13 @@ fn query(table: &str, schema: &ReplicatedTableSchema) -> Result<String> {
             .to_owned(),
     );
     output.push("anchored as \"_cdc_anchored\"".to_owned());
+
     let unresolved = if unresolved.is_empty() {
         "array_construct()".to_owned()
     } else {
         format!("array_construct_compact({})", unresolved.join(", "))
     };
+
     output.push(format!("{unresolved} as \"_cdc_unresolved_columns\""));
     output.push("seq as \"_cdc_last_sequence\"".to_owned());
     // A complete record supplies every value, including explicit NULLs, so
@@ -216,6 +225,7 @@ mod tests {
              \"_cdc_last_sequence\" from {input}"
         );
         let mut metadata = Vec::new();
+
         for statement in [reference, query(input, &schema).unwrap()] {
             let response = sql.execute_statement(&statement).await.unwrap();
             assert_eq!(

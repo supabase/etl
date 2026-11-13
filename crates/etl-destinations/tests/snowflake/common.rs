@@ -37,6 +37,7 @@ pub async fn drop_table_and_views(sql: &SqlClient<AuthManager<HttpExchanger>>, t
             ))
             .await;
     }
+
     let _ = sql.drop_table(table).await;
 }
 
@@ -71,6 +72,7 @@ pub async fn wait_for_replication_checkpoint(store: &impl StateStore, commit_lsn
         {
             return;
         }
+
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
@@ -98,6 +100,7 @@ where
             return Some(offset);
         }
     }
+
     None
 }
 
@@ -120,6 +123,7 @@ pub async fn poll_stream_offset(
             return status.offset_token;
         }
     }
+
     None
 }
 

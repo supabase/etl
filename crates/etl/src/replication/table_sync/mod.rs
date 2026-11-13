@@ -220,11 +220,13 @@ where
                 destination
                     .drop_table_for_copy(&current_replication_table_schema, drop_result)
                     .await?;
+
                 let ShutdownResult::Ok(completed_drop_result) =
                     with_shutdown!(pending_drop_result, shutdown_token)
                 else {
                     return Ok(TableSyncResult::Stopped);
                 };
+
                 completed_drop_result.into_result()?;
             }
 
@@ -269,6 +271,7 @@ where
             ) else {
                 return Ok(TableSyncResult::Stopped);
             };
+
             let (replication_transaction, slot) = created?;
             let _copy_lag = replication_lag_monitor.register_copy(table_id, slot.consistent_point);
 

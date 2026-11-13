@@ -65,6 +65,7 @@ async fn run_schema_cleanup<S>(
         }
 
         let table_count = retention_snapshot_ids.len() as u64;
+
         match schema_store.prune_table_schemas(retention_snapshot_ids).await {
             Ok(pruned_count) => {
                 counter!(

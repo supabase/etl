@@ -204,6 +204,7 @@ pub(crate) fn parse_junit(xml: &str) -> Result<Vec<TestCase>> {
             _ => {}
         }
     }
+
     if open.is_some() {
         bail!("Unterminated testcase element in JUnit report");
     }
@@ -212,6 +213,7 @@ pub(crate) fn parse_junit(xml: &str) -> Result<Vec<TestCase>> {
     if let Some(case) = cases.iter().find(|case| !seen.insert((&case.binary, &case.name))) {
         bail!("JUnit report lists test {} {} twice", case.binary, case.name);
     }
+
     Ok(cases)
 }
 
@@ -232,6 +234,7 @@ fn read_case(element: &BytesStart<'_>) -> Result<TestCase> {
     if !(0.0..=f64::from(u32::MAX)).contains(&millis) {
         bail!("JUnit testcase time {seconds} is out of range");
     }
+
     Ok(TestCase {
         binary: attribute("classname")?,
         name: attribute("name")?,

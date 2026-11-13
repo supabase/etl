@@ -129,6 +129,7 @@ fn collect_standard_exception_chain(
 /// `description` or `description: detail`.
 fn format_etl_sentry_value(error: &EtlError) -> String {
     let description = error.description().unwrap_or("etl error");
+
     match error.detail() {
         Some(detail) if !detail.trim().is_empty() => {
             format!("{description}: {}", detail.lines().collect::<Vec<_>>().join(" "))

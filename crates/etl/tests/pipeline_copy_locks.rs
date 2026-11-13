@@ -29,6 +29,7 @@ fn integer_pair(row: &TableRow) -> (i32, i32) {
     let [Cell::I32(id), Cell::I32(value)] = row.values() else {
         panic!("Fixture rows must contain two integers");
     };
+
     (*id, *value)
 }
 
@@ -54,9 +55,11 @@ async fn copy_converges_with_concurrent_writers() {
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
     let mut holds = Vec::new();
+
     for _ in 0..4 {
         holds.push(destination.hold_next(FaultyOp::WriteTableRows).await);
     }
+
     let mut pipeline = PipelineBuilder::new(
         database.config.clone(),
         random_pipeline_id(),
@@ -112,6 +115,7 @@ async fn copy_converges_with_concurrent_writers() {
         .await
         .unwrap();
     client.batch_execute("vacuum analyze test.copied").await.unwrap();
+
     for hold in holds {
         hold.release_ok();
     }
@@ -126,6 +130,7 @@ async fn copy_converges_with_concurrent_writers() {
     assert_eq!(rows.len(), 10000);
     let mut actual = rows.iter().map(integer_pair).collect::<BTreeMap<_, _>>();
     assert_eq!(actual, (1..=10000).map(|id| (id, id * 2)).collect());
+
     for event in destination.get_events().await {
         match event {
             Event::Insert(insert) => {
@@ -144,6 +149,7 @@ async fn copy_converges_with_concurrent_writers() {
             _ => {}
         }
     }
+
     let expected = client
         .query("select id, value from test.copied", &[])
         .await
@@ -215,6 +221,7 @@ async fn copy_retries_queued_partition_ddl() {
 
         failed.notified().await;
     };
+
     let (ddl, ()) = tokio::join!(
         ddl_client.batch_execute(
             "set lock_timeout = '10s';

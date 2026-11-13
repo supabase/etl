@@ -50,6 +50,7 @@ fn create_slot_query(
             SnapshotAction::Use => "'use'",
             SnapshotAction::NoExport => "'nothing'",
         };
+
         format!(
             r#"CREATE_REPLICATION_SLOT {}{} LOGICAL pgoutput (SNAPSHOT {}, FAILOVER)"#,
             quote_identifier(slot_name),
@@ -63,6 +64,7 @@ fn create_slot_query(
             SnapshotAction::Use => "USE_SNAPSHOT",
             SnapshotAction::NoExport => "NOEXPORT_SNAPSHOT",
         };
+
         format!(
             r#"CREATE_REPLICATION_SLOT {}{} LOGICAL pgoutput {}"#,
             quote_identifier(slot_name),
@@ -101,9 +103,11 @@ impl<'a, 'tx> PgReplicationQueryTarget<'a, 'tx> {
         let query = create_slot_query(slot_name, snapshot_action, config);
         let attempt = monitor.map(|monitor| monitor.start(worker_type));
         let response = self.transaction.simple_query(&query).await;
+
         if let Some(attempt) = attempt {
             attempt.finish(response.is_ok());
         }
+
         match response {
             Ok(results) => {
                 for result in results {
@@ -127,6 +131,7 @@ impl<'a, 'tx> PgReplicationQueryTarget<'a, 'tx> {
                     )
                     .with_source(err));
                 }
+
                 if let Some(code) = err.code()
                     && *code == SqlState::DUPLICATE_OBJECT
                 {

@@ -21,24 +21,28 @@ jobs:
   format:
     name: Format
     runs-on: blacksmith-2vcpu-ubuntu-2404
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - name: Check out source
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
+      # The pinned stable toolchain builds xtask; the nightly provides rustfmt.
       - name: Set up Rust
         uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
         with:
-          toolchain: nightly-2026-09-16
-          components: rustfmt
-          cache: false
+          rustflags: ''
+          cache-key: format
+          cache-on-failure: false
+          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install nightly rustfmt
+        run: rustup toolchain install nightly-2026-09-16 --profile minimal --component rustfmt
       - name: Install cargo-sort
         uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
         with:
           tool: cargo-sort@2.1.0
       - name: Check Rust formatting
-        run: cargo +nightly-2026-09-16 fmt --all -- --check
+        run: cargo --locked x fmt --check
       - name: Check manifest ordering
         run: cargo sort --workspace --grouped --check
 

@@ -85,6 +85,7 @@ impl DurabilityMonitor {
         if let Some(pending) = &mut state.outstanding {
             pending.replay_until = Some(pending.dispatched_lsn);
         }
+
         self.emit(state.age());
     }
 
@@ -108,6 +109,7 @@ impl DurabilityMonitor {
         }) {
             state.outstanding = None;
         }
+
         self.emit(state.age());
     }
 
@@ -117,6 +119,7 @@ impl DurabilityMonitor {
         spawn_best_effort_task("durability monitor", async move {
             let mut interval = tokio::time::interval(REFRESH_INTERVAL);
             interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
             loop {
                 interval.tick().await;
                 let state = lifetime.0.state.lock().unwrap();
@@ -189,6 +192,7 @@ mod tests {
             tokio::task::yield_now().await;
             assert!(exported_age(&metrics.render()) >= seconds as f64);
         }
+
         monitor.confirmed(Some(100.into()));
         assert_eq!(exported_age(&metrics.render()), 0.0);
         tokio::time::advance(Duration::from_secs(1800)).await;

@@ -68,6 +68,7 @@ fn current_vendored_extension_dir() -> Option<PathBuf> {
         ("macos", "aarch64" | "arm64") => "osx_arm64",
         _ => return None,
     };
+
     let env_override = std::env::var_os("ETL_DUCKDB_EXTENSION_ROOT").map(PathBuf::from);
     let candidate_roots = env_override
         .into_iter()
@@ -262,13 +263,16 @@ fn postgres_catalog_attach_target(catalog_url: &Url) -> String {
     if let Some(dbname) = config.get_dbname() {
         push_conninfo_pair(&mut parts, "dbname", dbname);
     }
+
     if let Some(user) = config.get_user() {
         push_conninfo_pair(&mut parts, "user", user);
     }
+
     if let Some(password) = config.get_password() {
         let password = std::str::from_utf8(password).expect("catalog password must be valid utf-8");
         push_conninfo_pair(&mut parts, "password", password);
     }
+
     if config.get_ssl_mode() != SslMode::Prefer {
         parts.push(format!("sslmode={}", ssl_mode_to_str(config.get_ssl_mode())));
     }
@@ -278,6 +282,7 @@ fn postgres_catalog_attach_target(catalog_url: &Url) -> String {
 
 fn serialize_hosts(hosts: &[Host]) -> String {
     let mut values = Vec::with_capacity(hosts.len());
+
     for host in hosts {
         match host {
             Host::Tcp(host) => values.push(host.clone()),
@@ -297,12 +302,15 @@ fn push_conninfo_pair(parts: &mut Vec<String>, key: &str, value: &str) {
 
 fn quote_libpq_conninfo_value(value: &str) -> String {
     let mut quoted = String::from("'");
+
     for ch in value.chars() {
         if matches!(ch, '\'' | '\\') {
             quoted.push('\\');
         }
+
         quoted.push(ch);
     }
+
     quoted.push('\'');
     quoted
 }

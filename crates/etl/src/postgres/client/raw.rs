@@ -90,6 +90,7 @@ impl ConnectionKind {
 /// Rejects bundles with no certificates before constructing the client config.
 fn tls_client_config_from_root_certs(trusted_root_certs: &str) -> EtlResult<ClientConfig> {
     let mut root_store = rustls::RootCertStore::empty();
+
     for cert in CertificateDer::pem_slice_iter(trusted_root_certs.as_bytes()) {
         let cert = cert?;
         root_store.add(cert)?;
@@ -493,6 +494,7 @@ impl PgReplicationClient {
              where c.oid = {table_id}"
         );
         let mut table_name = None;
+
         for message in self.client.simple_query(&query).await? {
             if let SimpleQueryMessage::Row(row) = message {
                 table_name = Some(TableName::new(
@@ -501,6 +503,7 @@ impl PgReplicationClient {
                 ));
             }
         }
+
         let table_name = table_name.ok_or_else(|| {
             etl_error!(
                 ErrorKind::SourceSchemaError,
@@ -689,6 +692,7 @@ impl PgReplicationClient {
 
         let results = self.client.simple_query(&query).await?;
         let mut failover = None;
+
         for result in results {
             if let SimpleQueryMessage::Row(row) = result {
                 failover =
@@ -793,6 +797,7 @@ impl PgReplicationClient {
         let query = publication_table_ids_query(publication_name);
 
         let mut table_ids = vec![];
+
         for row in self.client.simple_query(&query).await? {
             if let SimpleQueryMessage::Row(row) = row {
                 let table_id = get_row_value::<TableId>(&row, "oid", "pg_class")?;

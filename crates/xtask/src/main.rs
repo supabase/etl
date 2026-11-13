@@ -40,7 +40,7 @@ enum Command {
     Example(ExampleArgs),
     /// Auto-fix: clippy --fix, fmt, sort.
     Fix(FixArgs),
-    /// Format code with nightly rustfmt.
+    /// Format code with nightly rustfmt and the blank-line rules.
     Fmt(FmtArgs),
     /// Start local Docker services and run migrations.
     Init(InitArgs),

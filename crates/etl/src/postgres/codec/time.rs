@@ -20,16 +20,20 @@ fn normalize_year(value: &str) -> Result<Cow<'_, str>, ParseTimeError> {
     if !bc && year.len() == 4 && year != "0000" {
         return Ok(Cow::Borrowed(value));
     }
+
     if year.is_empty() || !year.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(ParseTimeError::InvalidSyntax);
     }
+
     let year: i32 = year.parse().map_err(|_| ParseTimeError::InvalidSyntax)?;
     if year == 0 {
         return Err(ParseTimeError::InvalidSyntax);
     }
+
     let year = if bc { 1 - year } else { year };
     let year =
         if (0..10_000).contains(&year) { format!("{year:04}") } else { format!("{year:+05}") };
+
     Ok(Cow::Owned(format!("{year}-{rest}")))
 }
 
@@ -47,6 +51,7 @@ pub(crate) fn parse_postgres_time(value: &str) -> Result<PgTime, ParseTimeError>
     if value.starts_with("24:") {
         return value.parse();
     }
+
     Ok(PgTime::Value(parse_finite_time(value)?))
 }
 
@@ -188,11 +193,13 @@ fn parse_iso_time_fast(bytes: &[u8]) -> Option<NaiveTime> {
         }
 
         let mut nanos: u32 = 0;
+
         for &byte in fraction {
             let digit = byte.wrapping_sub(b'0');
             if digit > 9 {
                 return None;
             }
+
             nanos = nanos * 10 + u32::from(digit);
         }
 
@@ -241,6 +248,7 @@ pub(crate) fn check_fast_paths_match_chrono(value: &str) {
             "date fast path disagrees with chrono for {value:?}"
         );
     }
+
     if let Some(time) = parse_iso_time_fast(value.as_bytes()) {
         assert_eq!(
             NaiveTime::parse_from_str(value, TIME_FORMAT).ok(),
@@ -248,6 +256,7 @@ pub(crate) fn check_fast_paths_match_chrono(value: &str) {
             "time fast path disagrees with chrono for {value:?}"
         );
     }
+
     if let Some(timestamp) = parse_iso_timestamp_fast(value.as_bytes()) {
         assert_eq!(
             NaiveDateTime::parse_from_str(value, TIMESTAMP_FORMAT).ok(),
@@ -457,6 +466,7 @@ mod tests {
                 Timestamp::PosInfinity | Timestamp::NegInfinity
             ));
         }
+
         for (text, year) in [("0001-02-29 BC", 0), ("0044-02-01 BC", -43), ("12023-02-01", 12023)] {
             let day = if year == 0 { 29 } else { 1 };
             assert_eq!(
@@ -464,6 +474,7 @@ mod tests {
                 Date::Value(NaiveDate::from_ymd_opt(year, 2, day).unwrap())
             );
         }
+
         assert_eq!(
             parse_postgres_timestamptz("0001-01-01 00:30:00+01 BC").unwrap(),
             Timestamp::Value(
@@ -499,11 +510,13 @@ mod tests {
         ] {
             assert!(parse_postgres_date(value).is_err());
         }
+
         for value in
             ["24:00:00.000001", "24:00:01", "24:01:00", "24:00:00.", "24:00:00.é", "25:00:00"]
         {
             assert!(parse_postgres_time(value).is_err());
         }
+
         assert!(parse_postgres_timestamp("270000-01-01 00:00:00").is_err());
         assert!(parse_postgres_timestamptz("270000-01-01 00:00:00+00").is_err());
         assert!(parse_postgres_timestamptz("0001-01-01 00:00:00+16 BC").is_err());
@@ -583,6 +596,7 @@ mod tests {
         fn postgres_text(value: NaiveDateTime) -> (String, String) {
             let (year, era) =
                 if value.year() <= 0 { (1 - value.year(), " BC") } else { (value.year(), "") };
+
             let date = format!("{year:04}-{:02}-{:02}", value.month(), value.day());
             let mut time =
                 format!("{:02}:{:02}:{:02}", value.hour(), value.minute(), value.second());
@@ -590,6 +604,7 @@ mod tests {
             if micros > 0 {
                 time.push_str(format!(".{micros:06}").trim_end_matches('0'));
             }
+
             (format!("{date}{era}"), format!("{date} {time}"))
         }
 

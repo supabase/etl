@@ -808,9 +808,11 @@ mod tests {
     /// declared in the writer descriptor, not the type used to encode them.
     fn decode_integers_as(typ: &ColumnType, mut buf: &[u8]) -> Vec<i64> {
         let mut values = Vec::new();
+
         while !buf.is_empty() {
             let (_, wire_type) = prost::encoding::decode_key(&mut buf).unwrap();
             let ctx = prost::encoding::DecodeContext::default();
+
             match typ {
                 ColumnType::Int32 => {
                     let mut decoded: Vec<i32> = Vec::new();
@@ -825,6 +827,7 @@ mod tests {
                 _ => panic!("unexpected integer column type"),
             }
         }
+
         values
     }
 
@@ -862,6 +865,7 @@ mod tests {
     fn decode_googlesql_string(literal: &str) -> Option<String> {
         let mut chars = literal.strip_prefix('\'')?.strip_suffix('\'')?.chars();
         let mut value = String::new();
+
         while let Some(ch) = chars.next() {
             match ch {
                 '\'' | '\n' | '\r' => return None,
@@ -884,6 +888,7 @@ mod tests {
                         {
                             return None;
                         }
+
                         char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?
                     }
                     _ => return None,
@@ -891,6 +896,7 @@ mod tests {
                 ch => value.push(ch),
             }
         }
+
         Some(value)
     }
 

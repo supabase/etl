@@ -103,9 +103,11 @@ pub(super) fn artifact_kind(name: &str) -> Option<ArtifactKind> {
     if BENCHMARK_ARTIFACT_PREFIXES.iter().any(|prefix| name.starts_with(prefix)) {
         return Some(ArtifactKind::Benchmark);
     }
+
     if let Some(job_id) = name.strip_prefix(test_manifest::ARTIFACT_PREFIX) {
         return parse_job_id(job_id).map(|job_id| ArtifactKind::Test { job_id });
     }
+
     let job_id = name.strip_prefix(AUDIT_ARTIFACT_PREFIX)?;
     parse_job_id(job_id).map(|job_id| ArtifactKind::Audit { job_id })
 }
@@ -116,6 +118,7 @@ fn parse_job_id(suffix: &str) -> Option<i64> {
     if !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
+
     suffix.parse().ok().filter(|id| *id > 0)
 }
 
@@ -148,12 +151,14 @@ pub(super) fn parse_archive_listing(listing: &str) -> Result<Vec<ArchiveEntry>, 
     // Header, entries, then totals.
     let entries_section = sections.nth(1).ok_or(Rejection::InvalidArchive)?;
     let mut entries = Vec::new();
+
     // The first line is the remainder of the separator row.
     for line in entries_section.lines().skip(1) {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
+
         let mut fields = line.split_whitespace();
         let size =
             fields.next().and_then(|size| size.parse().ok()).ok_or(Rejection::InvalidArchive)?;
@@ -164,21 +169,27 @@ pub(super) fn parse_archive_listing(listing: &str) -> Result<Vec<ArchiveEntry>, 
         if fields.next().is_some() || !is_safe_json_name(name) {
             return Err(Rejection::InvalidArchive);
         }
+
         // A repeated name would make `unzip -p` concatenate several files.
         if entries.iter().any(|entry: &ArchiveEntry| entry.name == name) {
             return Err(Rejection::InvalidArchive);
         }
+
         if size > MAX_ENTRY_BYTES {
             return Err(Rejection::TooLarge);
         }
+
         entries.push(ArchiveEntry { name: name.to_owned(), declared_size: size });
     }
+
     if entries.len() > MAX_ENTRIES {
         return Err(Rejection::InvalidArchive);
     }
+
     if !entries.iter().any(|entry| entry.name == MANIFEST_FILE_NAME) {
         return Err(Rejection::InvalidArchive);
     }
+
     Ok(entries)
 }
 
@@ -266,9 +277,11 @@ pub(super) fn parse_benchmark_manifest(
     if manifest.kind != "benchmark" || manifest.schema_version != 1 {
         return Err(Rejection::Unsupported);
     }
+
     if manifest.github.repository != repo || manifest.github.run_id != run_id {
         return Err(Rejection::WrongRun);
     }
+
     let valid = manifest.github.run_attempt >= 1
         && manifest.github.job_id.is_none_or(|id| id > 0)
         && is_identifier(&manifest.trigger)
@@ -284,6 +297,7 @@ pub(super) fn parse_benchmark_manifest(
     if !valid {
         return Err(Rejection::Invalid);
     }
+
     Ok(manifest)
 }
 
@@ -297,6 +311,7 @@ pub(super) fn benchmark_payload(
     reports: &BTreeMap<String, Vec<u8>>,
 ) -> Result<Value, Rejection> {
     let mut stored_reports = Map::new();
+
     for name in &manifest.reports {
         let bytes = reports.get(name).ok_or(Rejection::Invalid)?;
         let Value::Object(report) =
@@ -307,6 +322,7 @@ pub(super) fn benchmark_payload(
 
         let mut config = Map::new();
         let mut metrics = Map::new();
+
         for (key, value) in report {
             if CONFIG_KEYS.contains(&key.as_str()) {
                 let keep = match &value {
@@ -314,6 +330,7 @@ pub(super) fn benchmark_payload(
                     Value::Number(_) | Value::Bool(_) => true,
                     _ => false,
                 };
+
                 if keep {
                     config.insert(key, value);
                 }
@@ -359,10 +376,12 @@ pub(super) fn parse_test_manifest(
     if !manifest.is_supported() {
         return Err(Rejection::Unsupported);
     }
+
     let github = manifest.github();
     if github.repository() != repo || github.run_id() != run_id || github.job_id() != job_id {
         return Err(Rejection::WrongRun);
     }
+
     let tests = manifest.tests();
     let mut seen = HashSet::new();
     let valid = github.run_attempt() >= 1
@@ -377,6 +396,7 @@ pub(super) fn parse_test_manifest(
     if !valid {
         return Err(Rejection::Invalid);
     }
+
     Ok(manifest)
 }
 
@@ -472,10 +492,12 @@ pub(super) fn parse_audit_manifest(
     if manifest.kind != AUDIT_KIND || manifest.schema_version != AUDIT_SCHEMA_VERSION {
         return Err(Rejection::Unsupported);
     }
+
     let github = &manifest.github;
     if github.repository != repo || github.run_id != run_id || github.job_id != job_id {
         return Err(Rejection::WrongRun);
     }
+
     let mut seen = HashSet::new();
     let valid = github.run_attempt >= 1
         && manifest.tool.name == AUDIT_TOOL
@@ -493,6 +515,7 @@ pub(super) fn parse_audit_manifest(
     if !valid {
         return Err(Rejection::Invalid);
     }
+
     Ok(manifest)
 }
 
@@ -599,6 +622,7 @@ mod tests {
                  -------\n"
             )
         };
+
         for (line, expected) in [
             ("       10  10-27-2026 05:38   ../evil.json", Rejection::InvalidArchive),
             ("       10  10-27-2026 05:38   dir/report.json", Rejection::InvalidArchive),
@@ -636,6 +660,7 @@ mod tests {
             artifact_kind("audit-results-56250883441"),
             Some(ArtifactKind::Audit { job_id: 56_250_883_441 })
         );
+
         for name in [
             "benchmark-failed-snowflake",
             "fuzz-artifacts-parse_text_cell",
@@ -701,6 +726,7 @@ mod tests {
             *manifest.pointer_mut(pointer).unwrap() = value;
             assert_eq!(parse_tests(&manifest).unwrap_err(), Rejection::WrongRun, "{pointer}");
         }
+
         for (pointer, value) in [("/schema_version", json!(2)), ("/kind", json!("benchmark"))] {
             let mut manifest = test_manifest_json();
             *manifest.pointer_mut(pointer).unwrap() = value;
@@ -729,6 +755,7 @@ mod tests {
             *manifest.pointer_mut(pointer).unwrap() = value;
             assert_eq!(parse_tests(&manifest).unwrap_err(), Rejection::Invalid, "{pointer}");
         }
+
         assert_eq!(
             parse_test_manifest(b"{\"kind\": \"te", REPO, RUN_ID, JOB_ID).unwrap_err(),
             Rejection::Invalid
@@ -820,6 +847,7 @@ mod tests {
             *manifest.pointer_mut(pointer).unwrap() = value;
             assert_eq!(parse_audit(&manifest).unwrap_err(), Rejection::WrongRun, "{pointer}");
         }
+
         for (pointer, value) in [("/schema_version", json!(2)), ("/kind", json!("test"))] {
             let mut manifest = audit_manifest_json();
             *manifest.pointer_mut(pointer).unwrap() = value;
@@ -853,12 +881,14 @@ mod tests {
                 manifest["findings"][1]["package"] = json!("thrift");
                 manifest["findings"][1]["version"] = json!("0.17.0");
             }
+
             assert_eq!(
                 parse_audit(&manifest).unwrap_err(),
                 Rejection::Invalid,
                 "{pointer} {value}"
             );
         }
+
         for bytes in [&b""[..], b"[]", b"{\"kind\":\"audit\"}"] {
             assert_eq!(
                 parse_audit_manifest(bytes, REPO, RUN_ID, JOB_ID).unwrap_err(),

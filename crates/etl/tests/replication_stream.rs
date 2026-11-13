@@ -86,6 +86,7 @@ async fn collect_stream_markers(
         let mut markers = Vec::with_capacity(expected_count);
 
         pin!(stream);
+
         while markers.len() < expected_count {
             let event = stream
                 .next()
@@ -180,6 +181,7 @@ async fn assert_stream_markers_and_replay(
     assert_eq!(initial_shapes, expected);
 
     let mut transaction_commit_lsn = None;
+
     for marker in &initial_markers {
         match marker {
             StreamMarker::Begin(commit_lsn) => {
@@ -197,6 +199,7 @@ async fn assert_stream_markers_and_replay(
             _ => {}
         }
     }
+
     assert!(transaction_commit_lsn.is_none());
 
     let ddl_lsns = initial_markers
@@ -705,6 +708,7 @@ async fn collect_copy_rows(
     let mut rows = Vec::new();
 
     pin!(stream);
+
     while let Some(row) = stream.next().await {
         let row = row.unwrap();
         rows.push(parse_copy_row(&row, column_schemas).unwrap());
@@ -861,6 +865,7 @@ fn assert_string_array_cell_contains(
     };
 
     assert_eq!(values.len(), expected.len());
+
     for (value, expected) in values.iter().zip(expected) {
         match (value, expected) {
             (Some(value), Some(expected)) => {
@@ -1648,13 +1653,16 @@ async fn logical_replication_omits_relation_after_noop_alter_table_commands() {
         format!("alter table {quoted_table_name} set without cluster"),
         format!("alter table {quoted_table_name} set without oids"),
     ];
+
     if !below_version!(database.server_version(), POSTGRES_15) {
         alter_table_commands
             .push(format!("alter table {quoted_table_name} set access method heap"));
     }
+
     for command in &alter_table_commands {
         database.run_sql(command).await.unwrap();
     }
+
     database.insert_values(table_name, &["name", "age"], &[&"after", &2]).await.unwrap();
 
     let columns = vec!["id".to_owned(), "name".to_owned(), "age".to_owned()];
@@ -1664,6 +1672,7 @@ async fn logical_replication_omits_relation_after_noop_alter_table_commands() {
         ExpectedStreamMarker::Insert(table_id.into_inner()),
         ExpectedStreamMarker::Commit,
     ];
+
     for _ in alter_table_commands {
         expected.extend([
             ExpectedStreamMarker::Begin,
@@ -1671,6 +1680,7 @@ async fn logical_replication_omits_relation_after_noop_alter_table_commands() {
             ExpectedStreamMarker::Commit,
         ]);
     }
+
     expected.extend([
         ExpectedStreamMarker::Begin,
         ExpectedStreamMarker::Insert(table_id.into_inner()),
@@ -2071,11 +2081,13 @@ async fn logical_replication_filters_unpublished_transactions_by_server_version(
     database.insert_values(published_table, &["value"], &[&4]).await.unwrap();
 
     let mut expected = Vec::new();
+
     // PostgreSQL 14 emits BEGIN/COMMIT when pgoutput filters every change in a
     // transaction. PostgreSQL 15+ suppresses the empty transaction.
     if below_version!(database.server_version(), POSTGRES_15) {
         expected.extend([ExpectedStreamMarker::Begin, ExpectedStreamMarker::Commit]);
     }
+
     expected.extend([
         ExpectedStreamMarker::Begin,
         ExpectedStreamMarker::Relation(
@@ -2085,9 +2097,11 @@ async fn logical_replication_filters_unpublished_transactions_by_server_version(
         ExpectedStreamMarker::Insert(published_table_id.into_inner()),
         ExpectedStreamMarker::Commit,
     ]);
+
     if below_version!(database.server_version(), POSTGRES_15) {
         expected.extend([ExpectedStreamMarker::Begin, ExpectedStreamMarker::Commit]);
     }
+
     expected.extend([
         ExpectedStreamMarker::Begin,
         ExpectedStreamMarker::Insert(published_table_id.into_inner()),
@@ -2156,9 +2170,11 @@ async fn logical_replication_recursive_alter_partitioned_table_emits_no_leaf_ddl
     // empty transaction for the filtered ALTER, while PostgreSQL 15+ suppresses
     // it.
     let mut expected = Vec::new();
+
     if below_version!(database.server_version(), POSTGRES_15) {
         expected.extend([ExpectedStreamMarker::Begin, ExpectedStreamMarker::Commit]);
     }
+
     expected.extend([
         ExpectedStreamMarker::Begin,
         ExpectedStreamMarker::Relation(
@@ -2339,6 +2355,7 @@ async fn logical_replication_publication_add_partition_root_emits_no_snapshot_wh
         .unwrap();
 
     let mut expected = Vec::new();
+
     // PostgreSQL reports the explicitly added partitioned root as the
     // publication-relation event object, but pgoutput publishes its leaves when
     // publish_via_partition_root is false. The trigger therefore emits no leaf
@@ -2346,6 +2363,7 @@ async fn logical_replication_publication_add_partition_root_emits_no_snapshot_wh
     if below_version!(database.server_version(), POSTGRES_15) {
         expected.extend([ExpectedStreamMarker::Begin, ExpectedStreamMarker::Commit]);
     }
+
     expected.extend([
         ExpectedStreamMarker::Begin,
         ExpectedStreamMarker::Relation(
@@ -2682,6 +2700,7 @@ async fn logical_replication_replays_publication_add_and_option_snapshots_but_no
         ),
         ExpectedStreamMarker::Commit,
     ];
+
     // PostgreSQL 14's pgoutput emits BEGIN/COMMIT for this empty
     // ALTER PUBLICATION ... DROP TABLE transaction. PostgreSQL 15+ postpones
     // BEGIN until the first publishable change and suppresses both markers when
@@ -2691,6 +2710,7 @@ async fn logical_replication_replays_publication_add_and_option_snapshots_but_no
     if below_version!(database.server_version(), POSTGRES_15) {
         expected.extend([ExpectedStreamMarker::Begin, ExpectedStreamMarker::Commit]);
     }
+
     expected.extend([
         ExpectedStreamMarker::Begin,
         ExpectedStreamMarker::DdlMessage(

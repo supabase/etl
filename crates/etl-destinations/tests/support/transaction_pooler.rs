@@ -78,7 +78,9 @@ impl TransactionPoolerGuard {
                     Some(result) = clients.join_next() => result.unwrap(),
                 }
             }
+
             clients.abort_all();
+
             while let Some(result) = clients.join_next().await {
                 if let Err(error) = result {
                     assert!(error.is_cancelled());
@@ -107,6 +109,7 @@ impl TransactionPoolerGuard {
         // Register before checking so a preparation between the check and the
         // wait still wakes this task.
         notified.as_mut().enable();
+
         if self.prepared_queries() == 0 {
             notified.await;
         }
@@ -137,6 +140,7 @@ async fn read_body(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<Vec<u8>>
     if !(4..=16 * 1024 * 1024).contains(&length) {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid test protocol frame"));
     }
+
     let mut body = vec![0; usize::try_from(length).unwrap()];
     body[..4].copy_from_slice(&length.to_be_bytes());
     reader.read_exact(&mut body[4..]).await?;
@@ -155,16 +159,19 @@ async fn forward_messages(
     loop {
         let tag = reader.read_u8().await?;
         let body = read_body(&mut reader).await?;
+
         if !from_server && tag == b'P' {
             stats.preparations.fetch_add(1, Ordering::Relaxed);
             stats.preparation_observed.notify_waiters();
             let mut fields = body[4..].split(|byte| *byte == 0);
             let _statement_name = fields.next();
+
             if let Some(sql) = fields.next() {
                 let sql = String::from_utf8_lossy(sql);
                 if sql.contains("__etl_replay_epochs") {
                     stats.replay_epoch_queries.fetch_add(1, Ordering::Relaxed);
                 }
+
                 if sql.contains("ducklake_sort_expression")
                     || sql.contains("sort_on_insert")
                     || sql.contains("ducklake_partition_column")
@@ -173,9 +180,11 @@ async fn forward_messages(
                 }
             }
         }
+
         if from_server && tag == b'1' {
             prepared = true;
         }
+
         let released_preparation =
             from_server && tag == b'Z' && prepared && body.get(4) == Some(&b'I');
         let named_statement = !from_server && tag == b'P' && body.get(4) != Some(&0);
@@ -183,9 +192,11 @@ async fn forward_messages(
             stats.violations.fetch_add(1, Ordering::Relaxed);
             return Ok(());
         }
+
         if from_server && tag == b'Z' {
             prepared = false;
         }
+
         writer.write_u8(tag).await?;
         writer.write_all(&body).await?;
     }
@@ -207,6 +218,7 @@ async fn guard_connection(
         stats.violations.fetch_add(1, Ordering::Relaxed);
         return Ok(());
     }
+
     server.write_all(&startup).await?;
     let (client_read, client_write) = client.split();
     let (server_read, server_write) = server.split();

@@ -61,6 +61,7 @@ impl Inner {
                 if !should_retain {
                     notify.notify_one();
                 }
+
                 should_retain
             } else {
                 true
@@ -73,6 +74,7 @@ impl Inner {
                 if !should_retain {
                     notify.notify_one();
                 }
+
                 should_retain
             } else {
                 true
@@ -85,6 +87,7 @@ impl Inner {
             if !should_retain {
                 notify.notify_one();
             }
+
             should_retain
         });
     }

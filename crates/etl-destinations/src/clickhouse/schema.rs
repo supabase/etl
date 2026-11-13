@@ -326,6 +326,7 @@ where
             )
         })
         .collect();
+
     for (name, type_name) in trailing_cdc_columns(ClickHouseEngine::ReplacingMergeTree) {
         col_defs.push(format!("  {} {type_name}", quote_identifier(name)));
     }

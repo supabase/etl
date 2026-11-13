@@ -527,6 +527,7 @@ impl Hash for EtlError {
                 std::mem::discriminant(&self.repr).hash(state);
                 // Hash the number of errors for differentiation.
                 errors.len().hash(state);
+
                 // Hash all errors in the aggregation.
                 for error in errors {
                     error.hash(state);
@@ -565,6 +566,7 @@ fn write_error_tree(
                 } else {
                     format!("{prefix}{}", if is_last { "   " } else { "│  " })
                 };
+
                 write_source_chain(source.as_ref(), f, &source_prefix)?;
             }
 
@@ -576,6 +578,7 @@ fn write_error_tree(
             } else {
                 format!("{prefix}{}", if is_last { "   " } else { "│  " })
             };
+
             for (index, child) in errors.iter().enumerate() {
                 let child_is_last = index + 1 == errors.len();
                 writeln!(f)?;

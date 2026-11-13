@@ -95,6 +95,7 @@ pub(super) fn plan_days(
     };
 
     push(&mut tasks, today);
+
     if let Some(yesterday) = today.checked_sub_days(Days::new(1)) {
         push(&mut tasks, yesterday);
     }
@@ -102,6 +103,7 @@ pub(super) fn plan_days(
     let days: Vec<NaiveDate> = history_since.iter_days().take_while(|day| *day <= today).collect();
 
     let expiry_start = ARTIFACT_RETENTION_DAYS - EXPIRY_WARNING_DAYS;
+
     for day in days.iter().copied() {
         if (expiry_start..ARTIFACT_RETENTION_DAYS).contains(&age(day)) {
             push(&mut tasks, day);
@@ -154,6 +156,7 @@ pub(super) fn needs_details(
     let Some(stored) = stored else {
         return true;
     };
+
     let settled = stored.status == "completed"
         && stored
             .detail_fetched_at

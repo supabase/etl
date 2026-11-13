@@ -86,11 +86,13 @@ impl SetupReplicatorArgs {
         DestinationPreset::print_choices();
 
         let defaults = InitConfig::from_env();
+
         let destination = if self.interactive && self.destination.is_none() {
             prompt_destination(DestinationPreset::local_default())?
         } else {
             self.destination.unwrap_or(DestinationPreset::local_default())
         };
+
         if self.destination.is_none() && !self.interactive {
             println!(
                 "Using ClickHouse (local default from cargo x init). Pass --destination bigquery \
@@ -103,15 +105,18 @@ impl SetupReplicatorArgs {
         println!();
 
         let mut options = ReplicatorSetup::for_destination(&defaults, destination);
+
         if let Some(publication) = self.publication {
             options.publication = publication;
         }
+
         if let Some(path) = &self.bq_sa_key_file {
             options.set_bigquery_service_account_key(
                 &fs::read_to_string(path)
                     .with_context(|| format!("Failed to read {}", path.display()))?,
             );
         }
+
         if self.interactive {
             println!("Interactive mode: press Enter to keep each default.");
             options.prompt_destination()?;
@@ -171,6 +176,7 @@ fn prompt_destination(default: DestinationPreset) -> Result<DestinationPreset> {
 /// Prints how to start the replicator after setup.
 fn print_replicator_next_steps(destination: DestinationPreset) {
     println!("Replicator:");
+
     match destination {
         DestinationPreset::ClickHouse => {
             println!("  cargo x seed");

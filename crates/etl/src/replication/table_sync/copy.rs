@@ -240,12 +240,14 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
 ) -> EtlResult<TableCopyResult> {
     let max_copy_connections = max_copy_connections.max(1);
     let start_time = Instant::now();
+
     let ShutdownResult::Ok(copy_partitions) = with_shutdown!(
         plan_table_copy_partitions(replication_transaction, table_id, max_copy_connections),
         shutdown_token,
     ) else {
         return Ok(TableCopyResult::Shutdown);
     };
+
     let copy_partitions = copy_partitions?;
     let worker_count = usize::from(max_copy_connections).min(copy_partitions.len());
 
@@ -277,6 +279,7 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
     else {
         return Ok(TableCopyResult::Shutdown);
     };
+
     let snapshot_id = snapshot_id?;
     let batch_id_generator =
         Arc::new(TableCopyBatchIdGenerator::new(TableCopyAttemptId::generate()));
@@ -302,6 +305,7 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
             stop_table_copy_tasks(&mut tasks, monitor).await?;
             return Ok(TableCopyResult::Shutdown);
         };
+
         let child_replication_client = child_replication_client?;
 
         // Keep these values owned by each worker. They are small, and cloning
@@ -439,6 +443,7 @@ async fn plan_table_copy_partitions(
         .sum();
 
     let mut copy_partitions = Vec::with_capacity(usize::from(target_partitions));
+
     for (source_table_id, estimate) in table_estimates {
         let partition_weight = estimate.partition_weight(use_estimated_rows);
         let table_partition_count = partitions_for_table_weight(

@@ -237,9 +237,11 @@ fn insert_event(schema: &ReplicatedTableSchema, lsn: u64, ordinal: u64, row: Tab
 
 fn sha256_hex(payload: &str) -> String {
     let mut hex = String::with_capacity(64);
+
     for byte in Sha256::digest(payload.as_bytes()) {
         write!(&mut hex, "{byte:02x}").unwrap();
     }
+
     hex
 }
 

@@ -78,6 +78,7 @@ fn check_forwarded_args(extra: &[String], shards: u16) -> Result<()> {
                 .or_else(|| arg.strip_prefix("-j=").or_else(|| arg.strip_prefix("-j")))
                 .filter(|value| !value.is_empty()),
         };
+
         if let Some(threads) = threads
             && !threads.parse::<u16>().is_ok_and(|threads| (1..=shards).contains(&threads))
         {
@@ -230,6 +231,7 @@ impl NextestArgs {
             .collect();
 
         let mut failed = false;
+
         for handle in handles {
             match handle.join() {
                 Ok(Ok(())) => {}
@@ -346,6 +348,7 @@ fn extract_archive(archive: &Path) -> Result<TempDir> {
     if !status.success() {
         bail!("Failed to extract nextest archive");
     }
+
     Ok(destination)
 }
 
@@ -362,6 +365,7 @@ fn junit_path(profile: &str) -> PathBuf {
 fn write_test_manifest(mode: Mode, profiles: &[&str], path: &Path) -> Result<()> {
     let job = TestJob::from_env()?;
     let mut tests = Vec::new();
+
     for profile in profiles {
         let junit = junit_path(profile);
         match fs::read_to_string(&junit) {
@@ -378,16 +382,19 @@ fn write_test_manifest(mode: Mode, profiles: &[&str], path: &Path) -> Result<()>
             }
         }
     }
+
     if tests.is_empty() {
         bail!("No JUnit report has test results");
     }
 
     let count = tests.len();
     let manifest = TestManifest::new(matches!(mode, Mode::LlvmCov), job, tests);
+
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create {}", parent.display()))?;
     }
+
     fs::write(path, serde_json::to_vec(&manifest)?)
         .with_context(|| format!("Failed to write {}", path.display()))?;
     eprintln!("wrote {count} test results to {}.", path.display());
@@ -627,9 +634,11 @@ mod tests {
     fn archive_execution_preserves_build_selection() {
         let command = nextest_command(Mode::Run, Some(Path::new("target/archive/target")));
         let args: Vec<_> = command.get_args().collect();
+
         for build_arg in ["--locked", "--workspace", "--all-features", "--no-run"] {
             assert!(!args.contains(&std::ffi::OsStr::new(build_arg)));
         }
+
         assert!(args.contains(&std::ffi::OsStr::new("--cargo-metadata")));
         assert!(args.contains(&std::ffi::OsStr::new("--binaries-metadata")));
         assert!(args.contains(&std::ffi::OsStr::new("--workspace-remap")));
@@ -669,6 +678,7 @@ mod tests {
             filter: format!("not ({SHARED_PG_FILTER})"),
             pg_clusters: None,
         };
+
         for (mode, archive) in [
             (Mode::Run, None),
             (Mode::Run, Some(Path::new("target/archive/target"))),
@@ -676,6 +686,7 @@ mod tests {
         ] {
             let command = lane_command(&pg_lane, mode, &[], &pg_env, archive);
             let env: BTreeMap<_, _> = command.get_envs().collect();
+
             for (key, value) in [
                 ("NEXTEST_PROFILE", PG_SHARDED_PROFILE),
                 ("NEXTEST_TEST_THREADS", "4"),
@@ -687,6 +698,7 @@ mod tests {
             ] {
                 assert_eq!(env[OsStr::new(key)], Some(OsStr::new(value)));
             }
+
             let args: Vec<_> = command.get_args().collect();
             assert!(args.windows(2).any(|pair| pair == ["-E", SHARED_PG_FILTER]));
             assert!(args.contains(&OsStr::new("--no-fail-fast")));
@@ -729,6 +741,7 @@ mod tests {
     #[test]
     fn lane_profiles_write_junit_reports() {
         let config: toml::Table = include_str!("../../../../.config/nextest.toml").parse().unwrap();
+
         for profile in [DEFAULT_PROFILE, PG_SHARDED_PROFILE] {
             let junit = &config["profile"][profile]["junit"];
             assert_eq!(junit["path"].as_str(), Some(JUNIT_FILE_NAME), "{profile}");

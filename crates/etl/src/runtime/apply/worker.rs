@@ -182,6 +182,7 @@ where
             RetryDirective::Manual => "manual",
             RetryDirective::NoRetry => "no_retry",
         };
+
         counter!(
             ETL_WORKER_ERRORS_TOTAL,
             WORKER_TYPE_LABEL => "apply",
@@ -303,6 +304,7 @@ where
         ) else {
             return Ok(());
         };
+
         let (replication_client, start_lsn) = initialized?;
 
         let worker_context = WorkerContext::Apply(ApplyWorkerContext {
@@ -433,6 +435,7 @@ async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
             consistent_point = %slot.consistent_point,
             "created temporary apply slot after resetting tables for resync"
         );
+
         return Ok(slot.consistent_point);
     }
 

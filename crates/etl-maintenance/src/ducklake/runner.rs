@@ -321,6 +321,7 @@ fn vendored_extension_dir(
     if let Some(root) = env_override {
         let directory = root.join(DUCKDB_EXTENSION_VERSION).join(platform_dir);
         ensure_vendored_extension_dir(&directory)?;
+
         return Ok(Some(directory));
     }
 
@@ -329,7 +330,9 @@ fn vendored_extension_dir(
         if !directory.exists() {
             continue;
         }
+
         ensure_vendored_extension_dir(&directory)?;
+
         return Ok(Some(directory));
     }
 
@@ -436,9 +439,11 @@ fn catalog_conninfo_from_url(catalog_url: &Url) -> EtlResult<String> {
     if let Some(dbname) = config.get_dbname() {
         push_conninfo_pair(&mut parts, "dbname", dbname);
     }
+
     if let Some(user) = config.get_user() {
         push_conninfo_pair(&mut parts, "user", user);
     }
+
     if let Some(password) = config.get_password() {
         let password = std::str::from_utf8(password).map_err(|source| {
             etl_error!(
@@ -449,12 +454,15 @@ fn catalog_conninfo_from_url(catalog_url: &Url) -> EtlResult<String> {
         })?;
         push_conninfo_pair(&mut parts, "password", password);
     }
+
     if let Some(options) = config.get_options() {
         push_conninfo_pair(&mut parts, "options", options);
     }
+
     if let Some(application_name) = config.get_application_name() {
         push_conninfo_pair(&mut parts, "application_name", application_name);
     }
+
     if let Some(ssl_cert) = config.get_ssl_cert() {
         let ssl_cert = std::str::from_utf8(ssl_cert).map_err(|source| {
             etl_error!(
@@ -465,6 +473,7 @@ fn catalog_conninfo_from_url(catalog_url: &Url) -> EtlResult<String> {
         })?;
         push_conninfo_pair(&mut parts, "sslcert", ssl_cert);
     }
+
     if let Some(ssl_key) = config.get_ssl_key() {
         let ssl_key = std::str::from_utf8(ssl_key).map_err(|source| {
             etl_error!(
@@ -475,6 +484,7 @@ fn catalog_conninfo_from_url(catalog_url: &Url) -> EtlResult<String> {
         })?;
         push_conninfo_pair(&mut parts, "sslkey", ssl_key);
     }
+
     if let Some(ssl_root_cert) = config.get_ssl_root_cert() {
         let ssl_root_cert = std::str::from_utf8(ssl_root_cert).map_err(|source| {
             etl_error!(
@@ -495,6 +505,7 @@ fn catalog_conninfo_from_url(catalog_url: &Url) -> EtlResult<String> {
     {
         parts.push(format!("connect_timeout={}", connect_timeout.as_secs()));
     }
+
     if explicit_query_options.contains("tcp_user_timeout")
         && let Some(tcp_user_timeout) = config.get_tcp_user_timeout()
     {
@@ -504,14 +515,17 @@ fn catalog_conninfo_from_url(catalog_url: &Url) -> EtlResult<String> {
     if explicit_query_options.contains("keepalives") {
         parts.push(format!("keepalives={}", if config.get_keepalives() { "1" } else { "0" }));
     }
+
     if explicit_query_options.contains("keepalives_idle") {
         parts.push(format!("keepalives_idle={}", config.get_keepalives_idle().as_secs()));
     }
+
     if explicit_query_options.contains("keepalives_interval")
         && let Some(keepalives_interval) = config.get_keepalives_interval()
     {
         parts.push(format!("keepalives_interval={}", keepalives_interval.as_secs()));
     }
+
     if explicit_query_options.contains("keepalives_retries")
         && let Some(keepalives_retries) = config.get_keepalives_retries()
     {
@@ -557,6 +571,7 @@ fn catalog_attach_target(catalog_url: &Url) -> EtlResult<String> {
 
 fn serialize_hosts(hosts: &[Host]) -> EtlResult<String> {
     let mut values = Vec::with_capacity(hosts.len());
+
     for host in hosts {
         match host {
             Host::Tcp(host) => values.push(libpq_tcp_host(host).to_owned()),
@@ -582,12 +597,15 @@ fn push_conninfo_pair(parts: &mut Vec<String>, key: &str, value: &str) {
 
 fn quote_libpq_conninfo_value(value: &str) -> String {
     let mut quoted = String::from("'");
+
     for ch in value.chars() {
         if matches!(ch, '\'' | '\\') {
             quoted.push('\\');
         }
+
         quoted.push(ch);
     }
+
     quoted.push('\'');
     quoted
 }
@@ -636,6 +654,7 @@ fn build_setup_plan(
         }
         DuckDbExtensionStrategy::InstallFromRepository => None,
     };
+
     build_setup_plan_with_strategy(
         catalog_url,
         data_path,
@@ -693,33 +712,41 @@ fn build_setup_plan_with_strategy(
             let ducklake_extension =
                 vendored_extension_path(extension_root, DUCKLAKE_EXTENSION_FILE)?;
             let mut sql = format!("LOAD {};", quote_literal(&ducklake_extension));
+
             if needs_postgres {
                 let postgres_extension =
                     vendored_extension_path(extension_root, POSTGRES_SCANNER_EXTENSION_FILE)?;
                 sql.push_str(&format!(" LOAD {};", quote_literal(&postgres_extension)));
             }
+
             if needs_httpfs {
                 let httpfs_extension =
                     vendored_extension_path(extension_root, HTTPFS_EXTENSION_FILE)?;
                 sql.push_str(&format!(" LOAD {};", quote_literal(&httpfs_extension)));
             }
+
             sql
         }
         DuckDbExtensionStrategy::InstallFromRepository => {
             let mut sql = String::from("INSTALL ducklake; LOAD ducklake;");
+
             if needs_postgres {
                 sql.push_str(" INSTALL postgres; LOAD postgres;");
             }
+
             if needs_httpfs {
                 sql.push_str(" INSTALL httpfs; LOAD httpfs;");
             }
+
             sql
         }
     };
+
     steps.push(DuckLakeSetupStep { label: "load_extensions", sql: extension_sql });
 
     if needs_httpfs && let Some(s3) = s3 {
         let secret_name = quote_identifier("ducklake_s3");
+
         if let Some(endpoint) = &s3.endpoint {
             secret_options.insert("ENDPOINT", quote_literal(endpoint));
         }
@@ -740,6 +767,7 @@ fn build_setup_plan_with_strategy(
             ),
         });
     }
+
     let metadata_schema_clause = metadata_schema
         .map(|schema| format!(", METADATA_SCHEMA {}", quote_literal(schema)))
         .unwrap_or_default();
@@ -925,6 +953,7 @@ impl DuckDbMaintenanceWatchdog {
                      operation_kind={}",
                     DUCKDB_MAINTENANCE_OPERATION_KIND
                 );
+
                 return;
             }
 
@@ -1077,12 +1106,14 @@ impl r2d2::ManageConnection for DuckLakeConnectionManager {
         } else {
             duckdb::Connection::open_in_memory().map_err(DuckLakeConnectionError::validation)?
         };
+
         for step in self.setup_plan.steps() {
             info!(phase = step.label, "starting ducklake duckdb connection setup phase");
             conn.execute_batch(&step.sql)
                 .map_err(|error| DuckLakeConnectionError::setup_phase(step, error))?;
             info!(phase = step.label, "ducklake duckdb connection setup phase finished");
         }
+
         Ok(ManagedDuckLakeConnection { conn, broken: false })
     }
 
@@ -1146,6 +1177,7 @@ impl DuckDbMaintenanceExecutor {
             remaining_ms_until(deadline),
             blocking_slots.available_permits()
         );
+
         let permit =
             match tokio::time::timeout_at(deadline, Arc::clone(&blocking_slots).acquire_owned())
                 .await
@@ -1178,6 +1210,7 @@ impl DuckDbMaintenanceExecutor {
                     return Err(duckdb_maintenance_timeout_error(timeout, "slot_wait"));
                 }
             };
+
         trace!(
             wait_ms = slot_wait_started.elapsed().as_millis() as u64,
             "wait for ducklake maintenance blocking slot"
@@ -1244,6 +1277,7 @@ impl DuckDbMaintenanceExecutor {
                 DUCKDB_MAINTENANCE_OPERATION_KIND,
                 checkout_timeout.as_millis()
             );
+
             let mut pooled_conn = match pool.get_timeout(checkout_timeout) {
                 Ok(pooled_conn) => pooled_conn,
                 Err(error) if Instant::now() >= deadline => {
@@ -1280,6 +1314,7 @@ impl DuckDbMaintenanceExecutor {
                     ));
                 }
             };
+
             trace!(
                 wait_ms = checkout_started.elapsed().as_millis() as u64,
                 "wait for ducklake maintenance pool checkout"
@@ -1305,6 +1340,7 @@ impl DuckDbMaintenanceExecutor {
                     DUCKDB_MAINTENANCE_OPERATION_KIND
                 );
                 pooled_conn.broken = true;
+
                 return Err(duckdb_maintenance_timeout_error(timeout, "query_execution"));
             }
 
@@ -1318,6 +1354,7 @@ impl DuckDbMaintenanceExecutor {
                 operation_timeout.as_millis()
             );
             watchdog.publish_interrupt_handle(interrupt_handle);
+
             if watchdog.timed_out() {
                 warn!(
                     operation_kind = DUCKDB_MAINTENANCE_OPERATION_KIND,
@@ -1326,6 +1363,7 @@ impl DuckDbMaintenanceExecutor {
                     DUCKDB_MAINTENANCE_OPERATION_KIND
                 );
                 pooled_conn.broken = true;
+
                 return Err(duckdb_maintenance_timeout_error(timeout, "query_execution"));
             }
 
@@ -1349,6 +1387,7 @@ impl DuckDbMaintenanceExecutor {
                 duration_ms = operation_duration_ms,
                 "ducklake maintenance blocking operation finished"
             );
+
             if watchdog.timed_out() {
                 warn!(
                     operation_kind = DUCKDB_MAINTENANCE_OPERATION_KIND,
@@ -1359,8 +1398,10 @@ impl DuckDbMaintenanceExecutor {
                     operation_duration_ms
                 );
                 pooled_conn.broken = true;
+
                 return Err(duckdb_maintenance_timeout_error(timeout, "query_execution"));
             }
+
             if res.is_err() {
                 warn!(
                     operation_kind = DUCKDB_MAINTENANCE_OPERATION_KIND,
@@ -1445,6 +1486,7 @@ async fn build_warm_ducklake_pool(
             })?;
 
         let mut warmed_connections = Vec::with_capacity(MAINTENANCE_DUCKDB_POOL_SIZE as usize);
+
         for _ in 0..MAINTENANCE_DUCKDB_POOL_SIZE {
             warmed_connections.push(pool.get().map_err(|source| {
                 etl_error!(
@@ -1454,6 +1496,7 @@ async fn build_warm_ducklake_pool(
                 )
             })?);
         }
+
         drop(warmed_connections);
 
         trace!(
@@ -1633,9 +1676,11 @@ pub async fn run_maintenance_once(
     );
 
     let duckdb = open_maintenance_executor(&config).await?;
+
     if config.expire_snapshots.enabled {
         validate_expire_snapshots_older_than(&duckdb, &config.expire_snapshots.older_than).await?;
     }
+
     if config.table_namespace.is_some() {
         duckdb
             .run(|conn| {
@@ -1654,6 +1699,7 @@ pub async fn run_maintenance_once(
         Some(metadata_schema) => metadata_schema,
         None => resolve_metadata_schema(&duckdb).await?,
     };
+
     info!(
         metadata_schema = %metadata_schema,
         "ducklake external maintenance metadata schema resolved"
@@ -1760,6 +1806,7 @@ fn validate_config(config: &DuckLakeMaintenanceConfig) -> EtlResult<()> {
     validate_ducklake_table_namespace(config.table_namespace.as_deref()).map_err(|source| {
         etl_error!(ErrorKind::ConfigError, "Invalid DuckLake table namespace", source: source)
     })?;
+
     if !matches!(config.catalog_url.scheme(), "postgres" | "postgresql") {
         return Err(etl_error!(
             ErrorKind::ConfigError,
@@ -1767,6 +1814,7 @@ fn validate_config(config: &DuckLakeMaintenanceConfig) -> EtlResult<()> {
             format!("unsupported catalog URL scheme `{}`", config.catalog_url.scheme())
         ));
     }
+
     Ok(())
 }
 
@@ -1926,6 +1974,7 @@ async fn load_replay_epoch_state(
     } else {
         "null::text".to_owned()
     };
+
     let sql = format!(
         "select table_name, replay_epoch, {pending_replay_epoch_expression} from {}.{} order by \
          table_name;",
@@ -1956,6 +2005,7 @@ async fn load_replay_epoch_state(
         })?;
 
     let mut state = DuckLakeReplayEpochState::default();
+
     for (table_name, replay_epoch, pending_replay_epoch) in rows {
         if pending_replay_epoch.is_some() {
             state.pending_table_names.insert(table_name);
@@ -2060,6 +2110,7 @@ async fn run_inline_flush(
     );
     let sampler =
         DuckLakePendingInlineSizeSampler::new(metadata_schema.to_owned(), metadata_pg_pool.clone());
+
     for table_name in table_names {
         let sizes = sampler.sample_table(table_name).await?;
         if sizes.inlined_bytes < config.min_inlined_bytes {
@@ -2071,6 +2122,7 @@ async fn run_inline_flush(
             );
             continue;
         }
+
         info!(
             table = %table_name,
             inlined_bytes = sizes.inlined_bytes,
@@ -2095,6 +2147,7 @@ async fn run_inline_flush(
             "ducklake inline flush completed"
         );
     }
+
     info!(
         inline_flush_tables = outcome.inline_flush_tables,
         inline_flush_rows = outcome.inline_flush_rows,
@@ -2127,6 +2180,7 @@ async fn run_merge_adjacent_files(
              falling back to small-file ratio"
         );
     }
+
     let selected = select_merge_tables(
         metadata_pg_pool,
         metadata_schema,
@@ -2140,6 +2194,7 @@ async fn run_merge_adjacent_files(
         selected_count = selected.len(),
         "ducklake merge-adjacent-files selected tables"
     );
+
     for table_name in selected {
         info!(
             table = %table_name,
@@ -2160,6 +2215,7 @@ async fn run_merge_adjacent_files(
             "ducklake merge-adjacent-files completed"
         );
     }
+
     Ok(())
 }
 
@@ -2215,6 +2271,7 @@ async fn run_rewrite_data_files(
         selected_count = selected.len(),
         "ducklake rewrite-data-files selected tables"
     );
+
     for table_name in selected {
         info!(
             table = %table_name,
@@ -2232,6 +2289,7 @@ async fn run_rewrite_data_files(
             "ducklake rewrite-data-files completed"
         );
     }
+
     Ok(())
 }
 
@@ -2341,6 +2399,7 @@ async fn run_replay_helper_cleanup(
                     info!(table = %table_name, "ducklake etl helper table post-cleanup rewrite completed");
                 }
             }
+
             Ok(cleanup)
         })
         .await?;
@@ -2369,6 +2428,7 @@ async fn select_merge_tables(
     max_tables_per_run: u32,
 ) -> EtlResult<Vec<DuckLakeMaintenanceTableName>> {
     let mut selected = Vec::new();
+
     for table_name in table_names {
         if table_name.is_internal_helper() {
             info!(
@@ -2400,10 +2460,12 @@ async fn select_merge_tables(
                 "ducklake merge-adjacent-files table skipped"
             );
         }
+
         if selected.len() >= max_tables_per_run as usize {
             break;
         }
     }
+
     Ok(selected)
 }
 
@@ -2433,6 +2495,7 @@ async fn select_rewrite_tables(
     max_tables_per_run: u32,
 ) -> EtlResult<Vec<DuckLakeMaintenanceTableName>> {
     let mut selected = Vec::new();
+
     for table_name in table_names {
         if table_name.is_internal_helper() {
             info!(
@@ -2464,10 +2527,12 @@ async fn select_rewrite_tables(
                 "ducklake rewrite-data-files table skipped"
             );
         }
+
         if selected.len() >= max_tables_per_run as usize {
             break;
         }
     }
+
     Ok(selected)
 }
 
@@ -2529,6 +2594,7 @@ pub fn flush_table_inlined_data(
             "ducklake inlined data already flushed"
         );
     }
+
     Ok(rows_flushed)
 }
 
@@ -2611,12 +2677,14 @@ fn cleanup_replay_helper_rows(
     if applied_batches_has_epoch.is_none() && streaming_progress_has_epoch.is_none() {
         return Ok(ReplayHelperCleanupOutcome::default());
     }
+
     let applied_batches_has_batch_kind = match applied_batches_has_epoch {
         Some(_) => {
             ducklake_helper_table_has_column(conn, APPLIED_BATCHES_TABLE, BATCH_KIND_COLUMN)?
         }
         None => false,
     };
+
     let current_epochs =
         load_replay_helper_current_epochs(current_epochs, active_table_ids, pending_table_names);
     if current_epochs.is_empty() {
@@ -2633,6 +2701,7 @@ fn cleanup_replay_helper_rows(
 
     let result = (|| -> EtlResult<ReplayHelperCleanupOutcome> {
         let mut cleanup = ReplayHelperCleanupOutcome::default();
+
         for current_epoch in &current_epochs {
             let streaming_progress = match streaming_progress_has_epoch {
                 Some(has_replay_epoch_column) => cleanup_streaming_progress_rows_for_table(
@@ -2642,6 +2711,7 @@ fn cleanup_replay_helper_rows(
                 )?,
                 None => StreamingProgressCleanupOutcome::default(),
             };
+
             cleanup.streaming_progress_rows =
                 cleanup.streaming_progress_rows.saturating_add(streaming_progress.deleted_rows);
 
@@ -2651,6 +2721,7 @@ fn cleanup_replay_helper_rows(
                 } else {
                     false
                 };
+
                 cleanup.applied_batch_rows = cleanup.applied_batch_rows.saturating_add(
                     cleanup_applied_batch_rows_for_table(
                         conn,
@@ -2662,6 +2733,7 @@ fn cleanup_replay_helper_rows(
                 );
             }
         }
+
         Ok(cleanup)
     })();
 
@@ -2684,6 +2756,7 @@ fn cleanup_replay_helper_rows(
                     "ducklake replay helper cleanup transaction failed to roll back"
                 );
             }
+
             Err(error)
         }
     }
@@ -2717,10 +2790,12 @@ fn load_replay_helper_current_epochs(
         .filter(|epoch| !pending_table_names.contains(epoch.table_name.as_str()))
         .map(|epoch| (epoch.table_name.clone(), epoch.replay_epoch.clone()))
         .collect();
+
     for table_name in active_table_ids {
         if pending_table_names.contains(table_name.as_str()) {
             continue;
         }
+
         epochs.entry(table_name.clone()).or_insert_with(|| LEGACY_REPLAY_EPOCH.to_owned());
     }
 
@@ -2740,6 +2815,7 @@ fn cleanup_streaming_progress_rows_for_table(
     if progress.total_rows == 0 {
         return Ok(StreamingProgressCleanupOutcome::default());
     }
+
     if progress.total_rows == 1 && progress.current.is_some() {
         return Ok(StreamingProgressCleanupOutcome { current_exists: true, deleted_rows: 0 });
     }
@@ -2749,6 +2825,7 @@ fn cleanup_streaming_progress_rows_for_table(
         STREAMING_PROGRESS_TABLE,
         &current_epoch.table_name,
     )?;
+
     if let Some(current) = progress.current {
         insert_streaming_progress_watermark(conn, has_replay_epoch_column, current_epoch, current)?;
     }
@@ -2766,6 +2843,7 @@ fn read_streaming_progress_rows(
     current_epoch: &DuckLakeReplayEpoch,
 ) -> EtlResult<StreamingProgressRows> {
     let helper_table = ducklake_helper_table_name(STREAMING_PROGRESS_TABLE);
+
     let epoch_expression = if has_replay_epoch_column {
         format!(
             "coalesce({}, {}) = {}",
@@ -2778,6 +2856,7 @@ fn read_streaming_progress_rows(
     } else {
         "false".to_owned()
     };
+
     let sql = format!(
         "select last_commit_lsn, last_tx_ordinal, {epoch_expression} as is_current, count(*) over \
          () as total_rows from {helper_table} where table_name = {} order by is_current desc, \
@@ -2828,6 +2907,7 @@ fn read_streaming_progress_rows(
             source: RedactedDuckDbError::from(source)
         )
     })?;
+
     let current = if is_current {
         Some(StreamingProgressWatermark {
             last_commit_lsn: row.get(0).map_err(|source| {
@@ -2862,6 +2942,7 @@ fn insert_streaming_progress_watermark(
     progress: StreamingProgressWatermark,
 ) -> EtlResult<()> {
     let helper_table = ducklake_helper_table_name(STREAMING_PROGRESS_TABLE);
+
     let sql = if has_replay_epoch_column {
         format!(
             "insert into {helper_table} (table_name, replay_epoch, last_commit_lsn, \
@@ -2880,6 +2961,7 @@ fn insert_streaming_progress_watermark(
             progress.last_tx_ordinal,
         )
     };
+
     conn.execute_batch(&sql).map_err(|source| {
         etl_error!(
             ErrorKind::DestinationQueryFailed,
@@ -2905,9 +2987,11 @@ fn cleanup_applied_batch_rows_for_table(
             &current_epoch.table_name,
         );
     }
+
     if copy_complete {
         return delete_completed_copy_batch_rows(conn, has_replay_epoch_column, current_epoch);
     }
+
     if !has_replay_epoch_column && current_epoch.replay_epoch != LEGACY_REPLAY_EPOCH {
         return delete_all_replay_helper_rows_for_table(
             conn,
@@ -2915,6 +2999,7 @@ fn cleanup_applied_batch_rows_for_table(
             &current_epoch.table_name,
         );
     }
+
     if !has_replay_epoch_column {
         return Ok(0);
     }
@@ -2937,6 +3022,7 @@ fn copy_complete_marker_exists(
     current_epoch: &DuckLakeReplayEpoch,
 ) -> EtlResult<bool> {
     let helper_table = ducklake_helper_table_name(APPLIED_BATCHES_TABLE);
+
     let epoch_predicate = if has_replay_epoch_column {
         format!(
             "coalesce({}, {}) = {}",
@@ -2949,6 +3035,7 @@ fn copy_complete_marker_exists(
     } else {
         "false".to_owned()
     };
+
     let sql = format!(
         "select 1 from {helper_table} where table_name = {} and {} = {} and {epoch_predicate} \
          limit 1;",
@@ -2966,6 +3053,7 @@ fn delete_completed_copy_batch_rows(
     current_epoch: &DuckLakeReplayEpoch,
 ) -> EtlResult<u64> {
     let helper_table = ducklake_helper_table_name(APPLIED_BATCHES_TABLE);
+
     let stale_epoch_predicate = if has_replay_epoch_column {
         format!(
             "coalesce({}, {}) <> {} or ",
@@ -2976,6 +3064,7 @@ fn delete_completed_copy_batch_rows(
     } else {
         String::new()
     };
+
     let sql = format!(
         "delete from {helper_table} where table_name = {} and ({stale_epoch_predicate}{} <> {});",
         quote_literal(&current_epoch.table_name),
@@ -3812,6 +3901,7 @@ mod tests {
                     ))
                     .unwrap();
                 }
+
                 conn.execute_batch(&step.sql).unwrap();
             }
 
@@ -3837,6 +3927,7 @@ mod tests {
                 conn.execute_batch(&format!("create table {LAKE_CATALOG}.items (id integer)"))
                     .unwrap();
             }
+
             conn.execute_batch(&format!("insert into {LAKE_CATALOG}.items values (8)")).unwrap();
             let count: i64 = conn
                 .query_row(&format!("select count(*) from {LAKE_CATALOG}.items"), [], |row| {
@@ -3855,6 +3946,7 @@ mod tests {
         let catalog_path = temp.path().join("legacy.duckdb");
         let catalog_url = Url::from_file_path(&catalog_path).unwrap();
         let data_url = Url::from_directory_path(temp.path().join("data")).unwrap();
+
         {
             let metadata = duckdb::Connection::open(&catalog_path).unwrap();
             metadata
@@ -3986,6 +4078,7 @@ mod tests {
         .unwrap();
         let echoed_sql =
             plan.steps().iter().map(|step| step.sql.as_str()).collect::<Vec<_>>().join("\n");
+
         // Guards the test itself: the plan carries every credential word.
         for word in ["betapw", "gammapw", "betakey", "gammakey", "betasec", "gammasec"] {
             assert!(echoed_sql.contains(word));

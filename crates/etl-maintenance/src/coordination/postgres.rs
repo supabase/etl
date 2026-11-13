@@ -190,6 +190,7 @@ impl ExternalMaintenanceStore for PostgresExternalMaintenanceStore {
         else {
             return Ok(ExternalMaintenanceState::default());
         };
+
         let (pause_policy, operation_policy) = row
             .try_get::<Json<StoredPostgresExternalMaintenancePolicy>, _>("operation_policy")
             .map_err(|error| sqlx_error(error, "Failed to decode external maintenance policy"))?

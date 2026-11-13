@@ -86,12 +86,14 @@ impl StoredTableDecodingState {
                 )
             );
         }
+
         if self.replication_mask.iter().chain(&self.identity_mask).any(|value| *value > 1) {
             bail!(
                 ErrorKind::InvalidState,
                 "Table-schema decoding state contains a non-binary mask"
             );
         }
+
         if self
             .replication_mask
             .iter()
@@ -992,6 +994,7 @@ mod tests {
                     let attnum = i32::try_from(index + 1).unwrap();
                     let column =
                         ColumnSchema::new(format!("c{index}"), Type::INT4, -1, attnum, true);
+
                     if primary_key {
                         primary_key_ordinal += 1;
                         column.with_primary_key(primary_key_ordinal)
@@ -1064,6 +1067,7 @@ mod tests {
                 else {
                     return Err(TestCaseError::fail("SyncDone lost its decoding state"));
                 };
+
                 prop_assert_eq!(lsn, sync_done_lsn);
                 prop_assert_eq!(table_decoding_state.snapshot_id(), table_schema.snapshot_id);
 
@@ -1117,6 +1121,7 @@ mod tests {
                             .all(|(replicated, identity)| identity <= replicated);
                     let result = stored.materialize(table_schema, PgLsn::from(*sync_done));
                     prop_assert_eq!(result.is_ok(), valid);
+
                     if let Ok(schema) = result {
                         prop_assert_eq!(
                             schema.replication_mask().as_slice(),
@@ -1127,6 +1132,7 @@ mod tests {
                             schema.column_schemas().len() == schema.column_schemas().count()
                         );
                     }
+
                     Ok(())
                 },
             );

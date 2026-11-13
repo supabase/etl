@@ -269,6 +269,7 @@ mod tests {
     fn channel_binding_rejects_unsupported_signature_algorithms() {
         let mut certificate =
             Certificate::from_der(include_bytes!("fixtures/rsa-sha256.der")).unwrap();
+
         for oid in [ID_ED_25519, ObjectIdentifier::new_unwrap("1.2.3.4")] {
             // Only digest selection is under test; rustls validates signatures
             // first.

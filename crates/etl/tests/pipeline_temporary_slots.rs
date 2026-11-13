@@ -72,12 +72,14 @@ async fn slot_cleanup_isolates_pipeline_ids_and_databases() {
         EtlReplicationSlot::for_table_sync_worker(&pipeline_id, TableId::new(3))
             .try_into()
             .unwrap();
+
     for name in [&apply, &table, &neighbor_apply, &neighbor_table] {
         client
             .query_one("select pg_create_logical_replication_slot($1, 'pgoutput')", &[name])
             .await
             .unwrap();
     }
+
     other_client
         .query_one("select pg_create_logical_replication_slot($1, 'pgoutput')", &[&foreign_table])
         .await
@@ -86,6 +88,7 @@ async fn slot_cleanup_isolates_pipeline_ids_and_databases() {
     other_client.batch_execute("create publication slot_cleanup_test").await.unwrap();
     let mut streams = Vec::new();
     let mut active_pids = Vec::new();
+
     for (source, name) in [
         (&database, &apply),
         (&database, &table),
@@ -105,6 +108,7 @@ async fn slot_cleanup_isolates_pipeline_ids_and_databases() {
             .unwrap();
         active_pids.push((name, row.get::<_, i32>(0)));
     }
+
     let pool = PgPoolOptions::new()
         .max_connections(2)
         .connect_with(database.config.with_db(None))
@@ -118,6 +122,7 @@ async fn slot_cleanup_isolates_pipeline_ids_and_databases() {
     assert_eq!(neighbor_lag.table_sync.keys().copied().collect::<Vec<_>>(), vec![TableId::new(2)]);
 
     delete_pipeline_replication_slots(&pool, format!("{pipeline_id}%")).await.unwrap();
+
     for (name, pid) in &active_pids {
         let row = client
             .query_one("select active_pid from pg_replication_slots where slot_name = $1", &[name])
@@ -125,12 +130,14 @@ async fn slot_cleanup_isolates_pipeline_ids_and_databases() {
             .unwrap();
         assert_eq!(row.get::<_, i32>(0), *pid);
     }
+
     delete_pipeline_replication_slots(&pool, &pipeline_id).await.unwrap();
     assert_eq!(slot_is_temporary(&database, &apply).await, None);
     assert_eq!(slot_is_temporary(&database, &table).await, None);
     assert_eq!(slot_is_temporary(&database, &neighbor_apply).await, Some(false));
     assert_eq!(slot_is_temporary(&database, &neighbor_table).await, Some(false));
     assert_eq!(slot_is_temporary(&other_database, &foreign_table).await, Some(false));
+
     for (name, pid) in &active_pids[2..] {
         let row = client
             .query_one("select active_pid from pg_replication_slots where slot_name = $1", &[name])
@@ -138,10 +145,13 @@ async fn slot_cleanup_isolates_pipeline_ids_and_databases() {
             .unwrap();
         assert_eq!(row.get::<_, i32>(0), *pid);
     }
+
     drop(streams);
+
     for name in [&neighbor_apply, &neighbor_table, &foreign_table] {
         database.wait_for_slot_inactive(name).await;
     }
+
     delete_pipeline_replication_slots(&pool, &neighbor_id).await.unwrap();
     other_client.query_one("select pg_drop_replication_slot($1)", &[&foreign_table]).await.unwrap();
     pool.close().await;
@@ -225,11 +235,13 @@ async fn temporary_pipeline_copies_streams_and_restarts_with_fresh_state() {
         let events = destination.get_events().await;
         let events = group_events_by_type_and_table_id(&events);
         let inserts = events.get(&(EventType::Insert, users.id)).unwrap();
+
         let expected = if copied_rows == 1 {
             vec![("user_2", 2), ("user_3", 3)]
         } else {
             vec![("user_4", 4), ("user_5", 5)]
         };
+
         assert_events_equal(
             inserts,
             &build_expected_users_inserts(

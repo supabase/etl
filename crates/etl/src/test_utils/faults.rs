@@ -304,6 +304,7 @@ mod tests {
         let FaultAction::HoldResponse(gate) = action else {
             panic!("hold() must produce a HoldResponse action");
         };
+
         let held = tokio::spawn(gate.apply(Ok::<_, EtlError>(42)));
 
         // WHEN: the test observes the hold and releases it
@@ -321,6 +322,7 @@ mod tests {
         let FaultAction::HoldResponse(gate) = action else {
             panic!("hold() must produce a HoldResponse action");
         };
+
         let held = tokio::spawn(gate.apply(Ok::<_, EtlError>(())));
 
         // WHEN: the test releases it with an injected error
@@ -361,6 +363,7 @@ mod tests {
         let FaultAction::HoldResponse(gate) = action else {
             panic!("hold() must produce a HoldResponse action");
         };
+
         drop(handle);
 
         // WHEN: the held operation applies

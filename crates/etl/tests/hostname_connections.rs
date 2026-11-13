@@ -97,6 +97,7 @@ async fn resolve(expected: &str, mixed: bool) -> TestResult<Vec<IpAddr>> {
 /// Builds the same hostname-verifying TLS adapter used by replication.
 fn tls_connector(config: &PgConnectionConfig) -> TestResult<MakeRustlsConnect> {
     let mut roots = RootCertStore::empty();
+
     for certificate in CertificateDer::pem_slice_iter(config.tls.trusted_root_certs.as_bytes()) {
         roots.add(certificate?)?;
     }
@@ -503,6 +504,7 @@ async fn stalled_handshakes_time_out_and_close_sockets() -> TestResult {
         resume();
 
         let error = result??.unwrap_err();
+
         if driver == "replication_tls" {
             assert_eq!(
                 error.downcast_ref::<EtlError>().unwrap().kind(),
@@ -594,10 +596,12 @@ async fn mixed_address_fallback() -> TestResult {
     config.host = "source.test".to_owned();
 
     let mut failures = Vec::new();
+
     for mode in ["v4", "mixed", "reject4", "drop4", "reject6", "drop6"] {
         control(mode).await?;
         let expected = if mode == "v4" { "172.30.248.10" } else { ADDRESS_A };
         let addresses = resolve(expected, true).await?;
+
         if mode != "v4" {
             assert_eq!(addresses[0].is_ipv4(), var("NETWORK_IPV4_FIRST").as_deref() == Ok("1"));
         }

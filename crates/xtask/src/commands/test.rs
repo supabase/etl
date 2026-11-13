@@ -65,6 +65,7 @@ impl TestArgs {
 
         println!("[nextest]");
         let mut nextest = cmd!(sh, "cargo nextest run");
+
         if !no_run {
             nextest = nextest.arg("--no-fail-fast");
         }

@@ -489,6 +489,7 @@ impl PreparedDuckLakeCopyBatch {
                 "DuckLake buffered copy batch is not a mutation"
             ));
         };
+
         if prepared_mutations.len() != 1 {
             return Err(etl_error!(
                 ErrorKind::InvalidState,
@@ -496,6 +497,7 @@ impl PreparedDuckLakeCopyBatch {
                 format!("Expected 1 mutation, got {}", prepared_mutations.len())
             ));
         }
+
         let prepared_mutation = prepared_mutations.pop().ok_or_else(|| {
             etl_error!(ErrorKind::InvalidState, "DuckLake buffered copy mutation is missing")
         })?;
@@ -584,6 +586,7 @@ pub(super) async fn ensure_applied_batches_table_exists(
     run_duckdb_blocking(pool, blocking_slots, move |conn| -> EtlResult<()> {
         let _guard = guard;
         let _table_creation_permit = table_creation_permit;
+
         match conn.execute_batch(&ddl) {
             Ok(()) => {}
             Err(error) if is_create_table_conflict(&error, &table_name) => {}
@@ -596,6 +599,7 @@ pub(super) async fn ensure_applied_batches_table_exists(
                 ));
             }
         }
+
         ensure_helper_table_replay_epoch_column(conn, APPLIED_BATCHES_TABLE)?;
 
         let set_option_sql = format!(
@@ -653,6 +657,7 @@ pub(super) async fn ensure_streaming_progress_table_exists(
     run_duckdb_blocking(pool, blocking_slots, move |conn| -> EtlResult<()> {
         let _guard = guard;
         let _table_creation_permit = table_creation_permit;
+
         match conn.execute_batch(&ddl) {
             Ok(()) => {}
             Err(err) if is_create_table_conflict(&err, &table_name) => {}
@@ -665,6 +670,7 @@ pub(super) async fn ensure_streaming_progress_table_exists(
                 ));
             }
         }
+
         ensure_helper_table_replay_epoch_column(conn, STREAMING_PROGRESS_TABLE)?;
 
         let set_option_sql = format!(
@@ -794,6 +800,7 @@ async fn apply_table_batches_with_policy(
     let batch_count = batches.len();
     let sequence_started = Instant::now();
     let mut streaming_progress = TableStreamingProgressCache::default();
+
     for (batch_index, batch) in batches.into_iter().enumerate() {
         let span = tracing::info_span!(
             "ducklake_table_batch",
@@ -817,6 +824,7 @@ async fn apply_table_batches_with_policy(
         .instrument(span.clone())
         .await;
         let _entered = span.enter();
+
         if result.is_err() {
             warn!(
                 sequence_elapsed_ms = sequence_started.elapsed().as_millis() as u64,
@@ -829,10 +837,12 @@ async fn apply_table_batches_with_policy(
                 "ducklake table batch sequence advanced"
             );
         }
+
         streaming_progress = result?;
         #[cfg(feature = "test-utils")]
         wait_after_atomic_batch_commit_for_tests(&table_name).await;
     }
+
     Ok(streaming_progress)
 }
 
@@ -897,11 +907,13 @@ async fn apply_table_batch_with_policy(
         },
         move || {
             let mut streaming_progress = streaming_progress.clone();
+
             if !first_attempt {
                 // An interrupted commit can have reached durable storage.
                 // Resolve its outcome from the catalog before replaying it.
                 streaming_progress.progress = None;
             }
+
             first_attempt = false;
             let attempt_batch = Arc::clone(&batch);
             let pool = Arc::clone(&pool);
@@ -916,15 +928,18 @@ async fn apply_table_batch_with_policy(
                     move |conn, context| {
                         let _entered = span.enter();
                         let _write_guard = write_guard;
+
                         if batch_kind == DuckLakeTableBatchKind::Copy {
                             #[cfg(feature = "test-utils")]
                             crate::ducklake::core::wait_if_copy_append_paused_for_tests();
+
                             if applied_batch_marker_exists(conn, attempt_batch.as_ref())? {
                                 record_replayed_batch_skip(attempt_batch.as_ref());
                                 return Ok(streaming_progress);
                             }
 
                             apply_table_batch(conn, attempt_batch.as_ref(), context)?;
+
                             return Ok(streaming_progress);
                         }
 
@@ -978,6 +993,7 @@ pub(super) fn prepare_mutation_table_batches(
 
     for tracked_mutation in tracked_mutations {
         pending_mutations.push(tracked_mutation);
+
         if pending_mutations.len() >= CDC_MUTATION_BATCH_SIZE {
             push_prepared_mutation_batch(
                 &mut prepared_batches,
@@ -1314,6 +1330,7 @@ fn apply_table_batches(
                     error,
                 )
             })?;
+
             continue;
         }
 
@@ -1410,6 +1427,7 @@ fn prepare_table_mutations(
                         origin: "delete",
                     });
                 }
+
                 upsert_rows.push(row);
             }
             TableMutation::Delete(row) => {
@@ -1418,6 +1436,7 @@ fn prepare_table_mutations(
                         std::mem::take(&mut upsert_rows),
                     )));
                 }
+
                 delete_predicates.push(delete_predicate_from_row(replicated_table_schema, &row)?);
             }
             TableMutation::Update { delete_row, new_row } => {
@@ -1426,6 +1445,7 @@ fn prepare_table_mutations(
                         std::mem::take(&mut upsert_rows),
                     )));
                 }
+
                 if !delete_predicates.is_empty() {
                     prepared_mutations.push(PreparedTableMutation::Delete {
                         predicates: std::mem::take(&mut delete_predicates),
@@ -1433,6 +1453,7 @@ fn prepare_table_mutations(
                         origin: "delete",
                     });
                 }
+
                 match new_row {
                     UpdatedTableRow::Full(upsert_row) => {
                         prepared_mutations.push(PreparedTableMutation::Delete {
@@ -1467,6 +1488,7 @@ fn prepare_table_mutations(
                         std::mem::take(&mut upsert_rows),
                     )));
                 }
+
                 if !delete_predicates.is_empty() {
                     prepared_mutations.push(PreparedTableMutation::Delete {
                         predicates: std::mem::take(&mut delete_predicates),
@@ -1488,6 +1510,7 @@ fn prepare_table_mutations(
     if !upsert_rows.is_empty() {
         prepared_mutations.push(PreparedTableMutation::Upsert(prepare_rows(upsert_rows)));
     }
+
     if !delete_predicates.is_empty() {
         prepared_mutations.push(PreparedTableMutation::Delete {
             predicates: delete_predicates,
@@ -1577,13 +1600,16 @@ fn delete_predicate_from_row<'a>(
     };
 
     let mut predicates = Vec::new();
+
     for (column_schema, value) in key_values {
         let quoted_column =
             quote_identifier(&DUCKLAKE_COLUMN_NAME_MAPPING.map_name(&column_schema.name));
+
         let predicate = match value {
             Cell::Null => format!("{quoted_column} IS NULL"),
             _ => format!("{quoted_column} = {}", cell_to_sql_literal_ref(value)),
         };
+
         predicates.push(predicate);
     }
 
@@ -1639,6 +1665,7 @@ fn update_assignments_from_partial_row(
     let mut assignments = Vec::with_capacity(partial_row.values().len());
     let mut missing_indexes = partial_row.missing_column_indexes().iter().copied().peekable();
     let mut present_values = partial_row.values().iter();
+
     for (column_index, column_schema) in replicated_column_schemas.iter().enumerate() {
         if missing_indexes.peek().copied() == Some(column_index) {
             missing_indexes.next();
@@ -1655,6 +1682,7 @@ fn update_assignments_from_partial_row(
                 )
             ));
         };
+
         let quoted_column =
             quote_identifier(&DUCKLAKE_COLUMN_NAME_MAPPING.map_name(&column_schema.name));
         assignments.push(format!("{quoted_column} = {}", cell_to_sql_literal_ref(value)));
@@ -1700,6 +1728,7 @@ fn build_mutation_batch_identity(
             TableMutation::Update { delete_row, new_row } => {
                 "update".hash(&mut hasher);
                 delete_predicate_from_row(replicated_table_schema, delete_row)?.hash(&mut hasher);
+
                 match new_row {
                     UpdatedTableRow::Full(row) => hash_table_row_ref(&mut hasher, row),
                     UpdatedTableRow::Partial(row) => hash_partial_table_row_ref(&mut hasher, row)?,
@@ -1999,6 +2028,7 @@ impl ReusableStagingTable {
         }
 
         let staging_table = quote_identifier(&self.staging_name);
+
         if let Err(error) = conn.execute_batch(&format!("drop table if exists {staging_table}")) {
             let error = RedactedDuckDbError::from(error);
             tracing::error!(error = %error, "error drop table staging");
@@ -2101,6 +2131,7 @@ impl ReusableStagingTable {
                         error,
                     )
                 })?;
+
                 for values in all_values {
                     appender.append_row(duckdb::appender_params_from_iter(values)).map_err(
                         |err| {
@@ -2114,6 +2145,7 @@ impl ReusableStagingTable {
                         },
                     )?;
                 }
+
                 appender.flush().map_err(|err| {
                     let err = RedactedDuckDbError::from(err);
                     tracing::error!(error = %err, "error flush");
@@ -2161,6 +2193,7 @@ impl ReusableStagingTable {
                 )?;
             }
         }
+
         Ok(())
     }
 }
@@ -2259,6 +2292,7 @@ impl DuckLakeCopyAccumulator {
         let result = (|| -> EtlResult<()> {
             if !self.pending_markers.is_empty() {
                 self.staging.insert_staged_rows(conn)?;
+
                 for (batch_id, marker) in &self.pending_markers {
                     insert_applied_batch_marker_fields(
                         conn,
@@ -2280,6 +2314,7 @@ impl DuckLakeCopyAccumulator {
                         format!("table={}", self.table_name)
                     ));
                 }
+
                 if !applied_batch_marker_exists(conn, copy_complete)? {
                     insert_applied_batch_marker(conn, copy_complete)?;
                 }
@@ -2293,6 +2328,7 @@ impl DuckLakeCopyAccumulator {
                 let rollback_error = RedactedDuckDbError::from(rollback_error);
                 tracing::error!(error = %rollback_error, "error rollback buffered copy");
             }
+
             return Err(error);
         }
 
@@ -2356,6 +2392,7 @@ fn apply_table_batch(
             "ducklake atomic batch attempt failed"
         );
     }
+
     result
 }
 
@@ -2384,6 +2421,7 @@ fn apply_table_batch_inner(
         if let Some(hook) = &batch.test_hook {
             hook(conn, operation_context)?;
         }
+
         match &batch.action {
             PreparedDuckLakeTableBatchAction::Mutation(prepared_mutations) => {
                 for prepared_mutation in prepared_mutations {
@@ -2406,6 +2444,7 @@ fn apply_table_batch_inner(
         } else {
             insert_applied_batch_marker(conn, batch)?;
         }
+
         Ok(())
     })();
 
@@ -2453,6 +2492,7 @@ fn apply_table_batch_inner(
         Err(err) => {
             let rollback = conn.execute_batch("ROLLBACK");
             reusable_staging_table.cleanup(conn);
+
             if let Err(err) = rollback {
                 let err = RedactedDuckDbError::from(err);
                 tracing::error!(error = %err, "error rollback");
@@ -2565,6 +2605,7 @@ fn apply_delete_mutation(
     let target_table = qualified_lake_table_name(&batch.table_name);
     let chunk_size = row_match.statement_predicate_limit();
     let chunk_count = predicates.len().div_ceil(chunk_size);
+
     for (chunk_index, chunk) in predicates.chunks(chunk_size).enumerate() {
         let where_clause = chunk
             .iter()
@@ -2722,6 +2763,7 @@ fn insert_rows_into_staging_with_sql(
     row_literals: &[String],
 ) -> EtlResult<()> {
     let staging_table = quote_identifier(staging);
+
     for chunk in row_literals.chunks(SQL_INSERT_BATCH_SIZE) {
         conn.execute_batch(&format!("INSERT INTO {staging_table} VALUES {};", chunk.join(", ")))
             .map_err(|err| {
@@ -2776,6 +2818,7 @@ async fn wait_after_atomic_batch_commit_for_tests(table_name: &str) {
             None
         }
     };
+
     if let Some(PausedAtomicCommit { reached, resume, .. }) = hook {
         let _ = reached.send(());
         let _ = resume.await;
@@ -3025,16 +3068,20 @@ mod tests {
                         while context.interrupt_reason_label() == "none" {
                             std::thread::yield_now();
                         }
+
                         assert_eq!(context.interrupt_reason_label(), "query_timeout");
+
                         return Err(etl_error!(
                             ErrorKind::DestinationTimeout,
                             "Test transaction interrupted"
                         ));
                     }
+
                     Ok(())
                 }));
             }
         }
+
         batches
     }
 
@@ -3073,6 +3120,7 @@ mod tests {
             deadline_test_policy(0),
         ));
         let mut operation_ids = Vec::new();
+
         for batch_index in 0..2 {
             let event = observed.recv().await.unwrap();
             assert_eq!(event.batch_index, batch_index);
@@ -3080,6 +3128,7 @@ mod tests {
             tokio::time::advance(Duration::from_secs(100)).await;
             event.release.send(false).unwrap();
         }
+
         let progress = task.await.unwrap().unwrap();
         assert_eq!(progress.reads.load(Ordering::Relaxed), 1);
         assert_ne!(operation_ids[0], operation_ids[1]);
@@ -3636,6 +3685,7 @@ mod tests {
                 .unwrap();
 
         assert_eq!(prepared.len(), 2);
+
         match &prepared[0] {
             PreparedTableMutation::Delete { predicates, origin, .. } => {
                 assert_eq!(predicates, &vec!["\"id\" = 1".to_owned()]);
@@ -3645,6 +3695,7 @@ mod tests {
                 panic!("expected delete first")
             }
         }
+
         match &prepared[1] {
             PreparedTableMutation::Upsert(PreparedRows::Appender(rows)) => {
                 assert_eq!(rows.len(), 1);
@@ -3678,6 +3729,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(prepared.len(), 1);
+
         match &prepared[0] {
             PreparedTableMutation::Update { assignments, predicate, .. } => {
                 assert_eq!(
@@ -3730,6 +3782,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(prepared.len(), 1);
+
         match &prepared[0] {
             PreparedTableMutation::Update { assignments, predicate, .. } => {
                 assert_eq!(
@@ -3789,6 +3842,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(prepared.len(), 1);
+
         match &prepared[0] {
             PreparedTableMutation::Update { assignments, predicate, .. } => {
                 assert_eq!(
@@ -3839,9 +3893,11 @@ mod tests {
 
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].batch_kind, DuckLakeTableBatchKind::Mutation);
+
         match &batches[0].action {
             PreparedDuckLakeTableBatchAction::Mutation(prepared) => {
                 assert_eq!(prepared.len(), 1);
+
                 match &prepared[0] {
                     PreparedTableMutation::Upsert(PreparedRows::Appender(rows)) => {
                         assert_eq!(rows.len(), 2);
@@ -3940,9 +3996,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(batches.len(), 1);
+
         match &batches[0].action {
             PreparedDuckLakeTableBatchAction::Mutation(prepared) => {
                 assert_eq!(prepared.len(), 1);
+
                 match &prepared[0] {
                     PreparedTableMutation::Delete { predicates, origin, .. } => {
                         assert_eq!(origin, &"delete");
@@ -3999,6 +4057,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(batches.len(), 1);
+
         match &batches[0].action {
             PreparedDuckLakeTableBatchAction::Mutation(prepared) => {
                 assert_eq!(prepared.len(), 4);
@@ -4393,6 +4452,7 @@ mod tests {
                         .prop_map(|(negative, integer, fraction)| {
                             let sign =
                                 if negative && (integer, fraction) != (0, 0) { "-" } else { "" };
+
                             let text = format!("{sign}{integer}.{fraction:02}");
                             Cell::Numeric(PgNumeric::from_str(&text).unwrap())
                         })
@@ -4410,6 +4470,7 @@ mod tests {
                     Self::Text => sql_text().prop_map(Cell::String).boxed(),
                     Self::Bool => any::<bool>().prop_map(Cell::Bool).boxed(),
                 };
+
                 prop_oneof![1 => Just(Cell::Null), 5 => value].boxed()
             }
         }
@@ -4429,10 +4490,13 @@ mod tests {
             /// Returns the replicated schema with the case's identity.
             fn schema(&self) -> ReplicatedTableSchema {
                 let mut id = ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false);
+
                 if matches!(self.identity, IdentityKind::PrimaryKey) {
                     id = id.with_primary_key(1);
                 }
+
                 let mut columns = vec![id];
+
                 for (index, kind) in self.payload.iter().enumerate() {
                     let (typ, modifier) = kind.pg_type();
                     columns.push(ColumnSchema::new(
@@ -4443,6 +4507,7 @@ mod tests {
                         true,
                     ));
                 }
+
                 let identity_mask = columns
                     .iter()
                     .enumerate()
@@ -4529,6 +4594,7 @@ mod tests {
                         .enumerate()
                         .map(|(index, pick)| {
                             let (id, values) = pick.get(&pool);
+
                             // Primary keys are unique in Postgres;
                             // FULL-identity
                             // tables keep the pooled id so whole tuples repeat.
@@ -4536,6 +4602,7 @@ mod tests {
                                 IdentityKind::PrimaryKey => index as i32,
                                 IdentityKind::Full => *id,
                             };
+
                             make_row(id, values)
                         })
                         .collect::<Vec<_>>();
@@ -4545,6 +4612,7 @@ mod tests {
                             IdentityKind::PrimaryKey => target as i32,
                             IdentityKind::Full => id,
                         };
+
                         make_row(id, &values)
                     });
                     IdentityCase { identity, payload, rows, target, update }
@@ -4696,12 +4764,14 @@ mod tests {
                 "predicate {} matched a different number of rows",
                 predicate
             );
+
             if matching > 1 && !allow_duplicates {
                 return Ok(());
             }
 
             let mut model = case.rows.clone();
             model.remove(case.target);
+
             let mutation = match &case.update {
                 Some(new_row) => {
                     model.push(new_row.clone());
@@ -4712,6 +4782,7 @@ mod tests {
                 }
                 None => TableMutation::Delete(old_row),
             };
+
             apply_mutations(&conn, &schema, case.rows.len() as u64 + 1, vec![mutation]).unwrap();
             let stored = read_rows(&conn, &schema);
             prop_assert!(
@@ -4898,6 +4969,7 @@ mod tests {
                 let column = |name: &str, ordinal: i32| {
                     let column =
                         ColumnSchema::new(name.to_owned(), PgType::INT4, -1, ordinal, false);
+
                     if key_columns.contains(&ordinal) {
                         column.with_primary_key(ordinal)
                     } else {
@@ -4989,6 +5061,7 @@ mod tests {
                     TableRow::new(vec![Cell::I32(id), Cell::String(value.to_owned())])
                 };
                 let key = |id: i32| OldTableRow::Key(TableRow::new(vec![Cell::I32(id)]));
+
                 match self {
                     Self::Insert(id, value) => TableMutation::Insert(row(*id, value)),
                     Self::Delete(id) => TableMutation::Delete(key(*id)),
@@ -5043,6 +5116,7 @@ mod tests {
                     if present.insert(id, ()).is_none() {
                         return ModelOp::Insert(id, value);
                     }
+
                     match choice % 3 {
                         0 => {
                             present.remove(&id);
@@ -5141,6 +5215,7 @@ mod tests {
                 pending,
             )?;
             let context = DuckLakeBlockingOperationContext::for_tests();
+
             match crash_after {
                 Some(committed) => {
                     let committed = committed.index(batches.len() + 1);
@@ -5150,6 +5225,7 @@ mod tests {
                         &context,
                         &mut TableStreamingProgressCache::default(),
                     )?;
+
                     if retry {
                         apply_table_batches(
                             conn,
@@ -5158,6 +5234,7 @@ mod tests {
                             &mut TableStreamingProgressCache::default(),
                         )?;
                     }
+
                     Ok(())
                 }
                 None => apply_table_batches(
@@ -5209,9 +5286,11 @@ mod tests {
             }
 
             let mut model = BTreeMap::new();
+
             for op in ops {
                 op.apply(&mut model);
             }
+
             let mut statement = conn
                 .prepare(&format!(
                     "select id, v from {} order by id",

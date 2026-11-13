@@ -113,6 +113,7 @@ fn inject(extra: &mut Vec<String>, flag: &str, value: &Option<String>, user_args
     if has_flag(user_args, flag) {
         return;
     }
+
     if let Some(v) = value {
         extra.push(flag.to_owned());
         extra.push(v.clone());

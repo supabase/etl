@@ -174,6 +174,7 @@ async fn run(args: RunArgs) -> Result<()> {
     let destination =
         BenchDestination::new(&args.destination, &args.pipeline_id, store.clone()).await?;
     let destination_init_ms = duration_millis(destination_started.elapsed());
+
     if args.destination_settle_ms > 0 {
         tokio::time::sleep(Duration::from_millis(args.destination_settle_ms)).await;
     }
@@ -342,10 +343,12 @@ async fn run(args: RunArgs) -> Result<()> {
     };
 
     print_summary(&report);
+
     if let Some(report_path) = &args.report_path {
         write_report(&report, report_path)?;
         println!("Report written to {}", report_path.display());
     }
+
     Ok(())
 }
 
@@ -457,6 +460,7 @@ async fn register_table_sync_notifications(
     table_ids: &[u32],
 ) -> Vec<TableSyncNotifications> {
     let mut notifications = Vec::with_capacity(table_ids.len());
+
     for table_id in table_ids {
         let table_id = *table_id;
         let sync_complete = store.notify_on_table_sync_complete(TableId::new(table_id)).await;
@@ -470,6 +474,7 @@ async fn register_table_sync_notifications(
 
 async fn wait_for_table_sync(notifications: Vec<TableSyncNotifications>) -> Result<()> {
     let mut tasks = JoinSet::new();
+
     for notification in notifications {
         tasks.spawn(async move {
             let table_id = notification.table_id;

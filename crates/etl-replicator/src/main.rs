@@ -102,6 +102,7 @@ async fn async_main(
     };
 
     let error_message = error.to_string();
+
     match &error {
         ReplicatorError::Etl(etl_error) => {
             notification_client.notify_error(error_message, etl_error).await;

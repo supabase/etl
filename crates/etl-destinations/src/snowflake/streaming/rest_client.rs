@@ -71,6 +71,7 @@ impl<T: TokenProvider> RestStreamClient<T> {
                 }
 
                 debug!(hostname = %hostname, "discovered ingest host");
+
                 let host = if hostname.starts_with("http://") || hostname.starts_with("https://") {
                     hostname
                 } else {
@@ -112,9 +113,11 @@ async fn send_authenticated<T: TokenProvider>(
 
         warn!(status = %status, "snowpipe streaming api rejected the token, invalidating it");
         auth.invalidate_token().await;
+
         if refreshed {
             return Err(error.into());
         }
+
         refreshed = true;
     }
 }
@@ -308,6 +311,7 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
             // an already-completed drop.
             self.auth.invalidate_token().await;
         }
+
         result
     }
 
@@ -379,6 +383,7 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
 /// Builds a Snowpipe endpoint while preserving each raw path segment.
 fn streaming_url(host: &str, segments: &[&str]) -> Result<String> {
     let mut url = format!("{host}/v2/streaming");
+
     for segment in segments {
         // URL parsing normalizes dot-only segments even if their dots are
         // percent-encoded, so these identifiers cannot be represented
@@ -388,9 +393,11 @@ fn streaming_url(host: &str, segments: &[&str]) -> Result<String> {
                 "Dot-only identifiers cannot be represented in Snowpipe REST paths".into(),
             ));
         }
+
         url.push('/');
         url.extend(utf8_percent_encode(segment, PATH_SEGMENT_ENCODE_SET));
     }
+
     Ok(url)
 }
 
@@ -586,6 +593,7 @@ mod tests {
             ("a+b", "a%2Bb"),
         ];
         let http = reqwest::Client::new();
+
         for (identifier, encoded) in cases {
             for position in 0..4 {
                 let mut names = ["DB", "SCHEMA", "TABLE", "CHANNEL"];
@@ -646,6 +654,7 @@ mod tests {
                     assert_eq!(error.retryability(), Retryability::Permanent);
                 }
             }
+
             for (database, schema) in [(dot, "SCHEMA"), ("DB", dot)] {
                 let error = channel_status_url("https://example.com", database, schema, "TABLE")
                     .unwrap_err();
@@ -753,6 +762,7 @@ mod tests {
                     Err(Error::HttpStatus { status: StatusCode::UNAUTHORIZED, .. })
                 )),
             }
+
             assert_eq!(server.await.unwrap(), vec!["token-0", "token-1"]);
             assert_eq!(auth.invalidations(), 1);
         }
@@ -772,6 +782,7 @@ mod tests {
                 "rows_error_count":0
             }
         }"#;
+
         for (status, body, expected_token) in [
             (200, "{}", "token-1"),
             (404, "{}", "token-1"),
@@ -787,6 +798,7 @@ mod tests {
             stream.ingest_host.set(url).unwrap();
 
             let dropped = stream.drop_channel("DB", "SCHEMA", "TABLE", "CHANNEL").await;
+
             match status {
                 200 => dropped.unwrap(),
                 404 => {
@@ -801,6 +813,7 @@ mod tests {
                 )),
                 _ => unreachable!(),
             }
+
             stream.open_channel("DB", "SCHEMA", "TABLE", "CHANNEL", None).await.unwrap();
             assert_eq!(server.await.unwrap(), vec!["token-0", expected_token]);
         }

@@ -67,6 +67,7 @@ where
     E: PgExecutor<'c>,
 {
     let checkpoint_lsn = checkpoint_lsn.to_string();
+
     let persisted_checkpoint_lsn: String = if let Some(table_id) = table_id {
         sqlx::query_scalar(
             r#"

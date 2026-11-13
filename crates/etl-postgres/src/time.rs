@@ -79,6 +79,7 @@ impl FromStr for PgTime {
         {
             return Ok(Self::EndOfDay);
         }
+
         Ok(Self::Value(NaiveTime::parse_from_str(value, TIME_FORMAT)?))
     }
 }
@@ -215,6 +216,7 @@ pub fn parse_postgres_utc_offset(value: &str) -> Option<FixedOffset> {
         b'-' => (-1, &value[1..]),
         _ => return None,
     };
+
     let (hours, minutes, seconds) = if value.contains(':') {
         parse_colon_utc_offset(value)?
     } else {
@@ -238,6 +240,7 @@ fn parse_colon_utc_offset(value: &str) -> Option<(i32, i32, i32)> {
     let mut parts = value.split(':');
     let hours = parse_two_digits(parts.next()?)?;
     let minutes = parse_two_digits(parts.next()?)?;
+
     let seconds = match parts.next() {
         Some(seconds) => parse_two_digits(seconds)?,
         None => 0,
@@ -249,6 +252,7 @@ fn parse_colon_utc_offset(value: &str) -> Option<(i32, i32, i32)> {
 /// Parses an unsigned UTC offset in HH, HHMM, or HHMMSS form.
 fn parse_compact_utc_offset(value: &str) -> Option<(i32, i32, i32)> {
     let bytes = value.as_bytes();
+
     match value.len() {
         2 => Some((parse_two_digit_bytes(bytes)?, 0, 0)),
         4 => Some((parse_two_digit_bytes(&bytes[..2])?, parse_two_digit_bytes(&bytes[2..])?, 0)),

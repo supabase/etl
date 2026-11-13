@@ -57,6 +57,7 @@ pub(super) async fn check_schema(conn: &mut PgConnection) -> Result<()> {
             applied.map_or_else(|| "none".to_owned(), |version| version.to_string())
         );
     }
+
     Ok(())
 }
 
@@ -150,6 +151,7 @@ pub(super) async fn load_stored_runs(
     .await?;
 
     let mut runs: HashMap<i64, (StoredRun, Vec<(i32, bool)>)> = HashMap::new();
+
     for row in rows {
         let run_id: i64 = row.try_get("run_id")?;
         let stored = StoredRun {
@@ -164,6 +166,7 @@ pub(super) async fn load_stored_runs(
         entry.0 = stored;
         entry.1.push(attempt);
     }
+
     Ok(runs)
 }
 
@@ -195,12 +198,14 @@ pub(super) async fn load_known_artifacts(
     .await?;
 
     let mut known: HashMap<i64, HashMap<i64, bool>> = HashMap::new();
+
     for row in rows {
         known
             .entry(row.try_get("run_id")?)
             .or_default()
             .insert(row.try_get("artifact_id")?, row.try_get("stored")?);
     }
+
     Ok(known)
 }
 
@@ -485,16 +490,20 @@ pub(super) async fn insert_manifest(
         .execute(&mut *conn)
         .await?;
     let mut stored = StoredManifest::default();
+
     if !inserted {
         return Ok(stored);
     }
+
     if !manifest.tests.is_empty() {
         stored.test_results = insert_test_results(conn, manifest.job_id, &manifest.tests).await?;
     }
+
     if !manifest.findings.is_empty() {
         stored.audit_findings =
             insert_audit_findings(conn, manifest.job_id, &manifest.findings).await?;
     }
+
     Ok(stored)
 }
 

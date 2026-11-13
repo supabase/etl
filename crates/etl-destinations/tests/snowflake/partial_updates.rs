@@ -157,6 +157,7 @@ async fn materialization_history_lifetimes_and_restart() {
             assert_eq!(record[3].as_str().unwrap().parse::<bool>().unwrap(), anchored);
             assert_eq!(parse_json_cell(&record[4]), missing);
         }
+
         // Reopening validates physical metadata and skips identically replayed
         // offsets.
         let restarted = Destination::new(
@@ -234,6 +235,7 @@ async fn materialization_history_lifetimes_and_restart() {
                 old_table_row: None,
             }),
         ];
+
         for _ in 0..2 {
             write_events(&restarted, WriteEventsDurability::RequireDurable, truncated.clone())
                 .await
@@ -305,6 +307,7 @@ async fn postgres_external_toast(full_identity: bool) {
         .await
         .unwrap();
     let source = name.as_quoted_identifier();
+
     for command in [
         format!("alter table {source} drop column discarded"),
         format!(
@@ -319,6 +322,7 @@ async fn postgres_external_toast(full_identity: bool) {
     ] {
         database.run_sql(&command).await.unwrap();
     }
+
     database.create_publication("partial_toast", std::slice::from_ref(&name)).await.unwrap();
     let auth = build_auth();
     let config = auth.config().clone_without_credentials();
@@ -349,6 +353,7 @@ async fn postgres_external_toast(full_identity: bool) {
         let changed = destination
             .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 5)])
             .await;
+
         for change in [
             "counter = 1 where id = 1",
             "payload = repeat('y', 32768) where id = 1",
@@ -358,6 +363,7 @@ async fn postgres_external_toast(full_identity: bool) {
         ] {
             database.run_sql(&format!("update {source} set {change}")).await.unwrap();
         }
+
         changed.notified().await;
         pipeline.shutdown_and_wait().await.unwrap();
         let events = destination.get_events().await;
@@ -380,37 +386,46 @@ async fn postgres_external_toast(full_identity: bool) {
             .await,
             Some(expected)
         );
+
         for index in [0, 2] {
             if full_identity {
                 assert!(matches!(updates[index].old_table_row, Some(OldTableRow::Full(_))));
                 assert!(matches!(updates[index].updated_table_row, UpdatedTableRow::Full(_)));
             } else {
                 assert!(updates[index].old_table_row.is_none());
+
                 let UpdatedTableRow::Partial(row) = &updates[index].updated_table_row else {
                     panic!("external unchanged payload must remain partial")
                 };
+
                 assert_eq!(row.missing_column_indexes(), &[1]);
                 assert_eq!(row.values().len(), 7);
                 assert!(row.values().iter().all(|cell| !matches!(cell, Cell::String(_))));
             }
         }
+
         let UpdatedTableRow::Full(changed) = &updates[1].updated_table_row else {
             panic!("changed payload must be supplied")
         };
+
         assert_eq!(changed.values()[1], Cell::String("y".repeat(32768)));
+
         let UpdatedTableRow::Full(cleared) = &updates[3].updated_table_row else {
             panic!("explicit null must be supplied")
         };
+
         assert_eq!(cleared.values()[1], Cell::Null);
         let query = companion_query(&config, &physical);
         let rows = query_rows(&sql, &format!("{query} order by \"id\"")).await.unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(&rows[0][..3], &[json!("1"), json!("y".repeat(32768)), json!("2")]);
         assert_eq!(&rows[1][..3], &[json!("2"), json!(null), json!("1")]);
+
         for row in rows {
             assert_eq!(row[8], "true");
             assert_eq!(parse_json_cell(&row[9]), json!([]));
         }
+
         // The physical attribute number differs from the replicated row index
         // because a column was dropped before the initial snapshot.
         assert_eq!(
@@ -418,6 +433,7 @@ async fn postgres_external_toast(full_identity: bool) {
             3
         );
         let fqn = format!("\"{}\".\"{}\".\"{physical}\"", config.database(), config.schema());
+
         if !full_identity {
             assert_eq!(
                 query_rows(
@@ -432,10 +448,12 @@ async fn postgres_external_toast(full_identity: bool) {
                 vec![vec![json!("2")]],
             );
         }
+
         // Restart at each boundary. Each phase uses real transactional DDL and
         // pgoutput updates, and checks values after durability and shutdown.
         // Only two source rows are needed to distinguish omission from NULL.
         let mut previous_lsn = last.commit_lsn;
+
         for (phase, (count, commands, columns, expected)) in [
             (
                 2_usize,
@@ -516,6 +534,7 @@ async fn postgres_external_toast(full_identity: bool) {
                 .unwrap();
             let completion = pipeline.wait();
             tokio::pin!(completion);
+
             // Accepted updates may be in a later batch than the schema change.
             // Wait for their commit to become durable before stopping intake.
             let durable = async {
@@ -534,6 +553,7 @@ async fn postgres_external_toast(full_identity: bool) {
                     .unwrap();
                 wait_for_replication_checkpoint(&store, commit_lsn).await;
             };
+
             let completed = tokio::select! {
                 _ = durable => true,
 
@@ -578,6 +598,7 @@ async fn postgres_external_toast(full_identity: bool) {
                 assert_eq!(parse_json_cell(&row.pop().unwrap()), json!([]));
                 assert_eq!(row.pop().unwrap(), "true");
             }
+
             assert_eq!(rows, expected);
         }
     })
@@ -685,6 +706,7 @@ async fn materialization_query_composite_keys_and_native_values() {
         assert_eq!(rows[2][4], "NULL_VALUE");
         assert!(rows[1][2..7].iter().all(Value::is_null));
         assert_eq!(rows[0][6], "2026-01-01 00:00:00.123456789 +05:30");
+
         for (row, (anchored, unresolved)) in rows.iter().zip([
             ("true", json!([])),
             ("false", json!(["c0\"'", "array", "json", "date", "time"])),
@@ -694,6 +716,7 @@ async fn materialization_query_composite_keys_and_native_values() {
             assert_eq!(parse_json_cell(&row[8]), unresolved);
             assert_eq!(&row[10..], &[json!("en-ci"), json!("en-ci"), json!("utf8")]);
         }
+
         assert_eq!(
             rows.iter().map(|row| row[9].as_str().unwrap()).collect::<Vec<_>>(),
             ["03", "03", "01"]
@@ -889,6 +912,7 @@ async fn legacy_upgrade_rejects_unrelated_schema_damage() {
         Arc::clone(&auth),
         reqwest::Client::new(),
     );
+
     for damage in ["extra", "missing", "wrong_mask"] {
         let name = format!("invalid{}", uuid::Uuid::new_v4().simple());
         let physical = format!("PUBLIC_{name}").to_uppercase();
@@ -909,6 +933,7 @@ async fn legacy_upgrade_rejects_unrelated_schema_damage() {
             );
             original.shutdown().await.unwrap();
             sql.drop_column(&physical, "_cdc_missing_columns").await.unwrap();
+
             match damage {
                 "extra" => sql.add_column(&physical, "unexpected", "VARCHAR", None).await.unwrap(),
                 "missing" => sql.drop_column(&physical, "payload").await.unwrap(),
@@ -917,6 +942,7 @@ async fn legacy_upgrade_rejects_unrelated_schema_damage() {
                     .await
                     .unwrap(),
             }
+
             let restarted = Destination::new(
                 Client::new(Arc::clone(&auth), 1175.to_string().into()),
                 store.clone(),
@@ -946,12 +972,14 @@ async fn legacy_upgrade_rejects_unrelated_schema_damage() {
                 .iter()
                 .filter(|column| column[2] == "_cdc_missing_columns")
                 .collect::<Vec<_>>();
+
             if damage == "wrong_mask" {
                 assert_eq!(masks.len(), 1);
                 assert_eq!(parse_json_cell(&masks[0][3])["type"], "TEXT");
             } else {
                 assert!(masks.is_empty());
             }
+
             restarted.shutdown().await.unwrap();
         })
         .await;

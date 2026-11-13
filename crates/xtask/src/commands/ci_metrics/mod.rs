@@ -91,6 +91,7 @@ impl CiMetricsArgs {
     /// Runs the command with errors as they are.
     async fn run_unredacted(self) -> Result<()> {
         let mut conn = connect().await?;
+
         match self.command {
             CiMetricsCommand::Migrate => {
                 store::migrate(&mut conn).await?;
@@ -131,6 +132,7 @@ fn require_verified_tls(host: &str, mode: PgSslMode) -> Result<()> {
     if local || matches!(mode, PgSslMode::VerifyFull) {
         return Ok(());
     }
+
     bail!("{DATABASE_URL_ENV} must use sslmode=verify-full for non-local hosts");
 }
 
@@ -143,6 +145,7 @@ fn require_session_connection(port: u16) -> Result<()> {
              the session pooler or a direct connection"
         );
     }
+
     Ok(())
 }
 
@@ -156,11 +159,13 @@ fn connection_identifiers() -> Vec<String> {
     else {
         return Vec::new();
     };
+
     let mut identifiers = vec![options.get_host().to_owned()];
     let user = options.get_username();
     if let Some((_, project_ref)) = user.split_once('.') {
         identifiers.extend([user.to_owned(), project_ref.to_owned()]);
     }
+
     identifiers.retain(|identifier| !identifier.is_empty());
     identifiers.sort_by_key(|identifier| std::cmp::Reverse(identifier.len()));
     identifiers
@@ -170,9 +175,11 @@ fn connection_identifiers() -> Vec<String> {
 /// replaced.
 fn redact(error: &anyhow::Error, identifiers: &[String]) -> anyhow::Error {
     let mut message = format!("{error:#}");
+
     for identifier in identifiers {
         message = message.replace(identifier.as_str(), "<redacted>");
     }
+
     anyhow::anyhow!(message)
 }
 
@@ -184,9 +191,11 @@ async fn connect() -> Result<PgConnection> {
     let mut options = PgConnectOptions::from_str(url.expose_secret())
         .with_context(|| format!("{DATABASE_URL_ENV} is not a valid Postgres URL"))?
         .application_name(APPLICATION_NAME);
+
     if let Ok(path) = env::var(SSL_ROOT_CERT_ENV) {
         options = options.ssl_root_cert(path);
     }
+
     require_verified_tls(options.get_host(), options.get_ssl_mode())?;
     require_session_connection(options.get_port())?;
     PgConnection::connect_with(&options)
@@ -202,6 +211,7 @@ mod tests {
     fn remote_hosts_require_verify_full() {
         let host = "pooler.example.com";
         assert!(require_verified_tls(host, PgSslMode::VerifyFull).is_ok());
+
         for mode in [
             PgSslMode::Disable,
             PgSslMode::Allow,
@@ -218,6 +228,7 @@ mod tests {
         for host in ["localhost", "127.0.0.1", "::1", "[::1]", "/var/run/postgresql"] {
             assert!(require_verified_tls(host, PgSslMode::Disable).is_ok(), "{host}");
         }
+
         // A name that merely starts like a loopback host is remote.
         assert!(require_verified_tls("localhost.example.com", PgSslMode::Require).is_err());
         assert!(require_verified_tls("127.0.0.1.example.com", PgSslMode::Require).is_err());

@@ -366,6 +366,7 @@ where
     .await?;
 
     let mut table_schemas = HashMap::new();
+
     for row in rows {
         let table_oid: SqlxTableId = row.get("table_id");
         let table_id = TableId::new(table_oid.0);
@@ -473,6 +474,7 @@ where
 
     let mut table_ids = Vec::with_capacity(retention_snapshot_ids.len());
     let mut retention_snapshot_id_values = Vec::with_capacity(retention_snapshot_ids.len());
+
     for (table_id, retention_snapshot_id) in retention_snapshot_ids {
         table_ids.push(SqlxTableId(table_id.into_inner()));
         retention_snapshot_id_values.push(retention_snapshot_id.to_string());

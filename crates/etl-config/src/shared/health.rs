@@ -52,6 +52,7 @@ impl Validate for ReplicatorHealthConfig {
                 });
             }
         }
+
         Ok(())
     }
 }

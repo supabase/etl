@@ -74,6 +74,7 @@ impl GitHubClient {
         if !is_github_api_url(url) {
             bail!("Refusing to send GitHub credentials to a non-API URL");
         }
+
         self.send(url, &[], Some(max_body_bytes)).await
     }
 
@@ -112,6 +113,7 @@ impl GitHubClient {
 
         let mut body = Vec::new();
         let mut truncated = false;
+
         while let Some(chunk) = response
             .chunk()
             .await
@@ -124,6 +126,7 @@ impl GitHubClient {
                 truncated = true;
                 break;
             }
+
             body.extend_from_slice(&chunk);
         }
 
@@ -174,6 +177,7 @@ impl GitHubResponse {
         if !self.status.is_success() {
             bail!("{operation} failed with HTTP status {}", self.status);
         }
+
         Ok(self)
     }
 
@@ -226,6 +230,7 @@ mod tests {
         assert!(is_github_api_url(
             "https://api.github.com/repos/supabase/etl/actions/artifacts/1/zip"
         ));
+
         for url in [
             "https://api.github.com.example.org/repos/x",
             "https://api.github.com@example.org/repos/x",
@@ -256,6 +261,7 @@ mod tests {
             ),
             Some("https://api.github.com/x?page=3")
         );
+
         for link in ["", "<https://api.github.com/x?page=1>; rel=\"prev\"", "garbage; rel=\"next\""]
         {
             assert_eq!(parse_next_link(link), None, "{link}");

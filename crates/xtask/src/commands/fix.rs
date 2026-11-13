@@ -2,9 +2,9 @@ use anyhow::Result;
 use clap::Args;
 use xshell::{Shell, cmd};
 
-use crate::utils::{
-    CargoFeatureSelection, DefaultFeatureBehavior, DestinationPreset, NIGHTLY_TOOLCHAIN,
-    maybe_with_sccache,
+use crate::{
+    commands::fmt::{FormatMode, format_workspace},
+    utils::{CargoFeatureSelection, DefaultFeatureBehavior, DestinationPreset, maybe_with_sccache},
 };
 
 #[derive(Args)]
@@ -46,10 +46,7 @@ impl FixArgs {
         maybe_with_sccache(clippy, sccache).run()?;
 
         println!("[fmt]");
-        let toolchain = std::env::var("RUSTFMT_NIGHTLY_TOOLCHAIN")
-            .unwrap_or_else(|_| NIGHTLY_TOOLCHAIN.to_owned());
-        let toolchain = format!("+{toolchain}");
-        cmd!(sh, "cargo {toolchain} fmt --all").run()?;
+        format_workspace(&sh, FormatMode::Write)?;
 
         println!("[sort]");
         cmd!(sh, "cargo sort --workspace --grouped").run()?;

@@ -754,5 +754,6 @@ async fn unowned_table_runs(first: ClickHouseEngine, second: ClickHouseEngine) {
         TableState::Errored { reason, .. } => reason,
         other => panic!("expected Errored state, got {other:?}"),
     };
+
     assert!(reason.contains("ClickHouse destination table already exists"), "{reason}");
 }

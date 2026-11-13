@@ -54,6 +54,7 @@ impl TableSchemaSnapshots {
     /// Replaces all stored schema snapshots with the supplied values.
     pub(crate) fn replace_all(&mut self, table_schemas: impl IntoIterator<Item = TableSchema>) {
         self.table_schemas.clear();
+
         for table_schema in table_schemas {
             self.insert(table_schema);
         }
@@ -194,9 +195,11 @@ mod tests {
         for snapshot_id in [0, 100, 200, 300] {
             snapshots.insert(test_schema(table_id, snapshot_id));
         }
+
         for snapshot_id in [0, 150] {
             snapshots.insert(test_schema(other_table_id, snapshot_id));
         }
+
         snapshots.insert(test_schema(untouched_table_id, 0));
 
         let removed = snapshots.prune(&BTreeMap::from([
@@ -289,6 +292,7 @@ mod tests {
             .prune(&BTreeMap::from([(table_id, SnapshotId::before_lsn(PgLsn::from(300)))]));
         assert_eq!(removed, 1);
         assert_eq!(snapshots.snapshots_count(table_id), 4);
+
         for snapshot_id in [predecessor, first_message, second_message, later_transaction] {
             assert_eq!(
                 snapshots.get_at_or_before(table_id, snapshot_id).unwrap().snapshot_id,
@@ -303,6 +307,7 @@ mod tests {
         assert_eq!(removed, 2);
         assert_eq!(snapshots.snapshots_count(table_id), 2);
         assert!(snapshots.get_at_or_before(table_id, first_message).is_none());
+
         for snapshot_id in [second_message, later_transaction] {
             assert_eq!(
                 snapshots.get_at_or_before(table_id, snapshot_id).unwrap().snapshot_id,

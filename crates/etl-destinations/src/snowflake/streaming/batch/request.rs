@@ -98,12 +98,14 @@ impl OpenRequest {
         if self.unflushed + incoming < self.limits.flush_interval {
             return Ok(false);
         }
+
         if let Body::Streaming(encoder) = &mut self.body
             && let Err(error) = encoder.flush()
         {
             let overflowed = encoder.get_ref().overflow().is_some();
             return Err(self.body_write_error("stream flush", overflowed, error));
         }
+
         self.unflushed = 0;
         Ok(true)
     }
@@ -115,19 +117,23 @@ impl OpenRequest {
             let Body::Idle(buffer) = mem::replace(&mut self.body, Body::Transitioning) else {
                 unreachable!("body state checked above");
             };
+
             // The encoder writes nothing until the first row arrives.
             let encoder = Encoder::new(buffer, BASE_COMPRESSION_LEVEL).map_err(|error| {
                 Error::Encoding(format!("Stream frame compressor start failed: {error}"))
             })?;
             self.body = Body::Streaming(encoder);
         }
+
         let Body::Streaming(encoder) = &mut self.body else {
             unreachable!("body is streaming after the idle check");
         };
+
         if let Err(error) = encoder.write_all(serialized) {
             let overflowed = encoder.get_ref().overflow().is_some();
             return Err(self.body_write_error("stream write", overflowed, error));
         }
+
         self.unflushed += serialized.len();
         self.admit(offset);
         Ok(())
@@ -139,9 +145,11 @@ impl OpenRequest {
         if !matches!(self.body, Body::Streaming(_)) {
             return Ok(());
         }
+
         let Body::Streaming(encoder) = mem::replace(&mut self.body, Body::Transitioning) else {
             unreachable!("body state checked above");
         };
+
         match encoder.try_finish() {
             Ok(buffer) => {
                 self.body = Body::Idle(buffer);
@@ -161,13 +169,16 @@ impl OpenRequest {
     /// Appends a complete row frame after closing the stream frame.
     pub(super) fn append_frame(&mut self, frame: &[u8], offset: &OffsetToken) -> Result<()> {
         self.close_stream_frame()?;
+
         let Body::Idle(buffer) = &mut self.body else {
             unreachable!("body is idle after closing the stream frame");
         };
+
         if let Err(error) = buffer.write_all(frame) {
             let overflowed = buffer.overflow().is_some();
             return Err(self.body_write_error("frame append", overflowed, error));
         }
+
         self.admit(offset);
         Ok(())
     }
@@ -175,9 +186,11 @@ impl OpenRequest {
     /// Completes the request. Returns `None` when no row was admitted.
     pub(super) fn finish(mut self) -> Result<Option<RowBatch>> {
         self.close_stream_frame()?;
+
         let Body::Idle(buffer) = mem::replace(&mut self.body, Body::Transitioning) else {
             unreachable!("body is idle after closing the stream frame");
         };
+
         match self.offset_range.take() {
             Some(offset_range) if self.row_count > 0 => Ok(Some(RowBatch::new(
                 Bytes::from(buffer.into_bytes()),

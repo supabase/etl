@@ -64,6 +64,7 @@ fn spawn_health_server(
     let Some(health_config) = health_config else {
         return Ok(None);
     };
+
     let listener = bind_listener(health_config.port)?;
 
     debug!(

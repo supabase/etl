@@ -342,6 +342,7 @@ where
             debug!("waiting for table sync workers to complete");
             pool.wait_all(&force_stop).await
         };
+
         tokio::pin!(workers);
 
         // Keep ownership of the completion future through escalation. Dropping
@@ -502,6 +503,7 @@ where
         // The purging doesn't delete any data in the destination, it just
         // removes internal state for that table.
         let publication_set: HashSet<TableId> = publication_table_ids.iter().copied().collect();
+
         for &table_id in table_states.keys() {
             if !publication_set.contains(&table_id) {
                 info!(

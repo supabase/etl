@@ -484,6 +484,7 @@ impl MemoryMonitor {
             if current.total != snapshot.total {
                 self.inner.capacity_revision.fetch_add(1, Ordering::Relaxed);
             }
+
             *current = snapshot;
 
             previous_source
@@ -711,6 +712,7 @@ mod tests {
             assert_eq!(monitor.capacity_revision(), capacity.revision);
 
             let rendered = metrics.render();
+
             for metric in [ETL_MEMORY_USED_BYTES, ETL_MEMORY_TOTAL_BYTES] {
                 assert!(rendered.lines().any(|line| {
                     line.starts_with(&format!("{metric}{{")) && line.ends_with(" -1")

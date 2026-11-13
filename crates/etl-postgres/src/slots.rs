@@ -149,6 +149,7 @@ impl TryFrom<&str> for EtlReplicationSlot {
             if pipeline_id_str.is_empty() {
                 return Err(EtlReplicationSlotError::InvalidSlotName(slot_name.to_owned()));
             }
+
             let table_oid: Oid = table_id_str
                 .parse()
                 .ok()
@@ -216,6 +217,7 @@ pub async fn delete_pipeline_replication_slots(
         warn!(%pipeline_id, "could not derive apply-worker replication slot name during cleanup");
         return Ok(());
     };
+
     let Ok(table_sync_prefix) = EtlReplicationSlot::table_sync_prefix(&pipeline_id) else {
         warn!(%pipeline_id, "could not derive table-sync replication slot prefix during cleanup");
         return Ok(());
@@ -311,6 +313,7 @@ mod tests {
         for id in ["1", "00150", "03dg2o5teb2eucxr9ggh3uie6", "_", "_a", "a_"] {
             validate_pipeline_id(id).unwrap();
         }
+
         for id in ["", "A", "pipeline-example", "a.b", "a/b", "a b", "a\0b", "é"] {
             validate_pipeline_id(id).unwrap_err();
         }

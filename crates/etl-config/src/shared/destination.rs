@@ -944,15 +944,19 @@ mod tests {
             "catalog_url": "postgres://placeholder@direct.example.com/catalog",
             "data_path": "s3://example-bucket/"
         }});
+
         for pooler in [None, Some("postgres://placeholder@pooler.example.com:6543/catalog")] {
             json["ducklake"]["catalog_pooler_url"] = serde_json::json!(pooler);
             let config: DestinationConfig = serde_json::from_value(json.clone()).unwrap();
             assert!(!format!("{config:?}").contains("pooler.example.com"));
+
             let DestinationConfig::Ducklake { catalog_pooler_url, .. } = config else {
                 unreachable!();
             };
+
             assert_eq!(catalog_pooler_url.is_some(), pooler.is_some());
         }
+
         json["ducklake"].as_object_mut().unwrap().remove("catalog_pooler_url");
         let config: DestinationConfig = serde_json::from_value(json).unwrap();
         assert!(matches!(config, DestinationConfig::Ducklake { catalog_pooler_url: None, .. }));
@@ -1073,9 +1077,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.tables.len(), 2);
+
         let DuckLakeSortBy::Columns { columns } = &config.tables[0].sort_by else {
             panic!("Expected explicit columns");
         };
+
         assert_eq!(columns[0].direction, DuckLakeSortDirection::Asc);
         assert_eq!(columns[0].nulls, None);
         assert_eq!(columns[1].direction, DuckLakeSortDirection::Desc);

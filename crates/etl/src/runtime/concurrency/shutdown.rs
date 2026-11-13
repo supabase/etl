@@ -57,10 +57,12 @@ mod tests {
     #[tokio::test]
     async fn completion_preserves_success_and_failure() {
         let token = CancellationToken::new();
+
         for output in [Ok(7), Err("Test failure")] {
             let ShutdownResult::Ok(actual) = with_shutdown!(async { output }, token) else {
                 panic!("Unexpected shutdown");
             };
+
             assert_eq!(actual, output);
         }
     }
@@ -70,6 +72,7 @@ mod tests {
     async fn cancellation_takes_priority_without_polling_ready_work() {
         let token = CancellationToken::new();
         token.cancel();
+
         for _ in 0..2 {
             let result =
                 with_shutdown!(async { panic!("Cancelled work must not be polled") }, token);
@@ -88,6 +91,7 @@ mod tests {
             started_tx.send(()).unwrap();
             std::future::pending::<()>().await;
         };
+
         let waiting = async { with_shutdown!(future, token) };
         tokio::pin!(waiting);
         tokio::select! {

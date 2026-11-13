@@ -13,6 +13,9 @@ k8s-openapi = { workspace = true, features = ["latest"] }
 kube = { workspace = true, features = ["client", "derive", "rustls-tls", "ring"] }
 pg_escape = { workspace = true }
 quick-xml = "0.41.0"
+# A 0.0.x requirement is an exact pin: rust-analyzer breaks the API in most
+# releases, and 0.0.350 and later need a newer Rust than our 1.95 toolchain.
+ra_ap_syntax = "0.0.349"
 reqwest = { workspace = true, features = ["rustls-tls", "json"] }
 schemars = "1.2.1"
 secrecy = { workspace = true }

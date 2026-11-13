@@ -122,12 +122,14 @@ impl StreamClient for LostAppendResponse {
     ) -> Result<InsertRowsResponse> {
         let response =
             self.inner.insert_rows(database, schema, table, channel, batch, continuation).await?;
+
         if self.lose_next_response.swap(false, Ordering::SeqCst) {
             return Err(Error::HttpStatus {
                 status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
                 body: String::new(),
             });
         }
+
         Ok(response)
     }
 
@@ -283,6 +285,7 @@ fn status_default_schema(
     default_expression: Option<&str>,
 ) -> TableSchema {
     let mut status_column = ColumnSchema::new("status".to_owned(), Type::TEXT, -1, 2, true);
+
     if let Some(default_expression) = default_expression {
         status_column = status_column.with_default_expression(default_expression.to_owned());
     }
@@ -356,6 +359,7 @@ async fn boundary_underscore_names_survive_destination_lifecycle() {
 
     with_table_cleanup(&harness.sql, &cleanup_names, || async {
         let mut original_metadata = Vec::new();
+
         // Independent tables can commit while the remaining copies are
         // submitted.
         for ((schema, _), name) in cases.iter().zip(&names) {
@@ -402,6 +406,7 @@ async fn boundary_underscore_names_survive_destination_lifecycle() {
                 harness.store.get_destination_table_metadata(schema.id()).await.unwrap().is_none()
             );
         }
+
         harness.destination.shutdown().await.unwrap();
 
         let restarted = Destination::new(
@@ -428,12 +433,14 @@ async fn boundary_underscore_names_survive_destination_lifecycle() {
             .await
             .unwrap();
         assert_eq!(status, DestinationWriteStatus::Durable);
+
         for ((schema, _), metadata) in cases.iter().zip(&original_metadata) {
             assert_eq!(
                 harness.store.get_destination_table_metadata(schema.id()).await.unwrap().as_ref(),
                 Some(metadata)
             );
         }
+
         for name in &names {
             let rows = query_rows(
                 &harness.sql,
@@ -478,6 +485,7 @@ async fn boundary_underscore_names_survive_destination_lifecycle() {
             .await
             .unwrap();
         assert_eq!(rows, vec![vec![serde_json::json!("recopied")]]);
+
         for name in names.iter().skip(1) {
             let rows = query_rows(
                 &harness.sql,
@@ -617,6 +625,7 @@ async fn replay_of_accepted_rows_uses_remote_committed_offset() {
         )
         .await;
         assert_eq!(rows.len(), 3);
+
         for (index, row) in rows.iter().enumerate() {
             let ordinal = u64::try_from(index + 1).unwrap();
             assert_eq!(row[0], json!(ordinal.to_string()));
@@ -696,6 +705,7 @@ async fn assert_lost_append_response_recovery(recovery_outage: bool) {
                     })
                 })
                 .collect();
+
             if accepted_prefix {
                 assert_eq!(
                     invoke_write_events(
@@ -708,6 +718,7 @@ async fn assert_lost_append_response_recovery(recovery_outage: bool) {
                     DestinationWriteStatus::Accepted
                 );
             }
+
             stream.lose_next_response.store(true, Ordering::SeqCst);
             invoke_write_events(
                 &destination,
@@ -723,6 +734,7 @@ async fn assert_lost_append_response_recovery(recovery_outage: bool) {
                     .store(if accepted_prefix { 2 } else { 0 }, Ordering::SeqCst);
                 stream.open_failures_remaining.store(2, Ordering::SeqCst);
             }
+
             assert_eq!(
                 invoke_write_events(&destination, WriteEventsDurability::RequireDurable, events)
                     .await
@@ -978,6 +990,7 @@ async fn resync_after_source_name_swap(cold_client: bool) {
             } else {
                 None
             };
+
             let destination = restarted.as_ref().unwrap_or(&harness.destination);
 
             let metadata = harness
@@ -1042,6 +1055,7 @@ async fn resync_after_source_name_swap(cold_client: bool) {
 
             write_table_copy_and_wait(destination, &replacement_copy, vec![replacement_row]).await;
             etl::destination::Destination::shutdown(destination).await.unwrap();
+
             for (table_id, table_name, expected_id, expected_name) in [
                 (original_id, archived_destination.as_str(), "1", "kept"),
                 (replacement_id, original_destination.as_str(), "2", "replacement"),
@@ -2392,6 +2406,7 @@ fn json_null_row(id: i32, scalar: Cell, array: Cell) -> TableRow {
 fn assert_json_null_observation(row: &Value, scalar: &Cell, array: &Cell) {
     for label in ["json", "jsonb", "defaulted"] {
         let observed = &row[label];
+
         match scalar {
             Cell::Null => {
                 assert_eq!(observed["sql_null"], true);
@@ -2409,6 +2424,7 @@ fn assert_json_null_observation(row: &Value, scalar: &Cell, array: &Cell) {
             _ => unreachable!("test scalar fixtures contain only SQL NULL or JSON"),
         }
     }
+
     match array {
         Cell::Null => assert_eq!(row["array"]["sql_null"], true),
         Cell::Array(ArrayCell::Json(elements)) => {
@@ -2418,6 +2434,7 @@ fn assert_json_null_observation(row: &Value, scalar: &Cell, array: &Cell) {
                 serde_json::from_str::<Value>(row["array"]["json"].as_str().unwrap()).unwrap(),
                 json!(elements)
             );
+
             for (index, element) in elements.iter().enumerate() {
                 assert_eq!(row["array"]["elements"][index]["sql_null"], false);
                 assert_eq!(
@@ -2553,6 +2570,7 @@ async fn json_null_preservation_and_legacy_defaults() {
                     .unwrap_err();
             assert_eq!(error.kind(), ErrorKind::NullValuesNotSupportedInArrayInDestination);
         }
+
         assert_eq!(
             restarted.fetch_committed_offset(schema.id()).await.unwrap(),
             Some(first_copy_request_offset())
@@ -2571,6 +2589,7 @@ async fn json_null_preservation_and_legacy_defaults() {
             .map(|(index, (operation, scalar, array))| {
                 let tx_ordinal = u64::try_from(index).unwrap() + 1;
                 let row = json_null_row(10, scalar.clone(), array.clone());
+
                 match *operation {
                     "insert" => Event::Insert(InsertEvent {
                         commit_lsn,
@@ -2655,6 +2674,7 @@ async fn json_null_preservation_and_legacy_defaults() {
         let streamed: Vec<_> =
             observations.iter().filter(|row| row["origin"] == "stream").collect();
         assert_eq!(streamed.len(), cases.len() + cdc_cases.len());
+
         for (index, (scalar, array)) in cases.iter().enumerate() {
             let row = streamed[index];
             assert_eq!(row["id"], i32::try_from(index).unwrap() + 1);
@@ -2662,6 +2682,7 @@ async fn json_null_preservation_and_legacy_defaults() {
             assert_eq!(row["sequence"], OffsetToken::zero().as_ref());
             assert_json_null_observation(row, scalar, array);
         }
+
         for (index, (row, (operation, scalar, array))) in
             streamed[cases.len()..].iter().zip(&cdc_cases).enumerate()
         {
@@ -2674,6 +2695,7 @@ async fn json_null_preservation_and_legacy_defaults() {
             assert_json_null_observation(row, scalar, array);
         }
     };
+
     let outcome = std::panic::AssertUnwindSafe(async {
         tokio::time::timeout(Duration::from_secs(120), test).await.unwrap();
     })
@@ -2682,6 +2704,7 @@ async fn json_null_preservation_and_legacy_defaults() {
 
     // Cleanup is attempted after success, panic, or the bounded probe timeout.
     let mut shutdown_ok = true;
+
     for destination in [&harness.destination, &restarted] {
         shutdown_ok &= tokio::time::timeout(
             Duration::from_secs(15),
@@ -2690,6 +2713,7 @@ async fn json_null_preservation_and_legacy_defaults() {
         .await
         .is_ok_and(|result| result.is_ok());
     }
+
     for suffix in ["_CURRENT", "_CURRENT_PENDING"] {
         let view = format!("{sf_table}{suffix}");
         let quote = crate::snowflake::common::quote;
@@ -2704,11 +2728,13 @@ async fn json_null_preservation_and_legacy_defaults() {
             .await
             .unwrap();
     }
+
     let dropped = harness.sql.drop_table(&sf_table).await;
     let absent = harness.sql.table_exists(&sf_table).await.map(|exists| !exists);
     assert!(shutdown_ok);
     assert!(dropped.is_ok());
     assert!(absent.unwrap());
+
     if let Err(panic) = outcome {
         std::panic::resume_unwind(panic);
     }

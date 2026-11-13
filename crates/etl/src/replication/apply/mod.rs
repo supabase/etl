@@ -555,6 +555,7 @@ impl OpenTransaction {
     /// Returns and advances the next transaction-local ordinal.
     fn next_ordinal(&mut self) -> u64 {
         let ordinal = self.next_ordinal;
+
         self.next_ordinal = match self.next_ordinal.checked_add(1) {
             Some(next_ordinal) => next_ordinal,
             None => {
@@ -869,6 +870,7 @@ impl ApplyLoopState {
                 accepted_at: completed_at,
             });
         }
+
         // Accepted work is not checkpointable yet. Carry its commit boundary
         // into a later write so a cumulative Durable result can confirm it,
         // preserving any newer commit boundary already buffered.
@@ -1199,6 +1201,7 @@ where
         ) else {
             return Ok(ApplyLoopResult::Paused);
         };
+
         let ((replication_message_stream, feedback), wal_sender_timeout) = initialized?;
 
         // PostgreSQL replays a transaction whose commit record starts exactly
@@ -1236,6 +1239,7 @@ where
         );
 
         let mut table_decoding_states = HashMap::new();
+
         if let Some(replicated_table_schema) = initial_replicated_table_schema {
             // Only the table-sync worker supplies this schema. It seeds catchup
             // with the same snapshot `0:0` and publication/identity masks used
@@ -1347,6 +1351,7 @@ where
         if !build_error_handling_policy(&error).should_retry() {
             return error;
         }
+
         let Some(pending_flush_result) = pending_flush_result else {
             return error;
         };
@@ -1823,6 +1828,7 @@ where
             // An applying schema change may still need both endpoints for
             // recovery, so retain from the earlier destination snapshot.
             let destination_snapshot_id = destination_table_metadata.snapshot_id();
+
             let destination_retention_snapshot_id = match destination_table_metadata.table_schema()
             {
                 DestinationTableSchema::Applying { previous_snapshot_id, .. } => {
@@ -1927,6 +1933,7 @@ where
             match status {
                 DestinationWriteStatus::Accepted => {
                     self.state.record_accepted_write(metadata, completed_at);
+
                     #[cfg(feature = "failpoints")]
                     if let Some(interval) = self.state.pending_durability_interval.as_mut()
                         && etl_fail_point_active_for_parameter(
@@ -2156,6 +2163,7 @@ where
         } else {
             WriteEventsDurability::MayDefer
         };
+
         self.dispatch_write_events(event_batch, durability, reason).await
     }
 
@@ -2199,6 +2207,7 @@ where
         if !self.state.can_settle_idle_durability() {
             return Ok(());
         }
+
         if let Some(minimum_ms) = self.config.settle_durable_interval_ms
             && let Some(interval) = self.state.pending_durability_interval
             && interval.accepted_at.elapsed() < Duration::from_millis(minimum_ms)
@@ -3197,6 +3206,7 @@ where
 
         // Collect the replicated schemas for tables this worker currently owns.
         let mut truncated_tables = Vec::with_capacity(message.rel_ids().len());
+
         for &rel_id in message.rel_ids() {
             let table_id = TableId::new(rel_id);
 
@@ -3890,6 +3900,7 @@ mod apply_worker {
         // state evaluation and persists its next candidate.
         let persisted_checkpoint_lsn =
             ctx.store.get_replication_checkpoint(WorkerType::Apply).await?;
+
         for (table_id, table_state) in syncing_tables {
             process_single_syncing_table_after_flush(
                 ctx,
@@ -4072,6 +4083,7 @@ mod apply_worker {
         // state evaluation and persists its next candidate.
         let persisted_checkpoint_lsn =
             ctx.store.get_replication_checkpoint(WorkerType::Apply).await?;
+
         for (table_id, table_state) in syncing_tables {
             let exit_intent = process_single_syncing_table_when_quiescent(
                 ctx,
@@ -4859,6 +4871,7 @@ mod tests {
         else {
             panic!("expected pending relation state");
         };
+
         assert_eq!(snapshot_id, second_pending_snapshot_id);
         let pending_schema = previous_relation_masks.materialize(second_table_schema);
         assert_eq!(pending_schema.inner().snapshot_id, second_pending_snapshot_id);
@@ -4918,6 +4931,7 @@ mod tests {
 
         state.update_last_commit_end_lsn(Some(400.into()));
         metadata.dispatched_at = Instant::now();
+
         for commit in [None, Some(300.into())] {
             metadata.commit_end_lsn = commit;
             state.record_accepted_write(&metadata, Instant::now());
@@ -5132,11 +5146,13 @@ mod tests {
                                     b'n' => false,
                                     _ => identity[index],
                                 };
+
                                 (name.clone(), typ.clone(), flagged)
                             })
                             .collect();
 
                         let mut stored_columns = current;
+
                         match stale {
                             StaleSnapshot::Current => {}
                             StaleSnapshot::ColumnAdded(index) => {
@@ -5195,6 +5211,7 @@ mod tests {
             bytes.put_slice(b"t\0");
             bytes.put_u8(case.replica_identity);
             bytes.put_i16(i16::try_from(case.relation_columns.len()).unwrap());
+
             for (name, typ, flagged) in &case.relation_columns {
                 bytes.put_i8(i8::from(*flagged));
                 bytes.put_slice(name.as_bytes());
@@ -5202,6 +5219,7 @@ mod tests {
                 bytes.put_i32(i32::try_from(typ.oid()).unwrap());
                 bytes.put_i32(-1);
             }
+
             bytes.freeze()
         }
 
@@ -5213,6 +5231,7 @@ mod tests {
             else {
                 panic!("encoded relation should parse as a relation message");
             };
+
             body
         }
 
@@ -5263,6 +5282,7 @@ mod tests {
                 })
                 .collect();
             prop_assert_eq!(mismatch.is_some(), decoder_columns != relation_columns);
+
             if mismatch.is_some() {
                 return Ok(());
             }

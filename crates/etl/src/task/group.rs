@@ -142,6 +142,7 @@ mod tests {
             while !failed.is_finished() {
                 tokio::task::yield_now().await;
             }
+
             let (started_tx, started_rx) = oneshot::channel();
             let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
             let (lifetime_tx, lifetime_rx) = oneshot::channel::<()>();
@@ -209,6 +210,7 @@ mod tests {
             while !task.is_finished() {
                 tokio::task::yield_now().await;
             }
+
             let joined = abort_and_join_result(AbortOnDropHandle::new(task)).await;
             assert_eq!(joined.map_err(|error| error.kind()), result.map_err(|error| error.kind()));
         }
@@ -217,6 +219,7 @@ mod tests {
         while !task.is_finished() {
             tokio::task::yield_now().await;
         }
+
         let error = abort_and_join_result(AbortOnDropHandle::new(task)).await.unwrap_err();
         assert_eq!(error.kind(), ErrorKind::TaskPanic);
         assert!(std::error::Error::source(&error).is_some());

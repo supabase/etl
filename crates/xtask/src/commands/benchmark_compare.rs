@@ -220,6 +220,7 @@ impl BenchmarkCompareArgs {
         })?;
         let output =
             self.output.clone().unwrap_or_else(|| self.current_dir.join("benchmark-comparison.md"));
+
         let comparison = match self.previous_source().await? {
             Some(previous) => compare_reports(
                 &previous.reports,
@@ -238,9 +239,11 @@ impl BenchmarkCompareArgs {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
+
         fs::write(&output, format!("{}\n", comparison.markdown))
             .with_context(|| format!("failed to write {}", output.display()))?;
         println!("{}", comparison.markdown);
+
         // Surface regressions as workflow annotations without failing the job.
         if env::var("GITHUB_ACTIONS").is_ok_and(|value| value == "true") {
             for regression in &comparison.regressions {
@@ -300,6 +303,7 @@ impl BenchmarkCompareArgs {
                 workflow_runs(client, &self.workflow, &context.ref_name, &context.event_name, page)
                     .await?;
             let last_page = runs.len() < RUNS_PER_PAGE;
+
             for run in runs {
                 // One failed destination job fails the whole run, so the run
                 // conclusion is not checked. Only successful jobs upload the
@@ -328,6 +332,7 @@ impl BenchmarkCompareArgs {
                 })?;
                 let code_compare =
                     code_compare(&context.repo, &run, context.current_sha.as_deref());
+
                 return Ok(Some((reports, run, code_compare)));
             }
 
@@ -408,6 +413,7 @@ async fn download_artifact(client: &GitHubClient, url: &str, output_path: &Path)
     if response.truncated() {
         bail!("benchmark artifact exceeds {MAX_ARTIFACT_BYTES} bytes");
     }
+
     fs::write(output_path, response.into_body())
         .with_context(|| format!("failed to write {}", output_path.display()))
 }
@@ -467,6 +473,7 @@ fn compare_reports(
 ) -> Comparison {
     let mut lines = vec!["## 📈 Benchmark comparison".to_owned(), String::new()];
     let mut regressions = Vec::new();
+
     if let Some(previous_run) = previous_run {
         lines.push(format!(
             "Compared with previous successful run [#{}]({}) at `{}`.",
@@ -474,6 +481,7 @@ fn compare_reports(
             previous_run.html_url,
             previous_run.head_sha.as_deref().map_or("unknown commit", short_sha)
         ));
+
         if let Some(code_compare) = code_compare {
             lines.push(format!(
                 "Code diff: [`{}...{}`]({}).",
@@ -485,6 +493,7 @@ fn compare_reports(
     } else {
         lines.push("Compared with local previous benchmark results.".to_owned());
     }
+
     lines.push(String::new());
 
     let common_benchmarks = previous_reports
@@ -511,10 +520,12 @@ fn compare_reports(
         lines.push(String::new());
         lines.push("| Metric | Previous | Current | Change | Result |".to_owned());
         lines.push("| --- | ---: | ---: | ---: | --- |".to_owned());
+
         for metric in metrics_for(&benchmark) {
             let Some(previous_value) = previous.get(metric.key) else {
                 continue;
             };
+
             let Some(current_value) = current.get(metric.key) else {
                 continue;
             };
@@ -534,7 +545,9 @@ fn compare_reports(
         } else {
             Vec::new()
         };
+
         lines.push(String::new());
+
         if changes.is_empty() {
             if benchmark_regressions.is_empty() {
                 lines.push("✅ No regressions beyond thresholds.".to_owned());
@@ -543,9 +556,11 @@ fn compare_reports(
                     "🚨 Regressions beyond thresholds (advisory; the job does not fail):"
                         .to_owned(),
                 );
+
                 for regression in &benchmark_regressions {
                     lines.push(format!("- 🚨 {regression}"));
                 }
+
                 regressions.extend(benchmark_regressions);
             }
         } else {
@@ -553,6 +568,7 @@ fn compare_reports(
                 "⚠️ Regression check skipped because benchmark configuration differs.".to_owned(),
             );
         }
+
         lines.push(String::new());
     }
 
@@ -566,9 +582,11 @@ fn compare_reports(
         .filter(|benchmark| !previous_reports.contains_key(*benchmark))
         .cloned()
         .collect::<Vec<_>>();
+
     if !previous_only.is_empty() {
         lines.push(format!("ℹ️ Previous-only reports: {}.", previous_only.join(", ")));
     }
+
     if !current_only.is_empty() {
         lines.push(format!("ℹ️ Current-only reports: {}.", current_only.join(", ")));
     }
@@ -656,6 +674,7 @@ fn regression_failure(
         RegressionPolicy::HigherIsBetter { max_drop_pct } => {
             let previous = numeric_value(previous)?;
             let current = numeric_value(current)?;
+
             if previous <= 0.0 {
                 return None;
             }
@@ -675,6 +694,7 @@ fn regression_failure(
         RegressionPolicy::LowerIsBetter { max_increase_pct } => {
             let previous = numeric_value(previous)?;
             let current = numeric_value(current)?;
+
             if previous <= 0.0 {
                 return None;
             }
@@ -699,6 +719,7 @@ fn format_delta(previous: &Value, current: &Value) -> String {
     let Some(previous) = numeric_value(previous) else {
         return String::new();
     };
+
     let Some(current) = numeric_value(current) else {
         return String::new();
     };
@@ -723,9 +744,11 @@ fn format_change_result(
             let Some(previous) = numeric_value(previous) else {
                 return "";
             };
+
             let Some(current) = numeric_value(current) else {
                 return "";
             };
+
             if current > previous {
                 "✅ better"
             } else if current < previous {
@@ -747,9 +770,11 @@ fn format_change_result(
             let Some(previous) = numeric_value(previous) else {
                 return "";
             };
+
             let Some(current) = numeric_value(current) else {
                 return "";
             };
+
             if current < previous {
                 "✅ better"
             } else if current > previous {

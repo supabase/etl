@@ -151,19 +151,23 @@ where
                 if rows.contains_key(&id) {
                     return Err(MaterializeError::DuplicateKey { id: format!("{id:?}") });
                 }
+
                 rows.insert(id, insert.table_row.clone());
             }
             Event::Update(update) if update.replicated_table_schema.id() == table_id => {
                 let old_id = update_old_id::<T>(update)?;
                 let base = rows.remove(&old_id).ok_or_else(|| missing_key("Update", &old_id))?;
+
                 let new_row = match &update.updated_table_row {
                     UpdatedTableRow::Full(row) => row.clone(),
                     UpdatedTableRow::Partial(partial) => merge_partial_row(Some(&base), partial),
                 };
+
                 let new_id = full_row_id::<T>(&new_row)?;
                 if rows.contains_key(&new_id) {
                     return Err(MaterializeError::DuplicateKey { id: format!("{new_id:?}") });
                 }
+
                 rows.insert(new_id, new_row);
             }
             Event::Delete(delete) if delete.replicated_table_schema.id() == table_id => {
@@ -223,6 +227,7 @@ mod tests {
             let [Cell::I64(id), note, Cell::I32(counter)] = table_row.values() else {
                 return None;
             };
+
             let note = match note {
                 Cell::Null => None,
                 Cell::String(note) => Some(note.clone()),

@@ -1,3 +1,5 @@
+mod blank_lines;
+
 use std::ffi::{OsStr, OsString};
 
 use anyhow::Result;
@@ -13,20 +15,32 @@ const ARG_SEPARATOR: &str = "--";
 /// Rustfmt check-mode argument.
 const CHECK_ARG: &str = "--check";
 
-/// Arguments for formatting the workspace with the pinned nightly rustfmt.
+/// Whether formatting rewrites files or only reports what would change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FormatMode {
+    /// Rewrite files in place.
+    Write,
+    /// Fail without modifying files if any file is not formatted.
+    Check,
+}
+
+/// Arguments for formatting the workspace with the pinned nightly rustfmt and
+/// the blank-line pass.
 #[derive(Args)]
 pub(crate) struct FmtArgs {
     /// Check formatting without modifying files.
     #[arg(long)]
     check: bool,
 
-    /// Arguments passed through to `cargo fmt`.
+    /// Arguments passed through to `cargo fmt`. The blank-line pass always
+    /// covers the whole workspace.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<OsString>,
 }
 
 impl FmtArgs {
-    /// Runs `cargo fmt --all` with the pinned nightly formatter toolchain.
+    /// Runs `cargo fmt --all` with the pinned nightly formatter toolchain,
+    /// then the blank-line pass.
     pub(crate) fn run(self) -> Result<()> {
         let sh = Shell::new()?;
         let FmtArgs { check, args: _ } = self;
@@ -35,21 +49,39 @@ impl FmtArgs {
         // calls like `cargo x fmt -- --config max_width=100` keep matching the
         // deleted shell scripts' passthrough behavior.
         let (cargo_fmt_args, rustfmt_args) = split_raw_passthrough_args(raw_fmt_args(), check);
-        let toolchain = format!(
-            "+{}",
-            std::env::var("RUSTFMT_NIGHTLY_TOOLCHAIN")
-                .unwrap_or_else(|_| NIGHTLY_TOOLCHAIN.to_owned())
-        );
+        let toolchain = rustfmt_toolchain_arg();
 
         let mut fmt = cmd!(sh, "cargo {toolchain} fmt --all").args(&cargo_fmt_args);
+
         if !rustfmt_args.is_empty() {
             // Rustfmt arguments must stay behind Cargo's `--` separator.
             fmt = fmt.arg(ARG_SEPARATOR).args(&rustfmt_args);
         }
+
         fmt.run()?;
 
-        Ok(())
+        let mode = if check { FormatMode::Check } else { FormatMode::Write };
+        blank_lines::run(&sh, mode)
     }
+}
+
+/// Formats the whole workspace with rustfmt and the blank-line pass.
+pub(crate) fn format_workspace(sh: &Shell, mode: FormatMode) -> Result<()> {
+    let toolchain = rustfmt_toolchain_arg();
+
+    match mode {
+        FormatMode::Write => cmd!(sh, "cargo {toolchain} fmt --all").run()?,
+        FormatMode::Check => cmd!(sh, "cargo {toolchain} fmt --all -- --check").run()?,
+    }
+
+    blank_lines::run(sh, mode)
+}
+
+/// Returns the `+toolchain` argument selecting the nightly rustfmt.
+fn rustfmt_toolchain_arg() -> String {
+    let toolchain =
+        std::env::var("RUSTFMT_NIGHTLY_TOOLCHAIN").unwrap_or_else(|_| NIGHTLY_TOOLCHAIN.to_owned());
+    format!("+{toolchain}")
 }
 
 /// Splits raw arguments into `cargo fmt` arguments and rustfmt arguments.

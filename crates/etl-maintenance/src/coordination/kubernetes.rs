@@ -41,11 +41,13 @@ impl KubernetesExternalMaintenanceStore {
         let Some(name) = std::env::var(CR_NAME_ENV).ok().filter(|value| !value.is_empty()) else {
             return Ok(None);
         };
+
         let Some(namespace) =
             std::env::var(CR_NAMESPACE_ENV).ok().filter(|value| !value.is_empty())
         else {
             return Ok(None);
         };
+
         let timeout = std::env::var(KUBERNETES_API_TIMEOUT_SECONDS_ENV)
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
@@ -102,9 +104,11 @@ impl ExternalMaintenanceStore for KubernetesExternalMaintenanceStore {
         if !state.exists {
             return Ok(ExternalMaintenanceRequestOutcome::MissingState);
         }
+
         if state.active_run.is_some() {
             return Ok(ExternalMaintenanceRequestOutcome::RejectedActiveRun);
         }
+
         if state
             .operation_request
             .as_ref()

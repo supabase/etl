@@ -56,6 +56,7 @@ pub(crate) fn validate_no_cdc_collisions(columns: &[ColumnSchema]) -> Result<()>
             )));
         }
     }
+
     Ok(())
 }
 
@@ -71,6 +72,7 @@ pub(super) fn validate_primary_key_identity(schema: &ReplicatedTableSchema) -> R
             "A complete nondeferrable primary-key identity is required".to_owned(),
         ));
     }
+
     for column in schema.column_schemas() {
         if column.primary_key()
             && !matches!(
@@ -99,6 +101,7 @@ pub(super) fn validate_primary_key_identity(schema: &ReplicatedTableSchema) -> R
             )));
         }
     }
+
     Ok(())
 }
 
@@ -117,6 +120,7 @@ pub(crate) fn build_column_defs(columns: &[ColumnSchema]) -> String {
                      records remain writable; the destination schema will be more permissive"
                 );
             }
+
             let default_clause = default_clause(col).unwrap_or_default();
             format!("{} {}{}", quote_identifier(&col.name), type_name(&col.typ), default_clause)
         })
@@ -140,6 +144,7 @@ pub(crate) fn default_clause(column_schema: &ColumnSchema) -> Option<String> {
                 "omitting snowflake json column default to preserve sql null; postgres applies the source default before replication"
             );
         }
+
         return None;
     }
 
@@ -557,6 +562,7 @@ mod tests {
             let add_clause = add_column_default_clause(&column);
 
             assert_eq!(add_clause.as_deref(), expected, "add-column default for {expression}");
+
             if add_clause.is_some() {
                 assert_eq!(add_clause, default_clause(&column));
             }
@@ -592,6 +598,7 @@ mod tests {
             ReplicationMask::from_bytes(vec![0, 1]),
         );
         assert!(validate_primary_key_identity(&omitted_key).is_err());
+
         for typ in [Type::INT4_ARRAY, Type::JSONB, Type::FLOAT8, Type::TIME, Type::INTERVAL] {
             let mut table = schema.inner().clone();
             table.column_schemas[0].typ = typ;
@@ -609,6 +616,7 @@ mod tests {
     fn decode_snowflake_string(literal: &str) -> Option<String> {
         let mut chars = literal.strip_prefix('\'')?.strip_suffix('\'')?.chars().peekable();
         let mut value = String::new();
+
         while let Some(ch) = chars.next() {
             match ch {
                 '\'' if chars.next_if_eq(&'\'').is_some() => value.push('\''),
@@ -625,6 +633,7 @@ mod tests {
                 ch => value.push(ch),
             }
         }
+
         Some(value)
     }
 
@@ -644,6 +653,7 @@ mod tests {
                     Some(value.clone())
                 );
             }
+
             Ok(())
         });
     }

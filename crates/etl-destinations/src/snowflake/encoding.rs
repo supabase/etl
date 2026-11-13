@@ -155,12 +155,14 @@ struct MissingColumns<'a> {
 impl Serialize for MissingColumns<'_> {
     fn serialize<S: Serializer>(&self, ser: S) -> std::result::Result<S::Ok, S::Error> {
         let mut seq = ser.serialize_seq(Some(self.indexes.len()))?;
+
         for &index in self.indexes {
             let column = self.cols.get(index).ok_or_else(|| {
                 serde::ser::Error::custom("Missing column position exceeds row width")
             })?;
             seq.serialize_element(&column.ordinal_position)?;
         }
+
         seq.end()
     }
 }
@@ -176,6 +178,7 @@ struct RowSerializer<'a> {
 impl Serialize for RowSerializer<'_> {
     fn serialize<S: Serializer>(&self, ser: S) -> std::result::Result<S::Ok, S::Error> {
         let mut map = ser.serialize_map(None)?;
+
         for (col, cell) in self.cols.iter().zip(self.cells) {
             // On the default pipe an omitted VARIANT field is SQL NULL, while
             // an explicit null token is JSON null. Channel setup removes the
@@ -183,8 +186,10 @@ impl Serialize for RowSerializer<'_> {
             if is_json_type(&col.typ) && matches!(cell, Cell::Null) {
                 continue;
             }
+
             map.serialize_entry(col.name.as_str(), &CellSerializer(cell))?;
         }
+
         map.serialize_entry(CDC_OPERATION_COLUMN, self.operation)?;
         map.serialize_entry(CDC_SEQUENCE_COLUMN, self.sequence)?;
         map.serialize_entry(
@@ -237,6 +242,7 @@ fn reject_non_finite<E: serde::ser::Error>(f: f64) -> std::result::Result<(), E>
             "Snowflake JSON ingestion cannot encode non-finite float values without changing them",
         ));
     }
+
     Ok(())
 }
 
@@ -263,6 +269,7 @@ impl fmt::Display for HexDisplay<'_> {
         for byte in self.0 {
             write!(f, "{byte:02x}")?;
         }
+
         Ok(())
     }
 }
@@ -355,12 +362,14 @@ where
     R: Serialize,
 {
     let mut seq = ser.serialize_seq(Some(items.len()))?;
+
     for item in items {
         match item {
             Some(v) => seq.serialize_element(&wrap(v))?,
             None => seq.serialize_element(&None::<()>)?,
         }
     }
+
     seq.end()
 }
 
@@ -379,9 +388,11 @@ fn expand_partial_row(
             "Partial row positions do not match the replicated layout".to_owned(),
         ));
     }
+
     let mut present = row.into_values().into_iter();
     let mut absent = missing.iter().copied().peekable();
     let mut values = Vec::with_capacity(width);
+
     for index in 0..width {
         if absent.peek() == Some(&index) {
             absent.next();
@@ -395,6 +406,7 @@ fn expand_partial_row(
             );
         }
     }
+
     let row = TableRow::new(values);
     Ok(row)
 }
@@ -415,6 +427,7 @@ pub(super) fn normalize_delete_row(
                     "Old row width does not match the replicated layout".to_owned(),
                 ));
             }
+
             Ok((row, Vec::new()))
         }
         OldTableRow::Key(row) => {
@@ -454,11 +467,13 @@ pub(super) fn normalize_update_row(
         UpdatedTableRow::Full(row) => Ok((row, Vec::new())),
         UpdatedTableRow::Partial(row) => {
             crate::snowflake::schema::validate_primary_key_identity(schema)?;
+
             if row.total_columns() != schema.column_schemas().len() {
                 return Err(Error::UnsupportedLayout(
                     "Partial row width does not match the replicated layout".to_owned(),
                 ));
             }
+
             let (present, missing) = row.into_parts();
             let row = expand_partial_row(schema, present, &missing)?;
             if schema
@@ -470,6 +485,7 @@ pub(super) fn normalize_update_row(
                     "Every primary-key value must be present and nonnull".to_owned(),
                 ));
             }
+
             if let Some(old) = old {
                 let (old, _) = normalize_delete_row(schema, Some(old))?;
                 for ((column, before), after) in
@@ -488,6 +504,7 @@ pub(super) fn normalize_update_row(
                     }
                 }
             }
+
             Ok((row, missing))
         }
     }
@@ -558,6 +575,7 @@ mod tests {
                 let sql_null = serialize_json_cell(typ.clone(), Cell::Null, operation);
                 assert_eq!(sql_null.get("v"), None);
                 assert_eq!(sql_null.as_object().unwrap().len(), 3);
+
                 for expected in [
                     Value::Null,
                     json!("null"),
@@ -572,6 +590,7 @@ mod tests {
                     assert_eq!(actual.get("v"), Some(&expected));
                 }
             }
+
             // Omitted JSON values also omit the wire field, but retain their
             // presence metadata so they cannot be mistaken for explicit SQL
             // NULL.
@@ -846,6 +865,7 @@ mod tests {
     #[test]
     fn malformed_partial_rows_and_missing_keys_fail_locally() {
         let schema = partial_update_schema();
+
         for (width, values, missing) in [
             (4, vec![Cell::I32(1)], vec![0, 2]),
             (3, vec![Cell::I32(1)], vec![0, 3]),
@@ -867,6 +887,7 @@ mod tests {
             .unwrap_err();
             assert_eq!(EtlError::from(error).kind(), ErrorKind::DestinationLayoutUnsupported);
         }
+
         assert_eq!(
             EtlError::from(normalize_delete_row(&schema, None).unwrap_err()).kind(),
             ErrorKind::SourceReplicaIdentityError
@@ -952,6 +973,7 @@ mod tests {
                 vec![0],
             ))
         };
+
         for old in [
             OldTableRow::Key(TableRow::new(vec![Cell::I32(7)])),
             OldTableRow::Full(TableRow::new(vec![
@@ -962,6 +984,7 @@ mod tests {
         ] {
             assert!(normalize_update_row(&schema, row(), Some(old)).is_ok());
         }
+
         assert_eq!(
             EtlError::from(
                 normalize_update_row(
@@ -1161,6 +1184,7 @@ mod tests {
                 )
             })
             .collect();
+
         for (column, position, order) in &case.keys {
             let index = position.index(layout.len() + 1);
             layout.insert(
@@ -1173,6 +1197,7 @@ mod tests {
                 ),
             );
         }
+
         // Primary-key ordinals follow the order seeds, not column positions.
         let mut key_positions =
             layout.iter().enumerate().filter_map(|(i, c)| c.1.map(|o| (o, i))).collect::<Vec<_>>();
@@ -1190,6 +1215,7 @@ mod tests {
                     attnum,
                     order.is_none(),
                 );
+
                 match key_positions.iter().position(|(_, i)| *i == index) {
                     Some(rank) => column.with_primary_key(rank as i32 + 1),
                     None => column,
@@ -1199,11 +1225,13 @@ mod tests {
         // A FULL identity publication must include every column.
         let replicated =
             layout.iter().map(|c| u8::from(case.full_identity || c.3)).collect::<Vec<_>>();
+
         let identity = if case.full_identity {
             replicated.clone()
         } else {
             layout.iter().map(|c| u8::from(c.1.is_some())).collect()
         };
+
         let table =
             TableSchema::new(TableId::new(1), TableName::new("public".into(), "t".into()), columns);
         ReplicatedTableSchema::from_masks(
@@ -1233,6 +1261,7 @@ mod tests {
         if seed == 0 {
             return Cell::Null;
         }
+
         match *typ {
             Type::INT4 => Cell::I32(i32::from(seed) - 6),
             Type::FLOAT8 => Cell::F64(f64::from(seed) / 4.0),
@@ -1318,6 +1347,7 @@ mod tests {
         let key_only = |slot: usize| TableRow::new(key_cells(slot).into_iter().flatten().collect());
 
         let mut events = Vec::new();
+
         for slot in 0..key_slots {
             if case.copied & (1 << slot) != 0 {
                 let row = full_row(slot, &[slot as u8; HISTORY_MAX_COLUMNS]);
@@ -1325,6 +1355,7 @@ mod tests {
                 events.push((HistoryEvent::Insert { row: TableRow::new(row) }, None));
             }
         }
+
         for step in &case.steps {
             let position = Some((step.new_tx, step.lsn_gap));
             let slot = step.key % key_slots;
@@ -1332,11 +1363,14 @@ mod tests {
                 let row = full_row(slot, &step.values);
                 state.insert(slot, row.clone());
                 events.push((HistoryEvent::Insert { row: TableRow::new(row) }, position));
+
                 continue;
             };
+
             let full_old = || OldTableRow::Full(TableRow::new(current.clone()));
             let delete_old =
                 || if case.full_identity { full_old() } else { OldTableRow::Key(key_only(slot)) };
+
             match step.action % 4 {
                 0 => {
                     let row = full_row(slot, &step.values);
@@ -1360,15 +1394,19 @@ mod tests {
                         .map(|(i, _)| i)
                         .collect::<Vec<_>>();
                     let mut row = full_row(slot, &step.values);
+
                     for &i in &missing {
                         row[i] = current[i].clone();
                     }
+
                     state.insert(slot, row.clone());
+
                     let old = if case.full_identity {
                         Some(full_old())
                     } else {
                         step.with_old_key.then(|| OldTableRow::Key(key_only(slot)))
                     };
+
                     let updated = if missing.is_empty() {
                         UpdatedTableRow::Full(TableRow::new(row))
                     } else {
@@ -1384,6 +1422,7 @@ mod tests {
                             missing,
                         ))
                     };
+
                     events.push((HistoryEvent::Update { row: updated, old }, position));
                 }
                 2 => {
@@ -1402,6 +1441,7 @@ mod tests {
                 }
             }
         }
+
         events
     }
 
@@ -1451,9 +1491,11 @@ mod tests {
             serde_json::to_string(&key).unwrap()
         };
         let mut groups: BTreeMap<String, Vec<&Map<String, Value>>> = BTreeMap::new();
+
         for record in records {
             groups.entry(key_of(record)).or_default().push(record);
         }
+
         let op =
             |record: &Map<String, Value>| record[CDC_OPERATION_COLUMN].as_str().unwrap().to_owned();
         let seq =
@@ -1464,6 +1506,7 @@ mod tests {
         };
 
         let mut result = BTreeMap::new();
+
         for (key, group) in groups {
             let latest = |pick: &dyn Fn(&Map<String, Value>) -> bool| {
                 group.iter().filter(|r| pick(r)).map(|r| seq(r)).max()
@@ -1485,13 +1528,16 @@ mod tests {
             if eligible.is_empty() {
                 continue;
             }
+
             let mut values = Vec::new();
             let mut unresolved = Vec::new();
+
             for column in columns {
                 if column.primary_key() {
                     values.push(loaded_value(column, eligible[0]));
                     continue;
                 }
+
                 let attnum = i64::from(column.ordinal_position);
                 let supplier = eligible
                     .iter()
@@ -1505,11 +1551,13 @@ mod tests {
                     }
                 }
             }
+
             let anchored = latest_insert
                 .as_ref()
                 .is_some_and(|i| latest_delete.as_ref().is_none_or(|d| i > d));
             result.insert(key, MaterializedRow { values, anchored, unresolved });
         }
+
         result
     }
 
@@ -1533,6 +1581,7 @@ mod tests {
             // crosses hex-digit boundaries as the LSN grows.
             let (mut lsn, mut ordinal) = (0xf0u64, 0u64);
             let mut records = Vec::new();
+
             for (event, position) in events {
                 let offset = match position {
                     None => OffsetToken::zero(),
@@ -1543,9 +1592,11 @@ mod tests {
                         } else {
                             ordinal += 1;
                         }
+
                         OffsetToken::new(PgLsn::from(lsn), ordinal)
                     }
                 };
+
                 let (operation, row, missing) = match event {
                     HistoryEvent::Insert { row, .. } => (CdcOperation::Insert, row, Vec::new()),
                     HistoryEvent::Update { row, old } => {
@@ -1557,6 +1608,7 @@ mod tests {
                         (CdcOperation::Delete, row, missing)
                     }
                 };
+
                 let mut line = Vec::new();
                 let cdc = CdcMeta::new(operation, offset.as_ref()).with_missing_columns(&missing);
                 serialize_row(&mut line, &columns, &row, cdc).unwrap();

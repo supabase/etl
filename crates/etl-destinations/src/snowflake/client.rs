@@ -137,6 +137,7 @@ impl TruncateAttemptIdentity<'_> {
         }
 
         let mut identity = Vec::new();
+
         match legacy_compatible_pipeline_id(self.pipeline_id.as_str()) {
             LegacyCompatiblePipelineId::Integer(id) => {
                 append_identity_component(&mut identity, LEGACY_TRUNCATE_ATTEMPT_IDENTITY_VERSION);
@@ -147,6 +148,7 @@ impl TruncateAttemptIdentity<'_> {
                 append_identity_component(&mut identity, id.as_bytes());
             }
         }
+
         identity.extend_from_slice(&self.table_id.into_inner().to_be_bytes());
         append_identity_component(&mut identity, self.database.as_bytes());
         append_identity_component(&mut identity, self.schema.as_bytes());
@@ -229,6 +231,7 @@ impl PendingDurabilityState {
         let Some(target) = self.targets.get(&table_id) else {
             return Ok(());
         };
+
         let target_row_batches = target.row_batches;
         let target_bytes = target.bytes;
 
@@ -442,6 +445,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         if self.prepared_views.read().await.contains(&table.table_id) {
             return Ok(());
         }
+
         CompanionView::new(self.pipeline_id.clone(), table.table_id, name)
             .prepare(&self.sql_client, name, schema)
             .await?;
@@ -474,6 +478,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
             let mut gates = self.table_gates.lock().await;
             Arc::clone(gates.entry(table_id).or_insert_with(|| Arc::new(Mutex::new(()))))
         };
+
         TableLifecycleGuard { table_id, _guard: gate.lock_owned().await }
     }
 
@@ -508,10 +513,12 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         }
 
         schema::validate_no_cdc_collisions(columns)?;
+
         if create_if_missing {
             let column_defs = schema::build_column_defs(columns);
             self.sql_client.create_table_if_not_exists(table_name, &column_defs).await?;
         }
+
         self.prepare_existing_schema(table_name, columns).await?;
 
         // Obtain table channel.
@@ -537,6 +544,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         columns: &[ColumnSchema],
     ) -> Result<()> {
         schema::validate_no_cdc_collisions(columns)?;
+
         // TODO: Remove this fallback and SqlClient::upgrade_legacy_table
         // once all legacy destination tables (including inactive pipelines) are
         // migrated and supported self-hosted upgrades no longer need it. New
@@ -603,6 +611,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         if column_names.is_empty() {
             return Ok(());
         }
+
         let column_names: Vec<_> = column_names.iter().map(String::as_str).collect();
         self.sql_client.validate_json_columns(table_name, &column_names).await
     }
@@ -643,10 +652,12 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
                                      default"
                                 );
                             }
+
                             None
                         } else {
                             schema::add_column_default_clause(after_column_schema)
                         };
+
                     self.sql_client
                         .add_column(
                             table_name,
@@ -659,6 +670,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
                 SchemaOperation::AlterColumn { alteration } => {
                     let before = alteration.before_column_schema();
                     let after = alteration.after_column_schema();
+
                     match alteration.kind() {
                         ColumnAlterationKind::Rename => {
                             self.sql_client
@@ -779,6 +791,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
             // TRUNCATE may invalidate that token, so reopen at the same offset
             // before allowing another sender to acquire the channel lock.
             guard.open_at(truncate_offset).await?;
+
             return Ok(());
         }
     }
@@ -847,6 +860,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
             );
             handle.drop_channel().await
         };
+
         match drop_channel_result {
             Ok(()) => {}
             Err(Error::Snowpipe(SnowpipeError::ChannelNotFound)) => {}
@@ -888,6 +902,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
     /// target.
     pub async fn send_streaming_batch(&self, table_id: TableId, batch: RowBatch) -> Result<()> {
         let channel = self.get_channel(table_id).await?;
+
         if self.pending_durability.lock().await.would_exceed_limits(batch.size()) {
             self.wait_for_pending_durability().await?;
         }
@@ -930,6 +945,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
             pending.discard(table_id)?;
             pending.observe_metrics();
         }
+
         Ok(channel.is_offset_committed(offset))
     }
 
@@ -949,9 +965,11 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         let started = Instant::now();
         let mut observed_pending = false;
         let result = self.wait_for_pending_durability_inner(&mut observed_pending).await;
+
         if observed_pending {
             histogram!(ETL_SNOWFLAKE_STREAMING_DURABILITY_WAIT_SECONDS)
                 .record(started.elapsed().as_secs_f64());
+
             if result.is_err() {
                 counter!(ETL_SNOWFLAKE_STREAMING_DURABILITY_WAIT_FAILURES_TOTAL).increment(1);
             }
@@ -968,9 +986,11 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
             if targets.is_empty() {
                 return Ok(());
             }
+
             *observed_pending = true;
 
             let mut committed = Vec::new();
+
             for (table_id, target) in targets {
                 let channel = self.get_channel(table_id).await?;
                 if channel.lock().await.check_durability(&target, deadline).await? {
@@ -982,6 +1002,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
                 let mut pending = self.pending_durability.lock().await;
                 pending.clear_committed(&committed)?;
                 pending.observe_metrics();
+
                 if pending.is_empty() {
                     return Ok(());
                 }
@@ -1189,12 +1210,14 @@ mod tests {
             offset_token: Option<&OffsetToken>,
         ) -> Result<OpenChannelResponse> {
             let open_id = self.open_reads.fetch_add(1, Ordering::SeqCst);
+
             if self.fail_recovery_request(&self.open_failures_remaining) {
                 return Err(Error::HttpStatus {
                     status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
                     body: String::new(),
                 });
             }
+
             let status = {
                 let mut statuses = self.statuses.lock().unwrap();
                 let status =
@@ -1209,17 +1232,22 @@ mod tests {
                         last_error_offset_upper_bound: None,
                         last_error_message: None,
                     });
+
                 if let Some(offset) = offset_token {
                     status.offset_token = Some(offset.clone());
                 }
+
                 status.clone()
             };
+
             let continuation_token = format!("open-{open_id}");
             self.continuations.lock().unwrap().insert(table.to_owned(), continuation_token.clone());
+
             if self.hold_next_open_response.swap(false, Ordering::SeqCst) {
                 self.open_response_ready.notify_one();
                 pending::<()>().await;
             }
+
             Ok(OpenChannelResponse {
                 continuation_token,
                 offset_token: status.offset_token.clone(),
@@ -1247,9 +1275,11 @@ mod tests {
             continuation_token: &str,
         ) -> Result<InsertRowsResponse> {
             let append_id = self.append_attempts.fetch_add(1, Ordering::SeqCst);
+
             if self.fail_append {
                 return Err(Error::Channel("Synthetic append failure.".to_owned()));
             }
+
             let decoded = zstd::stream::decode_all(batch.bytes().as_ref()).unwrap();
             let rows: Vec<Value> = serde_json::Deserializer::from_slice(&decoded)
                 .into_iter::<Value>()
@@ -1272,12 +1302,14 @@ mod tests {
             status.rows_parsed = status.rows_inserted;
             status.offset_token = Some(batch.end_offset().clone());
             self.appended.notify_one();
+
             if self.lose_next_append_response.swap(false, Ordering::SeqCst) {
                 return Err(Error::HttpStatus {
                     status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
                     body: String::new(),
                 });
             }
+
             Ok(InsertRowsResponse { continuation_token })
         }
 
@@ -1294,6 +1326,7 @@ mod tests {
                 self.status_entered.notify_one();
                 self.release_status.notified().await;
             }
+
             if self.fail_next_status.swap(false, Ordering::SeqCst)
                 || self.fail_recovery_request(&self.status_failures_remaining)
             {
@@ -1302,6 +1335,7 @@ mod tests {
                     body: String::new(),
                 });
             }
+
             Ok(self.statuses.lock().unwrap().get(table).unwrap().clone())
         }
     }
@@ -1361,6 +1395,7 @@ mod tests {
         let client = recording_client(Arc::clone(&stream));
         let store = NotifyingStore::new();
         let mut schemas = Vec::new();
+
         for id in 1..=tables {
             let name = format!("table_{id}");
             let table = Arc::new(TableSchema::new(
@@ -1380,6 +1415,7 @@ mod tests {
             prepare_recording_table(&client, &store, &schema, name).await;
             schemas.push(schema);
         }
+
         (Destination::new(client.clone(), store), stream, schemas, client)
     }
 
@@ -1437,7 +1473,9 @@ mod tests {
                         DestinationWriteStatus::Accepted,
                     );
                 }
+
                 assert_eq!(stream.open_reads.load(Ordering::SeqCst), 1);
+
                 if fail_status {
                     stream.fail_next_status.store(true, Ordering::SeqCst);
                     write_events(&destination, WriteEventsDurability::RequireDurable, vec![])
@@ -1481,6 +1519,7 @@ mod tests {
             .await
             .unwrap();
         }
+
         assert_eq!(client.pending_durability.lock().await.row_batches, 2);
         assert!(
             client
@@ -1552,6 +1591,7 @@ mod tests {
             )
             .await
             .unwrap();
+
             if opening {
                 stream.lose_next_append_response.store(true, Ordering::SeqCst);
                 write_events(
@@ -1565,12 +1605,15 @@ mod tests {
             } else {
                 *stream.blocked_status_table.lock().unwrap() = Some("table_1".to_owned());
             }
+
             let continuation = stream.continuations.lock().unwrap()["table_1"].clone();
+
             let entered = if opening {
                 stream.open_response_ready.notified()
             } else {
                 stream.status_entered.notified()
             };
+
             let mut replay = std::pin::pin!(write_events(
                 &destination,
                 WriteEventsDurability::RequireDurable,
@@ -1639,6 +1682,7 @@ mod tests {
             )
             .await
             .unwrap();
+
             if opening {
                 stream.lose_next_append_response.store(true, Ordering::SeqCst);
                 write_events(
@@ -1652,6 +1696,7 @@ mod tests {
             } else {
                 stream.status_failures_remaining.store(10, Ordering::SeqCst);
             }
+
             let failed = stream.recovery_failed.notified();
             let mut replay = std::pin::pin!(write_events(
                 &destination,
@@ -1663,11 +1708,13 @@ mod tests {
 
             failed.await;
             assert!(poll_once(replay.as_mut()).is_pending());
+
             let failures = if opening {
                 &stream.open_failures_remaining
             } else {
                 &stream.status_failures_remaining
             };
+
             assert_eq!(failures.load(Ordering::SeqCst), 9);
 
             tokio::time::timeout(std::time::Duration::from_secs(1), destination.shutdown())
@@ -1802,10 +1849,12 @@ mod tests {
         database.run_sql("analyze").await.unwrap();
         let (_, old_pid) = replication_slot_state(database.client.as_ref().unwrap(), &slot).await;
         let old_pid = old_pid.unwrap();
+
         if !source_failure {
             stream.hold_next_status.store(true, Ordering::SeqCst);
             stream.fail_next_status.store(true, Ordering::SeqCst);
         }
+
         let outcome = tokio::time::timeout(Duration::from_secs(45), async {
             database
                 .run_sql(&format!(
@@ -1814,13 +1863,17 @@ mod tests {
                 ))
                 .await
                 .unwrap();
+
             loop {
                 let appended = stream.appended.notified();
+
                 if stream.requests.lock().unwrap().len() == 63 {
                     break;
                 }
+
                 appended.await;
             }
+
             let first_lsn = stream.requests.lock().unwrap()[0].start.decode().unwrap().0;
             let checkpoint = store.get_replication_checkpoint(WorkerType::Apply).await.unwrap();
             assert!(checkpoint.is_none_or(|lsn| lsn < first_lsn));
@@ -1842,6 +1895,7 @@ mod tests {
                 stream.status_entered.notified().await;
                 stream.release_status.notify_one();
             }
+
             let retry_pid = wait_for_new_walsender(
                 database.client.as_ref().unwrap(),
                 &slot,
@@ -1851,6 +1905,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+
             if shutdown_drain.is_some() {
                 recovery_failed.await;
                 assert!(
@@ -1860,8 +1915,10 @@ mod tests {
                         .unwrap()
                         .is_none_or(|lsn| lsn < first_lsn)
                 );
+
                 return first_lsn;
             }
+
             // Recovery must skip the accepted prefix before the existing
             // 64-request window could admit a duplicate and poll it.
             loop {
@@ -1873,8 +1930,10 @@ mod tests {
                 {
                     break;
                 }
+
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
+
             wait_for_replication_slot_flush_lsn(
                 database.client.as_ref().unwrap(),
                 &slot,
@@ -1896,6 +1955,7 @@ mod tests {
         let first_lsn = outcome.unwrap();
         shutdown.unwrap().unwrap();
         let checkpoint = store.get_replication_checkpoint(WorkerType::Apply).await.unwrap();
+
         if shutdown_drain.is_some() {
             assert!(checkpoint.is_none_or(|lsn| lsn < first_lsn));
             assert!(!client.pending_durability_is_empty().await);
@@ -1907,6 +1967,7 @@ mod tests {
             assert!(checkpoint.unwrap() >= first_lsn);
             assert!(client.pending_durability_is_empty().await);
         }
+
         let requests = stream.requests.lock().unwrap();
         assert_eq!(requests.len(), 63);
         assert_eq!(requests.iter().map(|request| request.rows.len()).sum::<usize>(), 63);
@@ -1958,6 +2019,7 @@ mod tests {
     async fn cdc_window_drains_can_keep_returning_accepted() {
         let (destination, stream, schemas, _) = recording_destination(65, false).await;
         let mut ordinal = 0;
+
         for (iteration, count) in [65, 64, 64].into_iter().enumerate() {
             let events = schemas[..count]
                 .iter()
@@ -1976,10 +2038,12 @@ mod tests {
             let requests = stream.requests.lock().unwrap();
             let statuses = stream.statuses.lock().unwrap();
             assert_eq!(requests.len(), 65 + iteration * 64);
+
             for request in requests.iter() {
                 assert!(statuses[&request.table].offset_token.as_ref().unwrap() >= &request.end);
             }
         }
+
         let status = write_events(&destination, WriteEventsDurability::RequireDurable, vec![])
             .await
             .unwrap();
@@ -1992,6 +2056,7 @@ mod tests {
     async fn cdc_many_interleaved_tables_preserve_packing_order_and_replay() {
         let (destination, stream, schemas, _) = recording_destination(512, false).await;
         let mut events = Vec::new();
+
         for phase in 0..3 {
             for (index, schema) in schemas.iter().enumerate() {
                 let ordinal = u64::try_from(phase * schemas.len() + index).unwrap();
@@ -2016,6 +2081,7 @@ mod tests {
                 });
             }
         }
+
         let replay = events.clone();
         let status = write_events(&destination, WriteEventsDurability::RequireDurable, events)
             .await
@@ -2030,6 +2096,7 @@ mod tests {
         let mut requests = stream.requests.lock().unwrap();
         requests.sort_by(|left, right| left.start.cmp(&right.start));
         assert_eq!(requests.len(), schemas.len());
+
         for (index, request) in requests.iter().enumerate() {
             assert_eq!(request.table, format!("table_{}", index + 1));
             assert_eq!(request.start, OffsetToken::new(10.into(), u64::try_from(index).unwrap()));
@@ -2047,12 +2114,14 @@ mod tests {
                         "_cdc_sequence_number": OffsetToken::new(10.into(), ordinal).to_string(),
                         "_cdc_missing_columns": [],
                     });
+
                     if phase != 2 {
                         row["name"] = json!(if phase == 0 { "initial" } else { "updated" });
                     } else {
                         row["name"] = json!(null);
                         row["_cdc_missing_columns"] = json!([2]);
                     }
+
                     row
                 })
                 .collect();
@@ -2098,6 +2167,7 @@ mod tests {
         for truncate in [false, true] {
             let (destination, stream, schemas, _) = recording_destination(1, false).await;
             let schema = &schemas[0];
+
             let barrier = if truncate {
                 Event::Truncate(TruncateEvent {
                     commit_lsn: 10.into(),
@@ -2108,12 +2178,14 @@ mod tests {
             } else {
                 Event::Relation(RelationEvent { replicated_table_schema: schema.clone() })
             };
+
             let result = write_events(
                 &destination,
                 WriteEventsDurability::MayDefer,
                 vec![insert_event(schema, 0), barrier, insert_event(schema, 2)],
             )
             .await;
+
             if truncate {
                 // SQL deliberately fails; the post-truncate row must never be
                 // sent.
@@ -2126,11 +2198,13 @@ mod tests {
                         .unwrap();
                 assert_eq!(status, DestinationWriteStatus::Durable);
             }
+
             destination.shutdown().await.unwrap();
             let requests = stream.requests.lock().unwrap();
             assert_eq!(requests.len(), if truncate { 1 } else { 2 });
             assert_eq!(requests[0].rows.len(), 1);
             assert_eq!(requests[0].end, OffsetToken::new(10.into(), 0));
+
             if !truncate {
                 assert_eq!(requests[1].rows.len(), 1);
                 assert_eq!(requests[1].start, OffsetToken::new(10.into(), 2));
@@ -2325,6 +2399,7 @@ mod tests {
     async fn failed_setup_remains_retryable() {
         let client = test_client(Arc::new(UnusedTokenProvider));
         let table_id = TableId::new(1);
+
         for _ in 0..2 {
             let error = client.prepare_existing_table(table_id, "TABLE", &[]).await.unwrap_err();
             assert!(matches!(error, Error::Auth(_)));

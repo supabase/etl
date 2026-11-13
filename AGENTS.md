@@ -48,7 +48,8 @@ Default stack: Postgres `localhost:5430` (`postgres`/`postgres`), replica
 ## Commands
 
 `cargo x` is the workspace task runner (`cargo x --help`). Stable toolchain for
-build/lint/test; nightly formatter only via `cargo x fmt`.
+build/lint/test; nightly formatter only via `cargo x fmt`, which also applies
+the blank-line rules in `crates/xtask/src/commands/fmt/blank_lines.rs`.
 
 ```bash
 cargo build --workspace --all-targets --all-features
@@ -100,9 +101,9 @@ implementation details private.
   dependencies unless the task needs them.
 - Never commit, push, open PRs, or perform other git writes unless the user
   explicitly asks.
-- `Cargo.toml` workspace lints, `rustfmt.toml`, and compiler diagnostics are
-  the enforceable style source of truth. Prefer tightening static checks over
-  adding prose rules here.
+- `Cargo.toml` workspace lints, `rustfmt.toml`, the `cargo x fmt` blank-line
+  pass, and compiler diagnostics are the enforceable style source of truth.
+  Prefer tightening static checks over adding prose rules here.
 - Use blank lines to separate logically distinct steps in generated and edited
   code: setup, validation, execution, error handling, and results or assertions.
   Keep closely related statements together, but avoid dense blocks containing

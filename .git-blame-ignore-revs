@@ -1,0 +1,4 @@
+# Mechanical reformats to skip in `git blame`.
+
+# style: apply blank-line formatting rules
+d5b055ea2e3342d6089d3655de0711b44adb16c8

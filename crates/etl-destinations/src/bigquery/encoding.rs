@@ -568,6 +568,7 @@ mod tests {
         ]))
         .unwrap();
         let bytes = row.encode_to_vec();
+
         for value in ["infinity", "24:00:00", "-infinity"] {
             assert!(bytes.windows(value.len()).any(|bytes| bytes == value.as_bytes()));
         }
@@ -885,23 +886,30 @@ mod tests {
             vec(option::weighted(0.95, scalar_text(element)), 0..4)
                 .prop_map(|elements| {
                     let mut text = String::from("{");
+
                     for (index, element) in elements.iter().enumerate() {
                         if index > 0 {
                             text.push(',');
                         }
+
                         let Some(element) = element else {
                             text.push_str("NULL");
                             continue;
                         };
+
                         text.push('"');
+
                         for ch in element.chars() {
                             if matches!(ch, '"' | '\\') {
                                 text.push('\\');
                             }
+
                             text.push(ch);
                         }
+
                         text.push('"');
                     }
+
                     text.push('}');
                     text
                 })
@@ -956,6 +964,7 @@ mod tests {
             }
 
             let null_element = ErrorKind::NullValuesNotSupportedInArrayInDestination;
+
             match cell {
                 Cell::TimestampTz(value) => timestamptz(value),
                 Cell::Array(ArrayCell::TimestampTz(values)) => values
@@ -1007,6 +1016,7 @@ mod tests {
         /// Splits an encoded row into raw fields with prost's wire decoder.
         fn decode_fields(mut buf: &[u8]) -> Result<Vec<(u32, Payload)>, TestCaseError> {
             let mut fields = Vec::new();
+
             while !buf.is_empty() {
                 let (tag, wire_type) = decode_key(&mut buf)
                     .map_err(|err| TestCaseError::fail(format!("invalid key: {err}")))?;
@@ -1027,6 +1037,7 @@ mod tests {
                         )));
                     }
                 };
+
                 fields.push((tag, payload));
             }
 
@@ -1038,6 +1049,7 @@ mod tests {
         /// scalars.
         fn wire_type_matches(field: &FieldDescriptor, payload: &Payload) -> bool {
             let repeated = matches!(field.mode, ColumnMode::Repeated);
+
             match (field.typ, payload) {
                 (ColumnType::Bool | ColumnType::Int32 | ColumnType::Int64, Payload::Varint(_))
                 | (ColumnType::Float, Payload::Fixed32(_))
@@ -1068,6 +1080,7 @@ mod tests {
         /// Splits a field's payloads into elements, unpacking packed runs.
         fn elements(field: &FieldDescriptor, payloads: &[&Payload]) -> Vec<Element> {
             let mut elements = Vec::new();
+
             for payload in payloads {
                 match (field.typ, payload) {
                     (_, Payload::Varint(value)) => elements.push(Element::Varint(*value)),
@@ -1111,9 +1124,11 @@ mod tests {
             let Some((year, tail)) = rest.split_once('-') else {
                 return value.to_owned();
             };
+
             let Ok(year) = year.parse::<i64>() else {
                 return value.to_owned();
             };
+
             let year = if negative { -year } else { year };
 
             if year <= 0 {
@@ -1141,7 +1156,9 @@ mod tests {
                     } else {
                         value as i64
                     };
+
                     let out_of_range = || format!("{value} is out of range for {typ}");
+
                     match *typ {
                         Type::INT2 => Cell::I16(i16::try_from(value).map_err(|_| out_of_range())?),
                         Type::INT4 => Cell::I32(i32::try_from(value).map_err(|_| out_of_range())?),
@@ -1164,11 +1181,13 @@ mod tests {
                 (ColumnType::String, typ, Element::Bytes(bytes)) => {
                     let text =
                         String::from_utf8(bytes).map_err(|err| format!("invalid utf-8: {err}"))?;
+
                     let text = if matches!(*typ, Type::DATE | Type::TIMESTAMP) {
                         astronomical_to_era(&text)
                     } else {
                         text
                     };
+
                     parse_text_cell(typ, &text)
                         .map_err(|err| format!("{text:?} does not re-parse as {typ}: {err}"))?
                 }
@@ -1193,6 +1212,7 @@ mod tests {
             prop_assert_eq!(descriptor.field_descriptors.len(), column_count + 2);
 
             let mut payloads_by_number: BTreeMap<u32, Vec<&Payload>> = BTreeMap::new();
+
             for (number, payload) in fields {
                 let field =
                     descriptor.field_descriptors.iter().find(|field| field.number == *number);
@@ -1201,6 +1221,7 @@ mod tests {
                         "field {number} is not in the descriptor"
                     )));
                 };
+
                 prop_assert!(
                     wire_type_matches(field, payload),
                     "field {} ({:?} {:?}) carries {:?}",
@@ -1232,9 +1253,12 @@ mod tests {
                         [Element::Bytes(bytes)] => bytes.as_slice(),
                         _ => &[],
                     };
+
                     prop_assert_eq!(value, expected.as_bytes());
+
                     continue;
                 };
+
                 prop_assert_eq!(&field.name, &BIGQUERY_COLUMN_NAME_MAPPING.map_name(&column.name));
 
                 let element_type = array_element_type(&column.typ).unwrap_or(&column.typ);
@@ -1253,6 +1277,7 @@ mod tests {
                     Cell::Null => Vec::new(),
                     cell => vec![cell.clone()],
                 };
+
                 prop_assert!(
                     expected.len() == decoded.len()
                         && expected
@@ -1280,6 +1305,7 @@ mod tests {
                 &vec(generated_column(), 1..5),
                 |columns| {
                     let mut cells = Vec::with_capacity(columns.len());
+
                     for (typ, text, _) in columns {
                         let cell = match text {
                             Some(text) => parse_text_cell(typ, text).map_err(|err| {
@@ -1287,8 +1313,10 @@ mod tests {
                             })?,
                             None => Cell::Null,
                         };
+
                         cells.push(cell);
                     }
+
                     let schema = schema_for(columns);
 
                     let mut values = cells.clone();
@@ -1302,7 +1330,9 @@ mod tests {
                                 "expected {kind:?} for {cells:?}"
                             )));
                         };
+
                         prop_assert_eq!(err.kind(), kind);
+
                         return Ok(());
                     }
 

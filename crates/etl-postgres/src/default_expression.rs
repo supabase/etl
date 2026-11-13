@@ -368,6 +368,7 @@ fn top_level_cast_start(expression: &str) -> Option<usize> {
 
                     return None;
                 };
+
                 paren_depth = new_depth;
                 index = advance_index(index, 1, bytes.len());
             }
@@ -418,6 +419,7 @@ fn is_value_preserving_cast(type_name: &str, typ: &Type) -> bool {
     }
 
     let type_name = type_name.to_ascii_lowercase();
+
     if is_text_type(typ) {
         return match type_name.as_str() {
             "text" | "character varying" | "varchar" => *typ != Type::CHAR && *typ != Type::NAME,
@@ -519,6 +521,7 @@ fn has_top_level_binary_operator(expression: &str) -> bool {
 
                     return true;
                 };
+
                 paren_depth = new_depth;
                 index = advance_index(index, 1, bytes.len());
             }
@@ -640,6 +643,7 @@ fn strip_outer_parens(expression: &str) -> &str {
 
                     return expression;
                 };
+
                 depth = new_depth;
                 index = advance_index(index, 1, bytes.len());
             }
@@ -653,10 +657,12 @@ fn strip_outer_parens(expression: &str) -> &str {
 
                     return expression;
                 };
+
                 depth = new_depth;
                 if depth == 0 && index != bytes.len().saturating_sub(1) {
                     return expression;
                 }
+
                 index = advance_index(index, 1, bytes.len());
             }
             _ => index = advance_index(index, 1, bytes.len()),
@@ -688,6 +694,7 @@ fn is_numeric_literal(expression: &str) -> bool {
 
     let mut has_digit = false;
     let mut has_decimal = false;
+
     for ch in chars {
         if ch.is_ascii_digit() {
             has_digit = true;
@@ -1025,6 +1032,7 @@ mod tests {
             replicated("public.price[]", None, "'{10.00}'::public.price[]").as_deref(),
             Some("'{10.00}'::public.price[]")
         );
+
         // Constants of an unmodified built-in base type become their text.
         for (base_type, expression, text) in [
             (base(Type::TEXT, -1, "text"), "'it''s'::text", "'it''s'"),
@@ -1067,6 +1075,7 @@ mod tests {
         ] {
             assert_eq!(replicated("public.d", base_type, expression), None, "{expression}");
         }
+
         // A type modifier on an unknown type can hide a length coercion.
         assert_eq!(replicated("public.vec(3)", None, "'[1,2]'::public.vec(3)"), None);
     }

@@ -115,6 +115,7 @@ mod tests {
         let database = spawn_source_database().await;
         let client = database.client.as_ref().unwrap();
         let pool = OutOfBandSourcePool::new(&database.config, TEST_MONITOR_REFRESH_INTERVAL);
+
         for reserve_wal in [false, true] {
             let name = format!("test_sample_{}", Uuid::new_v4().simple());
             client
@@ -136,6 +137,7 @@ mod tests {
             );
             client.query_one("select pg_drop_replication_slot($1)", &[&name]).await.unwrap();
         }
+
         for name in ["test_missing_slot", r"slot'; select 1; --\"] {
             let error = pool.get_slot_state(name).await.unwrap_err();
             assert_eq!(error.kind(), ErrorKind::ReplicationSlotNotFound);

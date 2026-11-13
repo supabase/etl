@@ -110,9 +110,11 @@ impl Display for TableVersionId {
                     *digit = char::from_digit(remainder, 36).unwrap();
                     value /= 36;
                 }
+
                 for digit in digits {
                     write!(f, "{digit}")?;
                 }
+
                 Ok(())
             }
         }
@@ -163,6 +165,7 @@ impl FromStr for VersionedBigQueryTableId {
                 if !suffix.bytes().all(|byte| byte.is_ascii_digit() || byte.is_ascii_lowercase()) {
                     return None;
                 }
+
                 TableVersionId::Random(Uuid::from_u128(u128::from_str_radix(suffix, 36).ok()?))
             } else {
                 if suffix.len() > 20
@@ -171,6 +174,7 @@ impl FromStr for VersionedBigQueryTableId {
                 {
                     return None;
                 }
+
                 TableVersionId::Legacy(suffix.parse().ok()?)
             };
 
@@ -864,6 +868,7 @@ where
 
         // Create append requests from the split rows.
         let mut append_requests = Vec::with_capacity(table_rows_batches.len());
+
         for (request_index, table_rows) in table_rows_batches.into_iter().enumerate() {
             if !table_rows.is_empty() {
                 histogram!(ETL_BQ_APPEND_BATCHES_BATCH_SIZE).record(table_rows.len() as f64);
@@ -920,6 +925,7 @@ where
                 )
             );
         };
+
         let current_snapshot_id = metadata.snapshot_id();
         let current_replication_mask = metadata.replication_mask().clone();
         let new_replication_mask = new_replicated_table_schema.replication_mask().clone();
@@ -1116,6 +1122,7 @@ where
                 SchemaOperation::AlterColumn { alteration } => {
                     let before = alteration.before_column_schema();
                     let after = alteration.after_column_schema();
+
                     match alteration.kind() {
                         ColumnAlterationKind::Rename => {
                             self.client
@@ -1229,6 +1236,7 @@ where
                 let Some(event) = events_iter.next() else {
                     break;
                 };
+
                 match event {
                     Event::Insert(insert) => {
                         let sequence_number = bigquery_sequence_number(
@@ -1385,6 +1393,7 @@ where
                 );
                 continue;
             };
+
             ensure_destination_schema_matches_metadata(
                 "BigQuery",
                 table_id,
@@ -1807,6 +1816,7 @@ fn bigquery_update_rows(
     };
 
     let mut rows = Vec::with_capacity(1 + usize::from(primary_key_changed));
+
     if primary_key_changed {
         let Some(old_table_row) = old_table_row else {
             bail!(
@@ -1825,11 +1835,13 @@ fn bigquery_update_rows(
             bigquery_sequence_number(event_position, BIGQUERY_SEQUENCE_ORDINAL_FIRST),
         )?);
     }
+
     let upsert_ordinal = if primary_key_changed {
         BIGQUERY_SEQUENCE_ORDINAL_SECOND
     } else {
         BIGQUERY_SEQUENCE_ORDINAL_FIRST
     };
+
     rows.push(bigquery_upsert_row(
         replicated_table_schema,
         new_table_row,
@@ -1995,6 +2007,7 @@ fn bigquery_primary_key_tagged_cells_from_old_row(
             let column_count = replicated_table_schema.column_schemas().len();
             let primary_key_column_count =
                 replicated_table_schema.primary_key_column_schemas().len();
+
             if row.values().len() != column_count {
                 bail!(
                     ErrorKind::InvalidState,
@@ -2009,6 +2022,7 @@ fn bigquery_primary_key_tagged_cells_from_old_row(
             }
 
             let mut tagged_cells = Vec::with_capacity(primary_key_column_count);
+
             for (column_index, (column_schema, value)) in
                 replicated_table_schema.column_schemas().zip(row.into_values()).enumerate()
             {
@@ -2041,6 +2055,7 @@ fn bigquery_primary_key_tagged_cells_from_old_row(
             let mut primary_key_columns =
                 replicated_table_schema.primary_key_column_schemas().peekable();
             let mut key_values = row.into_values().into_iter();
+
             for (column_index, column_schema) in
                 replicated_table_schema.column_schemas().enumerate()
             {
@@ -2103,6 +2118,7 @@ fn calculate_target_batches_for_table_copy(table_rows: &[BigQueryTableRow]) -> u
     let Some(encoded_row) = table_rows.first() else {
         return 0;
     };
+
     let total_rows = table_rows.len();
 
     let estimated_row_size = encoded_row.encoded_len();
@@ -2158,12 +2174,14 @@ fn split_table_rows(
 
     let mut batches = Vec::with_capacity(num_sub_batches);
     let mut remaining = table_rows;
+
     // Split from the end so each moved row is copied once, and retain the
     // original allocation for the first batch.
     for i in (1..num_sub_batches).rev() {
         let batch_size = rows_per_sub_batch + usize::from(i < extra_rows);
         batches.push(remaining.split_off(remaining.len() - batch_size));
     }
+
     batches.push(remaining);
     batches.reverse();
 
@@ -2275,6 +2293,7 @@ mod tests {
             ],
         ));
         let replication_mask = ReplicationMask::all(&table_schema);
+
         let identity_mask = match identity_type {
             IdentityType::Full => IdentityMask::from_bytes(vec![1, 1]),
             IdentityType::PrimaryKey => IdentityMask::from_bytes(vec![1, 0]),
@@ -3705,6 +3724,7 @@ mod tests {
             {
                 let commit_lsn =
                     scenario.first_commit_lsn + index as u64 * scenario.commit_lsn_step;
+
                 for (ordinal, operation) in operations.iter().enumerate() {
                     let position = EventPosition::new(
                         PgLsn::from(commit_lsn),
@@ -3712,6 +3732,7 @@ mod tests {
                     );
                     let sequence_number =
                         bigquery_sequence_number(position, BIGQUERY_SEQUENCE_ORDINAL_FIRST);
+
                     match operation {
                         Operation::Insert { key, value } => {
                             let Some(id) = pick_key(&model, *key, false) else { continue };
@@ -3772,9 +3793,11 @@ mod tests {
                 sequence_number: String::new(),
             };
             let mut id = None;
+
             while buf.has_remaining() {
                 let (tag, wire_type) = decode_key(&mut buf).unwrap();
                 let context = DecodeContext::default();
+
                 match tag {
                     1 => {
                         let mut value = 0;
@@ -3793,6 +3816,7 @@ mod tests {
                     _ => panic!("unexpected field {tag}"),
                 }
             }
+
             decoded.id = id.expect("every CDC row carries its primary key");
 
             decoded
@@ -3825,6 +3849,7 @@ mod tests {
         /// freedom to apply appended rows in any order.
         fn shuffle<T>(items: &mut [T], mut seed: u64) {
             seed |= 1;
+
             for index in (1..items.len()).rev() {
                 seed ^= seed << 13;
                 seed ^= seed >> 7;
@@ -3838,6 +3863,7 @@ mod tests {
             rows: Vec<DecodedRow>,
         ) -> Result<BTreeMap<i32, Option<String>>, TestCaseError> {
             let mut latest: BTreeMap<i32, (Vec<u64>, DecodedRow)> = BTreeMap::new();
+
             for row in rows {
                 prop_assert!(
                     matches!(row.change_type.as_str(), "UPSERT" | "DELETE"),
@@ -3845,6 +3871,7 @@ mod tests {
                     row.change_type
                 );
                 let sections = sequence_sections(&row.sequence_number)?;
+
                 match latest.get(&row.id) {
                     Some((current, current_row)) => match sections.cmp(current) {
                         Ordering::Greater => {
@@ -3902,6 +3929,7 @@ mod tests {
             ];
             let key = |id| Some(OldTableRow::Key(TableRow::new(vec![Cell::I32(id)])));
             let position = |ordinal| EventPosition::new(PgLsn::from(u64::MAX), ordinal);
+
             for (ordinal, old_id, new_id, value) in
                 [(u64::MAX - 2, 1, 3, &a), (u64::MAX - 1, 2, 1, &b), (u64::MAX, 3, 2, &a)]
             {
@@ -3915,6 +3943,7 @@ mod tests {
                     .unwrap(),
                 );
             }
+
             let mut decoded = rows.iter().map(decode_row).collect::<Vec<_>>();
             decoded.reverse();
 
@@ -4046,6 +4075,7 @@ mod tests {
         /// Returns what a writer field of `column_type` means for `typ`.
         fn meaning(column_type: ColumnType, typ: &Type) -> Meaning {
             let element = element_type(typ);
+
             match column_type {
                 ColumnType::Bool => Meaning::Boolean,
                 ColumnType::Int32 | ColumnType::Int64 if element == Type::TIMESTAMPTZ => {
@@ -4128,6 +4158,7 @@ mod tests {
             let field =
                 &column_schemas_to_table_descriptor(&schema_with(after), true).field_descriptors[1];
             let repeated = matches!(field.mode, ColumnMode::Repeated);
+
             let column_element = match column.strip_prefix("array<") {
                 Some(element) if repeated => element.trim_end_matches('>'),
                 None if !repeated => column.as_str(),

@@ -342,6 +342,7 @@ mod tests {
             let config::ConfigError::Foreign(source) = &error else {
                 unreachable!("I/O errors remain foreign errors");
             };
+
             let source = source.downcast_ref::<io::Error>().unwrap();
 
             assert_eq!(source.kind(), expected_kind);
@@ -394,15 +395,18 @@ mod tests {
 
         // Write base file (empty)
         let base_file = config_dir.join(format!("base.{extension}"));
+
         let base_content = match extension {
             "json" => "{}",
             "yaml" | "yml" => "",
             _ => panic!("Unsupported extension: {extension}"),
         };
+
         fs::write(&base_file, base_content).unwrap();
 
         // Write environment file with actual config
         let env_file = config_dir.join(format!("prod.{extension}"));
+
         let env_content = match extension {
             "json" => serde_json::to_string_pretty(&original_config).unwrap(),
             "yaml" | "yml" => {
@@ -424,6 +428,7 @@ mod tests {
             }
             _ => panic!("Unsupported extension: {extension}"),
         };
+
         fs::write(&env_file, env_content).unwrap();
 
         // Set environment and working directory
@@ -431,6 +436,7 @@ mod tests {
             std::env::remove_var("APP_CONFIG_DIR");
             std::env::set_var("APP_ENVIRONMENT", "prod");
         }
+
         std::env::set_current_dir(temp_dir.path()).unwrap();
 
         // Load config
@@ -536,6 +542,7 @@ mod tests {
             std::env::remove_var("APP_CONFIG_DIR");
             std::env::set_var("APP_ENVIRONMENT", "prod");
         }
+
         std::env::set_current_dir(temp_dir.path()).unwrap();
 
         // Load config - should fallback to current_dir/configuration
