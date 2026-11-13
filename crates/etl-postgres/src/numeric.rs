@@ -24,8 +24,6 @@ const POSTGRES_NUMERIC_MAX_SCALE: u32 = 16_383;
 const POSTGRES_NUMERIC_MIN_WEIGHT: i32 = i16::MIN as i32;
 /// Maximum base-10000 weight representable by Postgres `NUMERIC`.
 const POSTGRES_NUMERIC_MAX_WEIGHT: i32 = i16::MAX as i32;
-/// Maximum decimal digit buffer capacity reserved before parsing.
-const MAX_INITIAL_DECIMAL_DIGITS_CAPACITY: usize = 1024;
 /// Mantissa digits parsed on the stack before spilling to the heap.
 ///
 /// Covers every numeric of up to 64 digits, so ordinary values parse without
@@ -281,16 +279,12 @@ enum DecimalDigits {
 }
 
 impl DecimalDigits {
-    /// Creates empty storage for a mantissa of at most `max_len` digits.
-    fn with_capacity(max_len: usize) -> Self {
-        if max_len <= INLINE_DECIMAL_DIGITS {
-            Self::Inline { digits: [0; INLINE_DECIMAL_DIGITS], len: 0 }
-        } else {
-            Self::Heap(Vec::with_capacity(max_len.min(MAX_INITIAL_DECIMAL_DIGITS_CAPACITY)))
-        }
+    /// Creates empty storage on the stack.
+    fn new() -> Self {
+        Self::Inline { digits: [0; INLINE_DECIMAL_DIGITS], len: 0 }
     }
 
-    /// Appends one digit, spilling to the heap if the stack storage is full.
+    /// Appends one digit, spilling to the heap once the stack storage is full.
     fn push(&mut self, digit: u8) {
         match self {
             Self::Inline { digits, len } => match digits.get_mut(*len) {
@@ -299,7 +293,8 @@ impl DecimalDigits {
                     *len += 1;
                 }
                 None => {
-                    let mut spilled = digits.to_vec();
+                    let mut spilled = Vec::with_capacity(INLINE_DECIMAL_DIGITS * 2);
+                    spilled.extend_from_slice(digits);
                     spilled.push(digit);
                     *self = Self::Heap(spilled);
                 }
@@ -325,7 +320,7 @@ impl DecimalDigits {
 /// accepted syntax is ASCII, so a non-ASCII byte simply fails to match and
 /// rejects the input, exactly as the previous char-based parser did.
 fn parse_numeric_value(bytes: &[u8], sign: Sign) -> Result<PgNumeric, ParseNumericError> {
-    let mut decimal_digits = DecimalDigits::with_capacity(bytes.len());
+    let mut decimal_digits = DecimalDigits::new();
     let mut have_decimal_point = false;
     // Decimal weight is the number of digits before the decimal point minus
     // one.
