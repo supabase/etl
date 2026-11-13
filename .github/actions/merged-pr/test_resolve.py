@@ -4,6 +4,7 @@ import copy
 import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -44,6 +45,33 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(resolve_merged_pr(REPOSITORY, SHA), PR)
         sleep.assert_called_once_with(5)
 
+    def test_retries_api_and_json_errors(self):
+        for failure in [subprocess.CalledProcessError(1, ["gh", "api"]), "invalid JSON"]:
+            with (
+                self.subTest(failure=type(failure).__name__),
+                patch("resolve.subprocess.check_output", side_effect=[failure, json.dumps([[PR]])]) as api,
+                patch("resolve.time.sleep") as sleep,
+            ):
+                self.assertEqual(resolve_merged_pr(REPOSITORY, SHA), PR)
+                self.assertEqual(api.call_count, 2)
+                sleep.assert_called_once_with(5)
+
+    def test_repeated_api_and_json_errors_exhaust_retries(self):
+        for failure, error in [
+            (subprocess.CalledProcessError(1, ["gh", "api"]), subprocess.CalledProcessError),
+            ("invalid JSON", json.JSONDecodeError),
+        ]:
+            with (
+                self.subTest(error=error.__name__),
+                patch("resolve.subprocess.check_output", side_effect=[failure] * 6) as api,
+                patch("resolve.time.sleep") as sleep,
+            ):
+                with self.assertRaises(error):
+                    resolve_merged_pr(REPOSITORY, SHA)
+
+                self.assertEqual(api.call_count, 6)
+                self.assertEqual(sleep.call_count, 5)
+
     @patch("resolve.time.sleep")
     @patch("resolve.subprocess.check_output")
     def test_missing_or_wrong_base_fails_instead_of_publishing(self, api, sleep):
@@ -59,18 +87,23 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(api.call_count, 6)
         self.assertEqual(sleep.call_count, 5)
 
+    @patch("resolve.time.sleep")
     @patch("resolve.subprocess.check_output", return_value=json.dumps([[PR, PR]]))
-    def test_ambiguous_merges_fail(self, api):
+    def test_ambiguous_merges_fail(self, api, sleep):
         with self.assertRaisesRegex(RuntimeError, "Multiple merged PRs"):
             resolve_merged_pr(REPOSITORY, SHA)
 
+        self.assertEqual(api.call_count, 1)
+        sleep.assert_not_called()
+
     @patch("resolve.subprocess.check_output")
     def test_outputs_preserve_ordinary_and_release_routing(self, api):
-        for release in [False, True]:
-            with self.subTest(release=release), tempfile.TemporaryDirectory() as directory:
+        for label in [None, "release", "Release", "RELEASE"]:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                release = label is not None
                 pr = copy.deepcopy(PR)
                 if release:
-                    pr["labels"] = [{"name": "release"}]
+                    pr["labels"] = [{"name": label}]
                     pr["head"]["ref"] = "release/v1.2.3"
 
                 api.return_value = json.dumps([[pr]])

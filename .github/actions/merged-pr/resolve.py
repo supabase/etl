@@ -10,10 +10,17 @@ import time
 def resolve_merged_pr(repository, sha):
     """Wait for GitHub to expose exactly one merged PR for this commit."""
     for attempt in range(6):
-        pages = json.loads(subprocess.check_output([
-            "gh", "api", "--paginate", "--slurp",
-            f"repos/{repository}/commits/{sha}/pulls",
-        ], text=True))
+        try:
+            pages = json.loads(subprocess.check_output([
+                "gh", "api", "--paginate", "--slurp",
+                f"repos/{repository}/commits/{sha}/pulls",
+            ], text=True))
+        except (subprocess.CalledProcessError, json.JSONDecodeError):
+            if attempt == 5:
+                raise
+
+            time.sleep(5)
+            continue
 
         matches = [
             pr for page in pages for pr in page
@@ -46,7 +53,7 @@ def main():
     if not head_ref or "\n" in head_ref or "\r" in head_ref:
         raise RuntimeError("Invalid PR source branch")
 
-    release = any(label["name"] == "release" for label in pr["labels"])
+    release = any(label["name"].lower() == "release" for label in pr["labels"])
 
     with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
         output.write(f"release={str(release).lower()}\nhead-ref={head_ref}\n")
