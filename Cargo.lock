@@ -1520,6 +1520,8 @@ name = "etl-benchmarks"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
+ "chrono",
  "clap",
  "clickhouse",
  "etl",
@@ -1528,11 +1530,13 @@ dependencies = [
  "etl-postgres",
  "etl-telemetry",
  "k8s-openapi",
+ "libc",
  "reqwest",
  "rustls",
  "serde",
  "serde_json",
  "sqlx",
+ "tikv-jemallocator",
  "tokio",
  "tracing",
  "url",

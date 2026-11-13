@@ -17,7 +17,7 @@ use std::{
 
 use etl_config::shared::PipelineConfig;
 use futures::StreamExt;
-use metrics::{counter, histogram};
+use metrics::{Counter, counter, histogram};
 use postgres_replication::{
     protocol,
     protocol::{LogicalReplicationMessage, ReplicationMessage},
@@ -84,7 +84,7 @@ use crate::{
         },
     },
     schema::{ColumnSchema, ReplicatedTableSchema, SnapshotId, TableId, TableSchema},
-    source_payload_metadata::StreamingPayloadMetadata,
+    source_payload_metadata::{StreamingIngestionMetrics, StreamingPayloadMetadata},
     store::{PipelineStore, StateStore},
 };
 
@@ -1095,6 +1095,62 @@ impl ApplyLoopState {
     }
 }
 
+/// Source metric handles that one apply loop reuses for every replication
+/// message.
+///
+/// Handles are registered on first use, as in [`StreamingIngestionMetrics`].
+#[derive(Debug)]
+pub(crate) struct CdcIngestionMetrics {
+    /// Worker-type label value of this loop's series.
+    worker_type: &'static str,
+    /// Replication protocol messages received, keepalives included.
+    replication_messages: Option<Counter>,
+    /// Logical replication events received.
+    events_received: Option<Counter>,
+    /// Payload series of row events.
+    payload: StreamingIngestionMetrics,
+}
+
+impl CdcIngestionMetrics {
+    /// Creates unregistered handles labeled with `worker_type`.
+    pub(crate) fn new(worker_type: WorkerType) -> Self {
+        Self {
+            worker_type: worker_type.as_str(),
+            replication_messages: None,
+            events_received: None,
+            payload: StreamingIngestionMetrics::new(),
+        }
+    }
+
+    /// Counts one replication protocol message.
+    pub(crate) fn record_replication_message(&mut self) {
+        self.replication_messages
+            .get_or_insert_with(
+                || counter!(ETL_REPLICATION_MESSAGES_TOTAL, WORKER_TYPE_LABEL => self.worker_type),
+            )
+            .increment(1);
+    }
+
+    /// Counts one source event received through the CDC replication path.
+    pub(crate) fn record_event_received(&mut self) {
+        self.events_received
+            .get_or_insert_with(|| {
+                counter!(
+                    ETL_EVENTS_RECEIVED_TOTAL,
+                    WORKER_TYPE_LABEL => self.worker_type,
+                    REPLICATION_PATH_LABEL => CDC_REPLICATION_PATH,
+                )
+            })
+            .increment(1);
+    }
+
+    /// Records the received bytes and the row size of one row event.
+    pub(crate) fn record_row_event(&mut self, metadata: StreamingPayloadMetadata) {
+        self.payload.record_received(metadata);
+        self.payload.record_row_size(metadata);
+    }
+}
+
 /// Main apply loop implementation that processes replication events.
 ///
 /// [`ApplyLoop`] encapsulates the apply loop's immutable dependencies plus its
@@ -1121,6 +1177,8 @@ pub(crate) struct ApplyLoop<S, D> {
     max_batch_fill_duration: Duration,
     /// Background tasks owned by this apply loop.
     tasks: ApplyLoopTasks,
+    /// Source metric handles reused for every replication message.
+    ingestion_metrics: CdcIngestionMetrics,
     /// Mutable loop state.
     state: ApplyLoopState,
 }
@@ -1250,6 +1308,7 @@ where
         // determines how many decoded batches can coexist. Keep the guard alive
         // until the loop exits so both positions divide the shared target.
         let _batch_slot_guard = batch_memory_governor.register_batch_slots(APPLY_LOOP_BATCH_SLOTS);
+        let ingestion_metrics = CdcIngestionMetrics::new(worker_context.worker_type());
         let mut apply_loop = Self {
             config: Arc::clone(&config),
             schema_store,
@@ -1261,6 +1320,7 @@ where
             batch_memory_governor,
             max_batch_fill_duration: Duration::from_millis(config.batch.max_fill_ms),
             tasks,
+            ingestion_metrics,
             state,
         };
 
@@ -2305,11 +2365,7 @@ where
         &mut self,
         message: ReplicationMessage<LogicalReplicationMessage>,
     ) -> EtlResult<HandleMessageResult> {
-        counter!(
-            ETL_REPLICATION_MESSAGES_TOTAL,
-            WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
-        )
-        .increment(1);
+        self.ingestion_metrics.record_replication_message();
 
         match message {
             ReplicationMessage::XLogData(message) => {
@@ -2401,7 +2457,7 @@ where
         &mut self,
         message: LogicalReplicationMessage,
     ) -> EtlResult<HandleMessageResult> {
-        self.record_cdc_event_received();
+        self.ingestion_metrics.record_event_received();
 
         match &message {
             LogicalReplicationMessage::Begin(begin_body) => {
@@ -2438,16 +2494,6 @@ where
             }
             _ => Ok(HandleMessageResult::default()),
         }
-    }
-
-    /// Records a source event received through the CDC replication path.
-    fn record_cdc_event_received(&self) {
-        counter!(
-            ETL_EVENTS_RECEIVED_TOTAL,
-            WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
-            REPLICATION_PATH_LABEL => CDC_REPLICATION_PATH,
-        )
-        .increment(1);
     }
 
     /// Handles Postgres MESSAGE messages (pg_logical_emit_message).
@@ -3165,8 +3211,7 @@ where
 
         // Capture the source payload metadata and emit the initial metrics.
         let streaming_payload_metadata = row_change.payload_metadata();
-        streaming_payload_metadata.record_received();
-        streaming_payload_metadata.record_row_size();
+        self.ingestion_metrics.record_row_event(streaming_payload_metadata);
 
         // Exactly one worker owns protocol interpretation for a table at a
         // time, so non-owning workers skip row decoding and leave their

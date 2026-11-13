@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use std::mem::MaybeUninit;
 #[cfg(any(feature = "bigquery", feature = "clickhouse", feature = "snowflake"))]
 use std::sync::Once;
 use std::{
@@ -1346,6 +1348,61 @@ pub fn per_second(count: u64, duration: Duration) -> f64 {
     }
 
     count as f64 / seconds
+}
+
+/// Converts a `getrusage` time value to a duration.
+#[cfg(unix)]
+fn timeval_duration(value: libc::timeval) -> Option<Duration> {
+    let seconds = u64::try_from(value.tv_sec).ok()?;
+    let microseconds = u64::try_from(value.tv_usec).ok()?;
+
+    Some(Duration::from_secs(seconds) + Duration::from_micros(microseconds))
+}
+
+/// Returns the CPU time this process has used so far, in user and kernel mode,
+/// summed over all of its threads.
+///
+/// Throughput in these benchmarks is often bounded by Postgres or the workload
+/// generator. CPU time per row shows what the pipeline itself costs.
+///
+/// `None` means the call failed.
+#[cfg(unix)]
+pub fn process_cpu_time() -> Option<Duration> {
+    let mut usage = MaybeUninit::<libc::rusage>::uninit();
+
+    // SAFETY: `usage` is writable storage for one `rusage`, which is exactly
+    // what `getrusage` fills.
+    let status = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+    if status != 0 {
+        return None;
+    }
+
+    // SAFETY: a zero status means the kernel initialized the whole structure.
+    let usage = unsafe { usage.assume_init() };
+
+    Some(timeval_duration(usage.ru_utime)? + timeval_duration(usage.ru_stime)?)
+}
+
+/// Returns the CPU time this process has used so far.
+///
+/// Always `None`: only Unix platforms report it.
+#[cfg(not(unix))]
+pub fn process_cpu_time() -> Option<Duration> {
+    None
+}
+
+/// Returns the CPU time used since an earlier [`process_cpu_time`] reading.
+pub fn process_cpu_time_since(started: Option<Duration>) -> Option<Duration> {
+    Some(process_cpu_time()?.saturating_sub(started?))
+}
+
+/// Calculates microseconds spent per unit of work.
+pub fn micros_per_unit(duration: Duration, count: u64) -> f64 {
+    if count == 0 {
+        return 0.0;
+    }
+
+    duration.as_secs_f64() * 1_000_000.0 / count as f64
 }
 
 /// Converts bytes to mebibytes.

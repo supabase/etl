@@ -53,6 +53,8 @@ pin_project! {
         #[pin]
         stream: CopyOutStream,
         column_schemas: Vec<ColumnSchema>,
+        // Unescape scratch space reused for every row of the copy.
+        field_buffer: String,
     }
 }
 
@@ -63,7 +65,7 @@ impl TableCopyStream {
     /// The column schemas are used to convert the raw Postgres data into
     /// [`TableRow`]s.
     pub(crate) fn wrap(stream: CopyOutStream, column_schemas: Vec<ColumnSchema>) -> Self {
-        Self { stream, column_schemas }
+        Self { stream, column_schemas, field_buffer: String::new() }
     }
 }
 
@@ -88,8 +90,11 @@ impl Stream for TableCopyStream {
                 // Conversion step: transform raw bytes into structured
                 // TableRow. This is where most errors occur due to data format
                 // or type issues.
-                match parse_table_row_from_postgres_copy_bytes(&row, this.column_schemas.as_slice())
-                {
+                match parse_table_row_from_postgres_copy_bytes(
+                    &row,
+                    this.column_schemas.as_slice(),
+                    this.field_buffer,
+                ) {
                     Ok(row) => Poll::Ready(Some(Ok(TableCopyRow { row, metadata }))),
                     Err(err) => Poll::Ready(Some(Err(err))),
                 }
