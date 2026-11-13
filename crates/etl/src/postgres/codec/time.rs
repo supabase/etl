@@ -258,10 +258,14 @@ fn parse_iso_timetz_fast(value: &str) -> Option<PgTimeTz> {
 }
 
 /// Splits a timestamp string into timestamp and numeric UTC offset parts.
+///
+/// The offset starts at the last sign, which must come after the date. A sign
+/// is ASCII, so scanning bytes finds the same position as scanning characters
+/// and the split falls on a character boundary.
 fn split_timestamp_offset(value: &str) -> Option<(&str, &str)> {
-    value.char_indices().rev().find_map(|(idx, ch)| {
-        (idx > MIN_TIMESTAMP_OFFSET_INDEX && matches!(ch, '+' | '-')).then(|| value.split_at(idx))
-    })
+    let sign_index = value.bytes().rposition(|byte| matches!(byte, b'+' | b'-'))?;
+
+    (sign_index > MIN_TIMESTAMP_OFFSET_INDEX).then(|| value.split_at(sign_index))
 }
 
 /// Checks that each fast path accepts only inputs its reference parser
