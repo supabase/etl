@@ -1,10 +1,12 @@
 //! Postgres `NUMERIC` value support.
 
-use std::{io::Cursor, str::FromStr};
+use std::{fmt, io::Cursor, str::FromStr};
 
 use byteorder::{BigEndian, ReadBytesExt};
 use thiserror::Error;
 use tokio_postgres::types::{FromSql, IsNull, ToSql, Type};
+
+use crate::ascii::AsciiOutput;
 
 /// Postgres positive numeric sign marker.
 const POSITIVE_SIGN: u16 = 0x0000;
@@ -24,6 +26,8 @@ const POSTGRES_NUMERIC_MIN_WEIGHT: i32 = i16::MIN as i32;
 const POSTGRES_NUMERIC_MAX_WEIGHT: i32 = i16::MAX as i32;
 /// Maximum decimal digit buffer capacity reserved before parsing.
 const MAX_INITIAL_DECIMAL_DIGITS_CAPACITY: usize = 1024;
+/// ASCII decimal digits, indexed by value.
+const DECIMAL_DIGITS: &[u8; 10] = b"0123456789";
 
 /// Sign indicator for Postgres numeric values.
 ///
@@ -454,12 +458,52 @@ fn convert_to_base_10000(
     Ok(PgNumeric::Value { sign, weight: final_weight as i16, scale, digits: base_10000_digits })
 }
 
-impl std::fmt::Display for PgNumeric {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+/// Decimal characters of one base-10000 digit.
+enum DigitGroup {
+    /// Four zero-padded characters of a digit in `0..=9999`.
+    Padded([u8; 4]),
+    /// Text of a digit outside that range, at least four characters long.
+    OutOfRange(String),
+}
+
+impl DigitGroup {
+    /// Returns the decimal characters of `digit`, zero-padded to four.
+    fn new(digit: i16) -> Self {
+        match u16::try_from(digit) {
+            Ok(digit) if digit < 10_000 => Self::Padded([
+                DECIMAL_DIGITS[usize::from(digit / 1000)],
+                DECIMAL_DIGITS[usize::from(digit / 100 % 10)],
+                DECIMAL_DIGITS[usize::from(digit / 10 % 10)],
+                DECIMAL_DIGITS[usize::from(digit % 10)],
+            ]),
+            _ => Self::out_of_range(digit),
+        }
+    }
+
+    /// Formats a digit Postgres never sends.
+    ///
+    /// The binary decoder does not validate digits, so a corrupt value keeps
+    /// its plain integer rendering instead of aliasing a valid number.
+    #[cold]
+    fn out_of_range(digit: i16) -> Self {
+        Self::OutOfRange(format!("{digit:04}"))
+    }
+
+    /// Returns the characters as ASCII bytes.
+    fn as_bytes(&self) -> &[u8] {
         match self {
-            PgNumeric::NaN => write!(f, "NaN"),
-            PgNumeric::PositiveInfinity => write!(f, "Infinity"),
-            PgNumeric::NegativeInfinity => write!(f, "-Infinity"),
+            Self::Padded(characters) => characters,
+            Self::OutOfRange(text) => text.as_bytes(),
+        }
+    }
+}
+
+impl fmt::Display for PgNumeric {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PgNumeric::NaN => f.write_str("NaN"),
+            PgNumeric::PositiveInfinity => f.write_str("Infinity"),
+            PgNumeric::NegativeInfinity => f.write_str("-Infinity"),
             PgNumeric::Value { sign, weight, scale, digits } => {
                 format_numeric_value(f, sign, *weight, *scale, digits)
             }
@@ -473,86 +517,81 @@ impl std::fmt::Display for PgNumeric {
 /// decimal format, handling the base-10000 to decimal conversion, proper
 /// decimal point placement, and scale formatting.
 fn format_numeric_value(
-    f: &mut std::fmt::Formatter<'_>,
+    f: &mut fmt::Formatter<'_>,
     sign: &Sign,
     weight: i16,
     scale: u16,
     digits: &[i16],
-) -> std::fmt::Result {
+) -> fmt::Result {
+    let mut output = AsciiOutput::new(f);
+
     // Handle zero case. Postgres preserves the display scale of zero values, so
     // `0.000` keeps its three fractional zeros.
     if digits.is_empty() {
-        write!(f, "0")?;
+        output.push(b'0')?;
         if scale > 0 {
-            write!(f, ".")?;
+            output.push(b'.')?;
             for _ in 0..scale {
-                write!(f, "0")?;
+                output.push(b'0')?;
             }
         }
 
-        return Ok(());
+        return output.finish();
     }
 
     // Output negative sign if needed.
     if matches!(sign, Sign::Negative) {
-        write!(f, "-")?;
+        output.push(b'-')?;
     }
 
     if weight < 0 {
         // Number is less than 1, start with zero before the decimal point.
-        write!(f, "0")?;
+        output.push(b'0')?;
     } else {
         // Output digits before the decimal point.
         for d in 0..=weight {
-            let base_10000_digit = if (d as usize) < digits.len() { digits[d as usize] } else { 0 };
-
-            // Convert base-10000 digit to 4 decimal digits.
-            let decimal_digits = format!("{base_10000_digit:04}");
+            let base_10000_digit =
+                usize::try_from(d).ok().and_then(|index| digits.get(index)).copied().unwrap_or(0);
+            let group = DigitGroup::new(base_10000_digit);
+            let characters = group.as_bytes();
 
             if d == 0 {
                 // For the first digit, suppress leading zeros.
-                let trimmed = decimal_digits.trim_start_matches('0');
-                if trimmed.is_empty() {
-                    write!(f, "0")?;
-                } else {
-                    write!(f, "{trimmed}")?;
+                match characters.iter().position(|character| *character != b'0') {
+                    Some(first_nonzero) => output.push_bytes(&characters[first_nonzero..])?,
+                    None => output.push(b'0')?,
                 }
             } else {
                 // For subsequent digits, always output all 4 digits.
-                write!(f, "{decimal_digits}")?;
+                output.push_bytes(characters)?;
             }
         }
     }
 
     // Output decimal point and fractional digits if scale is positive.
     if scale > 0 {
-        write!(f, ".")?;
+        output.push(b'.')?;
 
-        let mut remaining_scale = i32::from(scale);
+        let mut remaining_scale = usize::from(scale);
         // Widen before adding one: the maximum Postgres weight is `i16::MAX`.
         let mut d = i32::from(weight) + 1;
 
         while remaining_scale > 0 {
             let base_10000_digit =
                 usize::try_from(d).ok().and_then(|index| digits.get(index)).copied().unwrap_or(0);
-
-            // Convert base-10000 digit to 4 decimal digits.
-            let decimal_digits = format!("{base_10000_digit:04}");
+            let group = DigitGroup::new(base_10000_digit);
+            let characters = group.as_bytes();
 
             // Output up to remaining scale digits.
-            let digits_to_output = std::cmp::min(4, remaining_scale);
-            for i in 0..digits_to_output {
-                if let Some(ch) = decimal_digits.chars().nth(i as usize) {
-                    write!(f, "{ch}")?;
-                }
-            }
+            let digits_to_output = remaining_scale.min(4);
+            output.push_bytes(characters.get(..digits_to_output).unwrap_or(characters))?;
 
             remaining_scale -= digits_to_output;
             d += 1;
         }
     }
 
-    Ok(())
+    output.finish()
 }
 
 #[cfg(test)]
