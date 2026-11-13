@@ -101,6 +101,10 @@ fn manual_solution(kind: ErrorKind) -> &'static str {
         ErrorKind::UnsupportedValueInDestination => {
             "Update the value in the Postgres table to make sure it's compatible."
         }
+        ErrorKind::UnsupportedSourceValue => {
+            "Update the value in the Postgres table so ETL can decode it. The error detail names \
+             the limit the value exceeds."
+        }
         ErrorKind::SourceConfigurationLimitExceeded => {
             "Verify the configured limits for Postgres, for example, the maximum number of \
              replication slots."

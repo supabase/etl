@@ -19,6 +19,71 @@ use crate::{
     },
 };
 
+/// Deepest container nesting [`serde_json`] decodes.
+///
+/// serde_json stops with a recursion error at 128 nested arrays or objects.
+/// Postgres accepts deeper `json` and `jsonb` values.
+const MAX_JSON_NESTING_DEPTH: usize = 127;
+
+/// Returns whether JSON `bytes` nest arrays and objects more than `limit`
+/// levels deep.
+///
+/// Brackets inside strings do not count. Every structural JSON byte is ASCII
+/// and UTF-8 continuation bytes never are, so scanning bytes is exact.
+fn json_nesting_exceeds(bytes: &[u8], limit: usize) -> bool {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for &byte in bytes {
+        if in_string {
+            match byte {
+                _ if escaped => escaped = false,
+                b'\\' => escaped = true,
+                b'"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+
+        match byte {
+            b'"' => in_string = true,
+            b'[' | b'{' => {
+                depth += 1;
+                if depth > limit {
+                    return true;
+                }
+            }
+            b']' | b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+
+    false
+}
+
+/// Parses Postgres `json` or `jsonb` output text.
+///
+/// # Errors
+///
+/// Returns [`ErrorKind::UnsupportedSourceValue`] when the value nests deeper
+/// than [`MAX_JSON_NESTING_DEPTH`]. Postgres accepts such values, so the row
+/// fails the same way on every retry until the value changes.
+fn parse_json(str: &str) -> EtlResult<serde_json::Value> {
+    serde_json::from_str(str).map_err(|error| {
+        // Classify only failed parses, so valid values are scanned once.
+        if json_nesting_exceeds(str.as_bytes(), MAX_JSON_NESTING_DEPTH) {
+            etl_error!(
+                ErrorKind::UnsupportedSourceValue,
+                "JSON value is nested too deeply",
+                format!("ETL decodes JSON nested at most {MAX_JSON_NESTING_DEPTH} levels deep")
+            )
+            .with_source(error)
+        } else {
+            error.into()
+        }
+    })
+}
+
 /// Converts a Postgres text-format string to a typed [`Cell`] value.
 ///
 /// This method parses Postgres's text representation of various data types into
@@ -123,13 +188,10 @@ pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<
             |str| Ok(Some(Uuid::parse_str(str)?)),
             ArrayCell::Uuid,
         ),
-        Type::JSON | Type::JSONB => {
-            let val = serde_json::from_str(str)?;
-            Ok(Cell::Json(val))
-        }
+        Type::JSON | Type::JSONB => Ok(Cell::Json(parse_json(str)?)),
         Type::JSON_ARRAY | Type::JSONB_ARRAY => parse_cell_from_postgres_text_array(
             str,
-            |str| Ok(Some(serde_json::from_str(str)?)),
+            |str| Ok(Some(parse_json(str)?)),
             ArrayCell::Json,
         ),
         Type::OID => {
@@ -343,7 +405,15 @@ mod tests {
     };
 
     use super::*;
-    use crate::data::{Date, PgTime, Timestamp};
+    use crate::{
+        data::{Date, PgTime, Timestamp},
+        error::Retryability,
+    };
+
+    /// Builds a JSON value nesting `depth` empty arrays.
+    fn nested_json_array(depth: usize) -> String {
+        format!("{}{}", "[".repeat(depth), "]".repeat(depth))
+    }
 
     #[test]
     fn parse_text_array_quoted_null_as_string() {
@@ -846,6 +916,43 @@ mod tests {
 
         let cell = parse_cell_from_postgres_text(&Type::JSONB, json_str).unwrap();
         assert!(matches!(cell, Cell::Json(_)));
+    }
+
+    #[test]
+    fn json_at_nesting_limit_decodes() {
+        let json_str = nested_json_array(MAX_JSON_NESTING_DEPTH);
+        for typ in [Type::JSON, Type::JSONB] {
+            let cell = parse_cell_from_postgres_text(&typ, &json_str).unwrap();
+            assert!(matches!(cell, Cell::Json(_)));
+        }
+    }
+
+    #[test]
+    fn json_past_nesting_limit_is_an_unsupported_source_value() {
+        let json_str = nested_json_array(MAX_JSON_NESTING_DEPTH + 1);
+        let json_array_str = format!("{{\"{json_str}\"}}");
+        for (typ, input) in [
+            (Type::JSON, json_str.as_str()),
+            (Type::JSONB, json_str.as_str()),
+            (Type::JSON_ARRAY, json_array_str.as_str()),
+            (Type::JSONB_ARRAY, json_array_str.as_str()),
+        ] {
+            let error = parse_cell_from_postgres_text(&typ, input).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::UnsupportedSourceValue, "{typ}");
+            assert_eq!(error.retryability(), Retryability::Permanent, "{typ}");
+        }
+    }
+
+    /// Brackets inside strings are not nesting, so malformed JSON with deep
+    /// brackets in a string stays a deserialization error.
+    #[test]
+    fn malformed_json_with_brackets_in_strings_is_a_deserialization_error() {
+        let open = "[".repeat(MAX_JSON_NESTING_DEPTH + 1);
+        for input in [format!("[\"{open}\" oops]"), format!("[\"\\\"{open}\""), format!("\"{open}")]
+        {
+            let error = parse_cell_from_postgres_text(&Type::JSON, &input).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::DeserializationError, "{input}");
+        }
     }
 
     #[test]

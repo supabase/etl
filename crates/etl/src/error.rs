@@ -157,6 +157,8 @@ pub enum ErrorKind {
     NullValuesNotSupportedInArrayInDestination,
     /// A destination does not support a source value.
     UnsupportedValueInDestination,
+    /// ETL cannot decode a source value that Postgres accepted.
+    UnsupportedSourceValue,
 
     // Configuration & Limit Errors
     /// Pipeline or destination configuration was invalid.
@@ -292,6 +294,7 @@ impl ErrorKind {
             | ErrorKind::ValidationError
             | ErrorKind::NullValuesNotSupportedInArrayInDestination
             | ErrorKind::UnsupportedValueInDestination
+            | ErrorKind::UnsupportedSourceValue
             | ErrorKind::ConfigError
             | ErrorKind::SourceConfigurationLimitExceeded
             | ErrorKind::IoError
