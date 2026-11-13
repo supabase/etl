@@ -26,6 +26,11 @@ const POSTGRES_NUMERIC_MIN_WEIGHT: i32 = i16::MIN as i32;
 const POSTGRES_NUMERIC_MAX_WEIGHT: i32 = i16::MAX as i32;
 /// Maximum decimal digit buffer capacity reserved before parsing.
 const MAX_INITIAL_DECIMAL_DIGITS_CAPACITY: usize = 1024;
+/// Mantissa digits parsed on the stack before spilling to the heap.
+///
+/// Covers every numeric of up to 64 digits, so ordinary values parse without
+/// a temporary allocation.
+const INLINE_DECIMAL_DIGITS: usize = 64;
 /// ASCII decimal digits, indexed by value.
 const DECIMAL_DIGITS: &[u8; 10] = b"0123456789";
 
@@ -262,6 +267,56 @@ fn parse_special_value(
     }
 }
 
+/// Decimal digits of a mantissa being parsed, most significant first.
+enum DecimalDigits {
+    /// Digits held on the stack.
+    Inline {
+        /// Digit storage; only the first `len` entries are meaningful.
+        digits: [u8; INLINE_DECIMAL_DIGITS],
+        /// Number of digits pushed.
+        len: usize,
+    },
+    /// Digits of a mantissa too long for the stack.
+    Heap(Vec<u8>),
+}
+
+impl DecimalDigits {
+    /// Creates empty storage for a mantissa of at most `max_len` digits.
+    fn with_capacity(max_len: usize) -> Self {
+        if max_len <= INLINE_DECIMAL_DIGITS {
+            Self::Inline { digits: [0; INLINE_DECIMAL_DIGITS], len: 0 }
+        } else {
+            Self::Heap(Vec::with_capacity(max_len.min(MAX_INITIAL_DECIMAL_DIGITS_CAPACITY)))
+        }
+    }
+
+    /// Appends one digit, spilling to the heap if the stack storage is full.
+    fn push(&mut self, digit: u8) {
+        match self {
+            Self::Inline { digits, len } => match digits.get_mut(*len) {
+                Some(slot) => {
+                    *slot = digit;
+                    *len += 1;
+                }
+                None => {
+                    let mut spilled = digits.to_vec();
+                    spilled.push(digit);
+                    *self = Self::Heap(spilled);
+                }
+            },
+            Self::Heap(digits) => digits.push(digit),
+        }
+    }
+
+    /// Returns the digits pushed so far.
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Inline { digits, len } => &digits[..*len],
+            Self::Heap(digits) => digits,
+        }
+    }
+}
+
 /// Parses a regular numeric value from trimmed byte input.
 ///
 /// This function processes decimal digits, decimal points, underscores (digit
@@ -270,8 +325,7 @@ fn parse_special_value(
 /// accepted syntax is ASCII, so a non-ASCII byte simply fails to match and
 /// rejects the input, exactly as the previous char-based parser did.
 fn parse_numeric_value(bytes: &[u8], sign: Sign) -> Result<PgNumeric, ParseNumericError> {
-    let mut decimal_digits =
-        Vec::with_capacity(bytes.len().min(MAX_INITIAL_DECIMAL_DIGITS_CAPACITY));
+    let mut decimal_digits = DecimalDigits::with_capacity(bytes.len());
     let mut have_decimal_point = false;
     // Decimal weight is the number of digits before the decimal point minus
     // one.
@@ -393,7 +447,7 @@ fn parse_numeric_value(bytes: &[u8], sign: Sign) -> Result<PgNumeric, ParseNumer
     }
 
     // Convert to base-10000 representation.
-    convert_to_base_10000(&decimal_digits, dweight, dscale, sign)
+    convert_to_base_10000(decimal_digits.as_slice(), dweight, dscale, sign)
 }
 
 /// Converts decimal digits to Postgres's base-10000 internal format.
