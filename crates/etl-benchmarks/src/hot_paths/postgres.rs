@@ -30,6 +30,9 @@ pub(super) const SCENARIOS: &[Scenario] = &[
     Scenario { name: "timetz_display", unit: "cell", prepare: prepare_timetz_display },
     Scenario { name: "timestamp_display", unit: "cell", prepare: prepare_timestamp_display },
     Scenario { name: "timestamptz_display", unit: "cell", prepare: prepare_timestamptz_display },
+    Scenario { name: "numeric_parse", unit: "cell", prepare: prepare_numeric_parse },
+    Scenario { name: "date_parse", unit: "cell", prepare: prepare_date_parse },
+    Scenario { name: "timestamptz_parse", unit: "cell", prepare: prepare_timestamptz_parse },
     Scenario { name: "timetz_parse", unit: "cell", prepare: prepare_timetz_parse },
 ];
 
@@ -146,6 +149,30 @@ fn prepare_timestamptz_display(mut rng: Rng, units: usize) -> Box<dyn Workload> 
     let values = (0..units).map(|_| Timestamp::Value(rng.timestamptz())).collect();
 
     DisplayWorkload::boxed(values, |output, value| write!(output, "{}", format_timestamptz(value)))
+}
+
+/// Prepares numeric parsing over production-shaped values.
+fn prepare_numeric_parse(mut rng: Rng, units: usize) -> Box<dyn Workload> {
+    let values = (0..units).map(|_| rng.numeric_text()).collect();
+
+    Box::new(TextParseWorkload { typ: Type::NUMERIC, values, cells: Vec::new() })
+}
+
+/// Prepares date parsing from the text Postgres emits.
+fn prepare_date_parse(mut rng: Rng, units: usize) -> Box<dyn Workload> {
+    let values = (0..units).map(|_| rng.date().format("%Y-%m-%d").to_string()).collect();
+
+    Box::new(TextParseWorkload { typ: Type::DATE, values, cells: Vec::new() })
+}
+
+/// Prepares timestamp with time zone parsing from the text Postgres emits for
+/// a UTC session.
+fn prepare_timestamptz_parse(mut rng: Rng, units: usize) -> Box<dyn Workload> {
+    let values = (0..units)
+        .map(|_| format!("{}+00", rng.timestamp().format("%Y-%m-%d %H:%M:%S%.f")))
+        .collect();
+
+    Box::new(TextParseWorkload { typ: Type::TIMESTAMPTZ, values, cells: Vec::new() })
 }
 
 /// Prepares time with time zone parsing from the text Postgres emits.
