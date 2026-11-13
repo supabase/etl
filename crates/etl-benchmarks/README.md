@@ -549,6 +549,7 @@ Table copy benchmark
   Throughput
     Rows/s              87,738.47
     Est. decoded MiB/s  47.11
+    CPU µs/row          1.842
 ```
 
 Example table-streaming summary:
@@ -568,6 +569,7 @@ Table streaming benchmark
   Throughput
     Events/s             6,842.31
     Est. decoded MiB/s   1.93
+    CPU µs/event         12.406
     Elapsed              6.18 s
 ```
 
@@ -575,6 +577,7 @@ The main fields to compare across runs are:
 
 - rows or CDC events processed
 - rows/events per second
+- CPU microseconds per row or event
 - estimated decoded MiB per second
 - copy wait, streaming elapsed, shutdown, and total timings
 - destination batch counts and max event batch size
@@ -583,6 +586,14 @@ The main fields to compare across runs are:
 Byte values are estimates based on ETL's decoded in-memory row/event size hints.
 They are useful for comparing benchmark runs in this repository, but they are
 not raw WAL bytes, network bytes, or destination billing bytes.
+
+CPU per row or event is the benchmark process's user and kernel CPU time,
+summed over its threads, divided by the rows copied or events observed. The
+pipeline and destination client run in that process; Postgres and the TPC-C
+generator do not. Throughput is often bounded by those two, so this is the
+number that shows a change in what the pipeline itself costs. Copy CPU is
+measured from pipeline start until the copy finishes, and streaming CPU from
+workload start until the drain finishes.
 
 ## Direct Benchmark Binaries
 
