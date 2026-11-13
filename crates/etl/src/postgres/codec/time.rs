@@ -11,15 +11,30 @@ use etl_postgres::time::{
 /// Minimum byte index after `YYYY-MM-DD` where a UTC offset sign can appear.
 const MIN_TIMESTAMP_OFFSET_INDEX: usize = 10;
 
+/// Returns whether `value` already uses chrono's year syntax: a four-byte
+/// year other than `0000`, ended by the first `-`, with no `BC` suffix.
+///
+/// Almost every value has this form, so it is checked on bytes before the
+/// era and year are split out.
+fn has_plain_year(value: &str) -> bool {
+    let bytes = value.as_bytes();
+
+    matches!(
+        bytes.split_first_chunk::<4>(),
+        Some((year, [b'-', ..])) if !year.contains(&b'-') && year != b"0000"
+    ) && !bytes.ends_with(b" BC")
+}
+
 /// Converts Postgres era notation to chrono's astronomical year syntax.
 ///
 /// Finite values remain limited to chrono's calendar range.
 fn normalize_year(value: &str) -> Result<Cow<'_, str>, ParseTimeError> {
-    let (value, bc) = value.strip_suffix(" BC").map_or((value, false), |value| (value, true));
-    let (year, rest) = value.split_once('-').ok_or(ParseTimeError::InvalidSyntax)?;
-    if !bc && year.len() == 4 && year != "0000" {
+    if has_plain_year(value) {
         return Ok(Cow::Borrowed(value));
     }
+
+    let (value, bc) = value.strip_suffix(" BC").map_or((value, false), |value| (value, true));
+    let (year, rest) = value.split_once('-').ok_or(ParseTimeError::InvalidSyntax)?;
     if year.is_empty() || !year.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(ParseTimeError::InvalidSyntax);
     }
