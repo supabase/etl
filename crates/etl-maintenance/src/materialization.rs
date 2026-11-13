@@ -278,6 +278,7 @@ mod tests {
         // A closed pool exposes the storage boundary without a live database.
         pool.close().await;
         let materializer = PostgresMaintenanceMaterializer::new(pool);
+
         for value in ["pipeline-example", "042", "0042", "+42", "-042", "00", "+0", "-0"] {
             let identity = MaintenanceIdentity {
                 tenant_id: "tenant-example".to_owned(),

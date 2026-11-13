@@ -164,6 +164,7 @@ impl<'a> FromSql<'a> for PgNumeric {
         let scale = rdr.read_u16::<BigEndian>()?;
 
         let mut digits = Vec::with_capacity(num_digits as usize);
+
         for _ in 0..num_digits {
             digits.push(rdr.read_i16::<BigEndian>()?);
         }
@@ -247,6 +248,7 @@ fn parse_special_value(
         if has_explicit_sign {
             return Err(ParseNumericError::InvalidSyntax);
         }
+
         Ok(PgNumeric::NaN)
     } else if rest.eq_ignore_ascii_case("infinity") || rest.eq_ignore_ascii_case("inf") {
         match sign {
@@ -293,6 +295,7 @@ fn parse_numeric_value(bytes: &[u8], sign: Sign) -> Result<PgNumeric, ParseNumer
             b'0'..=b'9' => {
                 pos += 1;
                 decimal_digits.push(byte - b'0');
+
                 if !have_decimal_point {
                     dweight += 1;
                 } else {
@@ -303,6 +306,7 @@ fn parse_numeric_value(bytes: &[u8], sign: Sign) -> Result<PgNumeric, ParseNumer
                 if have_decimal_point {
                     return Err(ParseNumericError::InvalidSyntax);
                 }
+
                 have_decimal_point = true;
                 pos += 1;
                 // A decimal point must not be followed by an underscore.
@@ -372,6 +376,7 @@ fn parse_numeric_value(bytes: &[u8], sign: Sign) -> Result<PgNumeric, ParseNumer
         }
 
         dweight += exponent as i32;
+
         dscale = if (i64::from(dscale) - exponent) < 0 {
             0
         } else {
@@ -416,10 +421,12 @@ fn convert_to_base_10000(
 
     // Calculate offset for proper alignment.
     let offset = (weight + 1) * 4 - (dweight + 1);
+
     let Some(first_nonzero_decimal_index) = decimal_digits.iter().position(|&digit| digit != 0)
     else {
         return Ok(PgNumeric::Value { sign: Sign::Positive, weight: 0, scale, digits: vec![] });
     };
+
     let last_nonzero_decimal_index = decimal_digits
         .iter()
         .rposition(|&digit| digit != 0)
@@ -439,8 +446,10 @@ fn convert_to_base_10000(
     // a vector sized by the exponent.
     let retained_groups = last_nonzero_group - first_nonzero_group + 1;
     let mut base_10000_digits = Vec::with_capacity(retained_groups as usize);
+
     for group in first_nonzero_group..=last_nonzero_group {
         let mut digit = 0i16;
+
         for position in group * 4..group * 4 + 4 {
             let decimal_digit = usize::try_from(position - offset)
                 .ok()
@@ -448,6 +457,7 @@ fn convert_to_base_10000(
                 .unwrap_or(0);
             digit = digit * 10 + i16::from(decimal_digit);
         }
+
         base_10000_digits.push(digit);
     }
 
@@ -483,8 +493,10 @@ fn format_numeric_value(
     // `0.000` keeps its three fractional zeros.
     if digits.is_empty() {
         write!(f, "0")?;
+
         if scale > 0 {
             write!(f, ".")?;
+
             for _ in 0..scale {
                 write!(f, "0")?;
             }
@@ -797,6 +809,7 @@ mod tests {
             let round = PgNumeric::from_sql(&Type::NUMERIC, &buf).unwrap();
             // Internal representation should be canonical zero with same scale.
             assert_eq!(num, round);
+
             if let PgNumeric::Value { sign, weight, digits, .. } = round {
                 assert_eq!(sign, Sign::Positive);
                 assert_eq!(weight, 0);

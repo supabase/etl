@@ -115,10 +115,12 @@ impl Inner {
     /// Initializes state counts from an existing table state map.
     fn init_state_counts(&mut self, table_states: &BTreeMap<TableId, TableState>) {
         let mut state_counts = HashMap::new();
+
         for state in table_states.values() {
             let state_type: TableStateType = state.into();
             *state_counts.entry(state_type).or_insert(0u64) += 1;
         }
+
         self.state_counts = state_counts;
     }
 
@@ -260,6 +262,7 @@ impl PostgresStore {
             pg_table_state::get_table_state_rows(tx.executor(), self.pipeline_id.as_str()).await?;
 
         let mut table_states: BTreeMap<TableId, TableState> = BTreeMap::new();
+
         for row in replication_state_rows {
             let table_id = TableId::new(row.table_id.0);
             let state = TableState::from_state_row(row)?;
@@ -280,8 +283,10 @@ impl PostgresStore {
         })?;
 
         let mut metadata: BTreeMap<TableId, DestinationTableMetadata> = BTreeMap::new();
+
         for (table_id, row) in rows {
             let target_mask = ReplicationMask::from_bytes(row.replication_mask);
+
             let destination_metadata = match (
                 row.schema_status,
                 row.previous_snapshot_id,
@@ -329,6 +334,7 @@ impl PostgresStore {
                     ));
                 }
             };
+
             metadata.insert(table_id, destination_metadata);
         }
 
@@ -374,6 +380,7 @@ impl PostgresStore {
         for state in inner.state_counts.keys() {
             refreshed.state_counts.entry(*state).or_default();
         }
+
         refreshed.usable = true;
         *inner = refreshed;
         emit_table_metrics(&inner.state_counts);
@@ -409,6 +416,7 @@ impl StateStore for PostgresStore {
     /// Commits all table-state updates, then updates the shared cache.
     async fn update_table_states(&self, updates: Vec<(TableId, TableState)>) -> EtlResult<()> {
         let mut inner = self.lock_cache().await?;
+
         if updates.is_empty() {
             return Ok(());
         }
@@ -446,6 +454,7 @@ impl StateStore for PostgresStore {
         for (table_id, state) in updates {
             inner.set_table_state(table_id, state);
         }
+
         emit_table_metrics(&inner.state_counts);
         inner.usable = true;
 
@@ -677,6 +686,7 @@ impl SchemaStore for PostgresStore {
             schema::upsert_table_schema(tx.executor(), self.pipeline_id.as_str(), &table_schema)
                 .await?;
         schema::delete_table_columns(tx.executor(), schema_id).await?;
+
         for columns in table_schema.column_schemas.chunks(schema::MAX_COLUMNS_PER_INSERT) {
             schema::insert_table_columns(tx.executor(), schema_id, columns).await?;
         }
@@ -711,6 +721,7 @@ impl SchemaStore for PostgresStore {
         if skipped_table_count > 0 {
             counter!(ETL_SCHEMA_CLEANUP_SKIPPED_TABLES_TOTAL).increment(skipped_table_count as u64);
         }
+
         if retention_snapshot_ids.is_empty() {
             return Ok(0);
         }
@@ -859,6 +870,7 @@ impl TableStateLifecycleStore for PostgresStore {
                 for table_id in table_ids {
                     inner.set_table_state(table_id, TableState::Init);
                 }
+
                 emit_table_metrics(&inner.state_counts);
                 inner.usable = true;
 

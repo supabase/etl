@@ -316,6 +316,7 @@ impl IntoConnectOptions<SqlxConnectOptions> for PgConnectionConfig {
     /// Creates sqlx connection options without database name.
     fn without_db(&self, options: Option<&PgConnectionOptions>) -> SqlxConnectOptions {
         let host = self.hostaddr.map_or_else(|| self.host.clone(), |hostaddr| hostaddr.to_string());
+
         let ssl_mode = match (self.tls.enabled, self.hostaddr) {
             // sqlx 0.8.6 does not expose libpq's separate hostaddr field. When dialing a numeric
             // address, verify the CA but avoid hostname verification against the IP literal.
@@ -323,6 +324,7 @@ impl IntoConnectOptions<SqlxConnectOptions> for PgConnectionConfig {
             (true, None) => SqlxSslMode::VerifyFull,
             (false, _) => SqlxSslMode::Prefer,
         };
+
         let mut connect_options = SqlxConnectOptions::new_without_pgpass()
             .host(&host)
             .username(&self.username)
@@ -366,6 +368,7 @@ impl IntoConnectOptions<TokioPgConnectOptions> for PgConnectionConfig {
     fn without_db(&self, options: Option<&PgConnectionOptions>) -> TokioPgConnectOptions {
         let ssl_mode =
             if self.tls.enabled { TokioPgSslMode::VerifyFull } else { TokioPgSslMode::Prefer };
+
         let mut config = TokioPgConnectOptions::new();
         config
             .host(self.host.clone())
@@ -517,6 +520,7 @@ mod tests {
             let stderr = String::from_utf8(output.stderr).unwrap();
             assert!(output.status.success(), "{stdout}\n{stderr}");
             assert!(stdout.contains("1 passed;"), "{stdout}");
+
             return;
         }
 
@@ -565,6 +569,7 @@ mod tests {
         let options: TokioPgConnectOptions = config.with_db(None);
 
         assert_eq!(options.get_hostaddrs(), &[hostaddr]);
+
         match options.get_hosts().first().expect("host is configured") {
             tokio_postgres::config::Host::Tcp(host) => {
                 assert_eq!(host, "db.abcdefghijklmnopqrst.supabase.co");

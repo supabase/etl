@@ -226,6 +226,7 @@ impl RowBatchBuilder {
     ) -> Result<Completed> {
         if serialized_len_hint(row) <= self.limits.small_row_limit {
             self.scratch.clear();
+
             match serialize_row(&mut self.scratch, cols, row, cdc) {
                 Ok(()) => return self.admit_small(offset),
                 Err(error) if self.scratch.overflow().is_none() => return Err(error),
@@ -237,6 +238,7 @@ impl RowBatchBuilder {
         let frame = compress_row_frame(&self.limits, self.table_id, cols, row, cdc)?;
         self.row_frames += 1;
         self.open.close_stream_frame()?;
+
         let completed = if self.open.row_count() > 0
             && self.open.len() + frame.len() > self.limits.request_limit
         {
@@ -244,6 +246,7 @@ impl RowBatchBuilder {
         } else {
             None
         };
+
         self.open.append_frame(frame.as_slice(), offset)?;
         Ok(Completed(completed))
     }
@@ -280,6 +283,7 @@ impl RowBatchBuilder {
         } else {
             None
         };
+
         self.open.write_small(self.scratch.as_slice(), offset)?;
         Ok(Completed(completed))
     }
@@ -377,20 +381,24 @@ mod tests {
     /// `limit`, with contiguous offset ranges covering every row once.
     fn assert_rows_in_order(batches: &[RowBatch], expected: usize, limit: usize) {
         let mut ordinal = 1u64;
+
         for batch in batches {
             assert!(batch.size() <= limit, "request of {} B over {limit}", batch.size());
             assert!(batch.row_count() > 0);
             assert_eq!(batch.start_offset(), &offset(ordinal));
             let rows = decode(batch);
             assert_eq!(rows.len(), batch.row_count());
+
             for row in rows {
                 assert_eq!(row["id"], Value::from(ordinal));
                 assert_eq!(row["_cdc_operation"], Value::from("insert"));
                 assert_eq!(row["_cdc_sequence_number"], Value::from(offset(ordinal).as_ref()));
                 ordinal += 1;
             }
+
             assert_eq!(batch.end_offset(), &offset(ordinal - 1));
         }
+
         assert_eq!(ordinal - 1, expected as u64);
     }
 
@@ -407,12 +415,14 @@ mod tests {
                 return (request, ordinal);
             }
         }
+
         panic!("no request completed");
     }
 
     #[test]
     fn small_rows_share_one_request() {
         let mut builder = builder();
+
         for ordinal in 1..=10 {
             assert!(push(&mut builder, ordinal, format!("row_{ordinal}")).unwrap().is_empty());
         }
@@ -634,14 +644,17 @@ mod tests {
     fn footprint_stays_within_the_limits() {
         let mut builder = builder();
         let mut batches = Vec::new();
+
         for ordinal in 1..=40 {
             let payload =
                 if ordinal % 4 == 0 { "a".repeat(100 * 1024) } else { random_text(1500, ordinal) };
+
             batches.extend(push(&mut builder, ordinal, payload).unwrap());
             let footprint = builder.footprint();
             assert!(footprint.scratch_capacity <= SMALL_ROW_LIMIT);
             assert!(footprint.body_capacity <= REQUEST_LIMIT);
         }
+
         batches.extend(builder.finish().unwrap());
         assert_eq!(total_rows(&batches), 40);
         assert_rows_in_order(&batches, 40, REQUEST_LIMIT);
@@ -654,19 +667,23 @@ mod tests {
             state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             state >> 33
         };
+
         for iteration in 0..40 {
             let mut builder = builder();
             let mut batches = Vec::new();
             let rows = 20 + next() % 60;
             for ordinal in 1..=rows {
                 let len = 1 + next() as usize % (SMALL_ROW_LIMIT - 64);
+
                 let payload =
                     if next() % 2 == 0 { random_text(len, next()) } else { "z".repeat(len) };
+
                 batches.extend(
                     push(&mut builder, ordinal, payload)
                         .unwrap_or_else(|error| panic!("iteration {iteration}: {error}")),
                 );
             }
+
             batches.extend(builder.finish().unwrap());
             assert_rows_in_order(&batches, rows as usize, REQUEST_LIMIT);
         }
@@ -721,18 +738,22 @@ mod tests {
     fn production_limits_pack_one_mebibyte_rows_to_at_least_ninety_percent() {
         let mut builder = RowBatchBuilder::new(TableId::new(1));
         let mut batches = Vec::new();
+
         for ordinal in 1..=32 {
             batches.extend(
                 push(&mut builder, ordinal, structured_text(1024 * 1024, ordinal, 88)).unwrap(),
             );
         }
+
         batches.extend(builder.finish().unwrap());
 
         assert!(batches.len() >= 2);
+
         for request in &batches[..batches.len() - 1] {
             assert!(request.size() <= REQUEST_LIMIT_BYTES);
             assert!(request.size() * 10 >= REQUEST_LIMIT_BYTES * 9, "fill {} B", request.size());
         }
+
         assert_rows_in_order(&batches, 32, REQUEST_LIMIT_BYTES);
     }
 
@@ -786,14 +807,17 @@ mod tests {
             Fill::Repeated => "z".repeat(generated.len),
             Fill::Random => random_text(generated.len, generated.seed),
         };
+
         let ratio = match generated.defect {
             Defect::NanRatio => f64::NAN,
             _ => generated.seed as f64,
         };
+
         let last_element = match generated.defect {
             Defect::NullJsonElement => None,
             _ => Some(Value::Null),
         };
+
         TableRow::new(vec![
             Cell::I32(ordinal as i32),
             Cell::String(payload),
@@ -858,6 +882,7 @@ mod tests {
             let mut builder = RowBatchBuilder::with_limits(TableId::new(7), *limits);
             let mut batches = Vec::new();
             let mut accepted: Vec<(OffsetToken, Vec<u8>)> = Vec::new();
+
             for (index, generated) in rows.iter().enumerate() {
                 let ordinal = index as u64;
                 let offset = OffsetToken::new(PgLsn::from(10 + ordinal / 4), ordinal % 4);
@@ -865,6 +890,7 @@ mod tests {
                 let cdc = CdcMeta::new(CdcOperation::Insert, offset.as_ref());
                 let mut line = Vec::new();
                 let serializable = serialize_row(&mut line, &cols, &row, cdc).is_ok();
+
                 match builder.push_row(&cols, &row, cdc, &offset) {
                     Ok(completed) => {
                         prop_assert!(serializable, "row {index} cannot serialize but was accepted");
@@ -889,12 +915,14 @@ mod tests {
                     }
                 }
             }
+
             let last = builder
                 .finish()
                 .map_err(|error| TestCaseError::fail(format!("finish failed: {error}")))?;
             batches.extend(last);
 
             let mut next = 0;
+
             for (index, batch) in batches.iter().enumerate() {
                 prop_assert!(
                     batch.size() <= limits.request_limit,
@@ -919,6 +947,7 @@ mod tests {
                 );
                 next += batch.row_count();
             }
+
             prop_assert_eq!(next, accepted.len(), "accepted rows missing from requests");
             Ok(())
         });

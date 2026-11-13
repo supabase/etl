@@ -200,6 +200,7 @@ pub fn assert_schema_snapshots_ordering(
     assert!(!snapshots.is_empty());
 
     let (first_snapshot_id, _) = &snapshots[0];
+
     if first_is_initial {
         assert_eq!(*first_snapshot_id, SnapshotId::initial());
     } else {

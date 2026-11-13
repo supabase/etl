@@ -59,6 +59,7 @@ async fn wait_for_writer(client: &Client, transaction_id: &str) {
 async fn copy_bytes(stream: CopyOutStream) -> Vec<u8> {
     tokio::pin!(stream);
     let mut bytes = Vec::new();
+
     while let Some(chunk) = stream.next().await {
         bytes.extend_from_slice(&chunk.unwrap());
     }
@@ -102,6 +103,7 @@ async fn assert_copy_locks_precede_snapshot_and_allow_writes(
         observer.batch_execute("rollback").await.unwrap();
         database.run_sql("commit").await.unwrap();
     };
+
     let (created, ()) =
         tokio::join!(parent.create_table_copy_slot(&slot_name, table_id, &config), release_writer);
 
@@ -224,6 +226,7 @@ async fn copy_worker_rejects_queued_ddl_and_releases_locks() {
         // Exercise rollback on an incomplete copy, rather than committing it.
         drop(transaction);
     };
+
     let (ddl, ()) = tokio::join!(
         ddl_client.batch_execute(
             "set lock_timeout = '10s'; alter table test.copied alter column id type bigint"
@@ -314,6 +317,7 @@ async fn copy_rejects_partition_attached_before_snapshot() {
             .unwrap();
         client.batch_execute("commit").await.unwrap();
     };
+
     let slot_name = test_slot_name("concurrent_attach");
     let config = ReplicationSlotConfig::default();
     let (created, ()) =
@@ -340,6 +344,7 @@ async fn copy_rejects_busy_table_before_snapshot() {
 
     let mut parent = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("busy_table");
+
     for relation in ["root", "leaf"] {
         client
             .batch_execute(&format!(
@@ -400,6 +405,7 @@ async fn copy_slot_bounds_writer_ddl_deadlock() {
         observer.batch_execute("alter table test.copied add column extra int").await.unwrap();
         client.batch_execute("commit").await.unwrap();
     };
+
     let slot_name = test_slot_name("writer_ddl_cycle");
     let config = ReplicationSlotConfig::default();
     let (created, ()) = timeout(Duration::from_secs(45), async {
@@ -448,6 +454,7 @@ async fn copy_slot_classifies_postgres_deadlock_as_retryable() {
 
         client.batch_execute("alter table test.copied add column extra int; commit").await.unwrap();
     };
+
     let slot_name = test_slot_name("postgres_deadlock");
     let config = ReplicationSlotConfig::default();
     let (created, ()) = timeout(Duration::from_secs(10), async {
@@ -573,11 +580,13 @@ async fn copy_publication_columns_match_postgres() {
         .unwrap();
 
     let mut publications = Vec::new();
+
     for via_root in [false, true] {
         // PostgreSQL forbids column lists on partitioned tables unless they
         // supply the published root identity.
         let root_columns = if via_root { " (id)" } else { "" };
         let branch_columns = if via_root { r#" ("odd "" column")"# } else { "" };
+
         for (case, targets) in [
             ("root", format!("table copy_roots.root{root_columns}, test.parent (id)")),
             ("subtree", format!("table copy_branches.branch{branch_columns}")),
@@ -611,6 +620,7 @@ async fn copy_publication_columns_match_postgres() {
 
     let mut parent = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("publication_rules");
+
     for relation in
         ["copy_roots.root", "copy_branches.branch", "copy_leaves.leaf", "test.parent", "test.child"]
     {
@@ -619,6 +629,7 @@ async fn copy_publication_columns_match_postgres() {
         let (transaction, _) =
             parent.create_table_copy_slot(&slot_name, table_id, &Default::default()).await.unwrap();
         let (schema, _) = transaction.get_table_schema_with_identity(table_id).await.unwrap();
+
         for publication in &publications {
             // Use the server's view as an independent oracle while this
             // fixture's catalogs are stable.
@@ -634,6 +645,7 @@ async fn copy_publication_columns_match_postgres() {
                 .unwrap();
             let actual =
                 transaction.get_replicated_column_names(table_id, &schema, publication).await;
+
             if let Some(expected) = expected {
                 let columns = expected.get::<_, Vec<String>>(0).into_iter().collect();
                 assert_eq!(actual.unwrap(), columns, "{publication}: {relation}");
@@ -736,12 +748,14 @@ async fn copy_worker_rejects_queued_root_ddl() {
         )
         .await
         .unwrap();
+
     if !below_version!(database.server_version(), POSTGRES_15) {
         client
             .batch_execute("alter publication copy_pub set table test.root where (id >= 0)")
             .await
             .unwrap();
     }
+
     let row = client
         .query_one("select 'test.root'::regclass::oid, 'test.leaf'::regclass::oid", &[])
         .await
@@ -782,6 +796,7 @@ async fn copy_worker_rejects_queued_root_ddl() {
         drop(child_tx);
         drop(transaction);
     };
+
     let (ddl, ()) = tokio::join!(
         ddl_client
             .batch_execute("set lock_timeout = '10s'; alter table test.root add column extra int"),

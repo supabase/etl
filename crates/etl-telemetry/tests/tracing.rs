@@ -29,6 +29,7 @@ fn enabled_tracing_preserves_process_environment() {
             .env("ENABLE_TRACING", "1")
             .env("RUST_LOG", "info")
             .env_remove("APP_ENVIRONMENT");
+
         if let Some(environment) = environment {
             command.env("APP_ENVIRONMENT", environment);
         }

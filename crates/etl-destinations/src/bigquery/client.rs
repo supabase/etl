@@ -1671,6 +1671,7 @@ mod tests {
             assert!(json_error.to_string().contains(reason));
             assert!(json_error.line() > 0);
         }
+
         let invalid_utf8 = b"{\"private_key\":\"placeholder-\xff\"}";
         let error = parse_service_account_key(invalid_utf8).err().unwrap();
         assert_no_credential_value(&error);
@@ -1687,6 +1688,7 @@ mod tests {
             assert_no_credential_value(&error);
             assert!(matches!(error, BQError::InvalidServiceAccountKey(_)));
         }
+
         let document = format!("{SERVICE_ACCOUNT_DOCUMENT} true");
         let error = parse_service_account_key(document.as_bytes()).err().unwrap();
         assert_no_credential_value(&error);
@@ -1787,11 +1789,13 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.kind(), ErrorKind::DestinationAuthenticationError);
         assert_eq!(error.retryability(), Retryability::Permanent);
+
         let Some(BQError::InvalidServiceAccountKey(source)) =
             error.source().unwrap().downcast_ref::<BQError>()
         else {
             panic!()
         };
+
         assert_eq!(source.kind(), io::ErrorKind::NotFound);
     }
 
@@ -2031,6 +2035,7 @@ mod tests {
             let message = status.message().to_owned();
             assert_eq!(BQError::from(status).retryability(), Retryability::Retryable, "{message}");
         }
+
         for status in [
             tonic::Status::invalid_argument("Invalid row"),
             tonic::Status::permission_denied("Permission denied"),
@@ -2039,6 +2044,7 @@ mod tests {
             let message = status.message().to_owned();
             assert_eq!(BQError::from(status).retryability(), Retryability::Permanent, "{message}");
         }
+
         assert_eq!(BQError::NoToken.retryability(), Retryability::Permanent);
     }
 

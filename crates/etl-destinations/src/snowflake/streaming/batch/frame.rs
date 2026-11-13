@@ -163,6 +163,7 @@ fn row_too_large(
         Ok(serialized_bytes) => serialized_bytes,
         Err(error) => return error,
     };
+
     let largest_column = cols
         .iter()
         .zip(row.values())
@@ -264,6 +265,7 @@ mod tests {
         else {
             panic!("expected RowTooLarge, got {error:?}");
         };
+
         assert_eq!(table_id, table());
         assert_eq!(operation, CdcOperation::Insert);
         assert_eq!(column_count, 2);

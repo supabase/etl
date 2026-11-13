@@ -312,6 +312,7 @@ where
                 *pending_result = Some(async_result);
             }
         }
+
         self.stall_reached_notify.notify_one();
 
         Ok(())
@@ -339,6 +340,7 @@ where
                 *pending_result = Some(async_result);
             }
         }
+
         self.stall_reached_notify.notify_one();
 
         Ok(())
@@ -432,6 +434,7 @@ async fn shutdown_interrupts_worker_slot_creation() {
         let pipeline_id = random_pipeline_id();
         let apply_slot: String =
             EtlReplicationSlot::for_apply_worker(&pipeline_id).try_into().unwrap();
+
         if existing_apply_slot {
             client
                 .query(
@@ -441,6 +444,7 @@ async fn shutdown_interrupts_worker_slot_creation() {
                 .await
                 .unwrap();
         }
+
         let waiting_slot: String = if existing_apply_slot {
             EtlReplicationSlot::for_table_sync_worker(&pipeline_id, schema.users_schema().id)
                 .try_into()
@@ -448,6 +452,7 @@ async fn shutdown_interrupts_worker_slot_creation() {
         } else {
             apply_slot
         };
+
         let store = NotifyingStore::new();
         let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
         let mut pipeline = create_pipeline(
@@ -476,6 +481,7 @@ async fn shutdown_interrupts_worker_slot_creation() {
                 if row.get::<_, bool>(0) {
                     break;
                 }
+
                 sleep(Duration::from_millis(10)).await;
             }
         })
@@ -694,6 +700,7 @@ async fn table_copy_errors_when_async_result_is_dropped() {
     let TableState::Errored { source_err, .. } = table_state else {
         panic!("dropped async result should put the table in an errored state");
     };
+
     assert_eq!(source_err.kind(), ErrorKind::DestinationError);
 }
 
@@ -792,6 +799,7 @@ async fn drop_table_for_copy_errors_when_async_result_is_dropped() {
     let TableState::Errored { source_err, .. } = table_state else {
         panic!("dropped destination-drop result should put the table in an errored state");
     };
+
     assert_eq!(source_err.kind(), ErrorKind::DestinationError);
     assert!(store.get_destination_table_metadata(table_id).await.unwrap().is_some());
 }
@@ -956,6 +964,7 @@ async fn exclusive_table_copy_fails_when_slot_invalidated() {
     let TableState::Errored { retry_policy, source_err, .. } = state else {
         panic!("table copy should be marked errored after its slot is invalidated");
     };
+
     assert!(matches!(retry_policy, TableRetryPolicy::ManualRetry));
     assert_eq!(source_err.kind(), ErrorKind::ReplicationSlotInvalidated);
 }
@@ -1596,6 +1605,7 @@ async fn publication_row_filter_changes_apply_without_restart() {
 
     let database = spawn_source_database().await;
     let client = database.client.as_ref().unwrap();
+
     if below_version!(database.server_version(), POSTGRES_15) {
         return;
     }
@@ -1675,6 +1685,7 @@ async fn publication_row_filter_changes_apply_without_restart() {
     else {
         panic!("Expected the filtered update, delete, insert sequence");
     };
+
     assert_eq!(update.updated_table_row, UpdatedTableRow::Full(row(1, 11)));
     assert_eq!(exit.old_table_row, Some(OldTableRow::Full(row(2, 20))));
     assert_eq!(entry.table_row, row(3, 20));
@@ -2479,6 +2490,7 @@ async fn table_sync_no_event_handover_waits_for_first_dml_before_ready() {
     let TableState::SyncDone { table_decoding_state, .. } = table_state else {
         panic!("an eventless handover should remain in SyncDone");
     };
+
     assert!(table_decoding_state.is_some());
 
     let first_streamed_row_notify = destination

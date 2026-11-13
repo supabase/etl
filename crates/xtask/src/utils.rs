@@ -74,6 +74,7 @@ impl CargoFeatureSelection {
         if let Some(destination) = destination {
             self.apply_destination(destination);
         }
+
         self
     }
 
@@ -105,6 +106,7 @@ impl CargoFeatureSelection {
     fn apply_destination(&mut self, destination: DestinationPreset) {
         self.no_default_features = true;
         push_unique(&mut self.features, destination.feature());
+
         for package in DESTINATION_PACKAGES {
             push_unique(&mut self.packages, package);
         }
@@ -176,6 +178,7 @@ impl DestinationPreset {
     /// Prints the destination menu for local setup.
     pub(crate) fn print_choices() {
         println!("Destinations:");
+
         for destination in Self::all() {
             println!(
                 "  --destination {:<10}  {}",
@@ -183,6 +186,7 @@ impl DestinationPreset {
                 destination.status_label()
             );
         }
+
         println!();
     }
 }
@@ -263,6 +267,7 @@ fn sccache_env(flag: bool) -> Option<SccacheEnv> {
              enable.{RESET}"
         );
         flush_stdout();
+
         return None;
     }
 
@@ -272,6 +277,7 @@ fn sccache_env(flag: bool) -> Option<SccacheEnv> {
              continuing without it. Install it with `brew install sccache`.{RESET}"
         );
         flush_stdout();
+
         return None;
     }
 

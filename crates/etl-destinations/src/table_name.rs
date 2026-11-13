@@ -193,10 +193,12 @@ mod tests {
         ];
         let mut encoded = HashSet::new();
         let mut legacy = HashSet::new();
+
         for schema in components {
             for table in components {
                 let source = TableName::new(schema.to_owned(), table.to_owned());
                 let name = try_stringify_table_name(&source).unwrap().to_uppercase();
+
                 if [schema, table].iter().any(|part| part.starts_with('_') || part.ends_with('_')) {
                     assert!(encoded.insert(name));
                 } else {
@@ -206,7 +208,9 @@ mod tests {
                 }
             }
         }
+
         assert!(encoded.is_disjoint(&legacy));
+
         for name in encoded.iter().chain(&legacy) {
             for suffix in ["_0", "_18446744073709551615", "__CURRENT", "-STREAMING", "_CHANGELOG"] {
                 assert!(!encoded.contains(&format!("{name}{suffix}")));

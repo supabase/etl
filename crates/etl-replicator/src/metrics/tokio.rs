@@ -245,6 +245,7 @@ pub(super) fn spawn_tokio_metrics_task() -> AbortOnDropHandle<()> {
                     WORKER_ID_LABEL => worker_id_str,
                 )
                 .set(worker_park_unpark_count);
+
                 #[cfg(tokio_unstable)]
                 {
                     let local_queue_depth =
@@ -255,6 +256,7 @@ pub(super) fn spawn_tokio_metrics_task() -> AbortOnDropHandle<()> {
                         WORKER_ID_LABEL => worker_id.to_string(),
                     )
                     .set(local_queue_depth);
+
                     #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
                     {
                         let steal_total = runtime_metrics.worker_steal_count(worker_id) as f64;

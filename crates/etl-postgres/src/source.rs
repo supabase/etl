@@ -71,6 +71,7 @@ where
     let rows = sqlx::query(query).bind(&oids).fetch_all(executor).await?;
 
     let mut result = HashMap::with_capacity(rows.len());
+
     for row in rows {
         let oid: i32 = row.try_get("oid")?;
         let schema_name: String = row.try_get("schema_name")?;
@@ -112,6 +113,7 @@ pub fn extract_server_version(server_version_str: impl AsRef<str>) -> Option<Non
 
     let minor =
         if major >= 10 && patch_component.is_none() { minor } else { minor.checked_mul(100)? };
+
     let version = major.checked_mul(10_000)?.checked_add(minor)?.checked_add(patch)?;
 
     NonZeroI32::new(version)

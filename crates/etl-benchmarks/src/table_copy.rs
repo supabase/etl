@@ -177,9 +177,11 @@ async fn run(args: RunArgs) -> Result<()> {
     let destination =
         BenchDestination::new(&args.destination, &args.pipeline_id, store.clone()).await?;
     let destination_init_ms = duration_millis(destination_started.elapsed());
+
     if args.destination_settle_ms > 0 {
         tokio::time::sleep(Duration::from_millis(args.destination_settle_ms)).await;
     }
+
     // Everything after destination setup runs in one block so slot and
     // destination cleanup happen whether it succeeds or fails.
     let run_result: Result<(u128, Duration, u128)> = async {
@@ -205,6 +207,7 @@ async fn run(args: RunArgs) -> Result<()> {
         // Shut down even when start or the copy fails, so the destination
         // stops writing before cleanup drops it.
         let copy_started = Instant::now();
+
         let copy_result = match start_result {
             Ok(()) => {
                 wait_for_table_copies(
@@ -216,6 +219,7 @@ async fn run(args: RunArgs) -> Result<()> {
             }
             Err(error) => Err(error),
         };
+
         let copy_wait_duration = copy_started.elapsed();
 
         let shutdown_started = Instant::now();
@@ -239,6 +243,7 @@ async fn run(args: RunArgs) -> Result<()> {
     let destination_stats = destination.stats();
     let copied_rows = destination_stats.table_rows;
     let copied_bytes = destination_stats.table_row_bytes;
+
     if let Some(expected) = args.expected_row_count
         && copied_rows != expected
     {
@@ -290,10 +295,12 @@ async fn run(args: RunArgs) -> Result<()> {
     };
 
     print_summary(&report);
+
     if let Some(report_path) = &args.report_path {
         write_report(&report, report_path)?;
         println!("Report written to {}", report_path.display());
     }
+
     Ok(())
 }
 
@@ -306,6 +313,7 @@ fn print_summary(report: &TableCopyReport) {
         "  Tables        {}",
         format_integer(u128::try_from(report.table_count).unwrap_or(u128::MAX))
     );
+
     if let Some(copy_buffer) = &report.ducklake_copy_buffer {
         println!("  Copy buffer   {}", if copy_buffer.enabled { "enabled" } else { "disabled" });
         println!(
@@ -321,17 +329,21 @@ fn print_summary(report: &TableCopyReport) {
             format_decimal(bytes_to_mib(copy_buffer.peak_staged_bytes), 2)
         );
     }
+
     println!();
     println!("  Data");
     println!("    Rows copied     {}", format_integer(u128::from(report.copied_rows)));
+
     if let Some(expected) = report.expected_row_count {
         println!("    Rows expected   {}", format_integer(u128::from(expected)));
     }
+
     println!("    Decoded estimate  {} MiB", format_decimal(report.estimated_copied_mib, 2));
     println!(
         "    Row batches     {}",
         format_integer(u128::from(report.destination_stats.table_row_batches))
     );
+
     if let Some(files) = &report.ducklake_files {
         println!(
             "    Parquet files   {}",
@@ -341,9 +353,11 @@ fn print_summary(report: &TableCopyReport) {
         println!("    Parquet median  {} MiB", format_decimal(bytes_to_mib(files.median_bytes), 2));
         println!("    Parquet p95     {} MiB", format_decimal(bytes_to_mib(files.p95_bytes), 2));
     }
+
     if let Some(snapshot_count) = report.ducklake_snapshot_count {
         println!("    Snapshots       {}", format_integer(u128::from(snapshot_count)));
     }
+
     if let Some(compaction) = &report.ducklake_compaction {
         println!("    Compaction      {}", format_duration_ms(compaction.duration_ms));
         println!(
@@ -354,10 +368,12 @@ fn print_summary(report: &TableCopyReport) {
             "      Files created {}",
             format_integer(u128::from(compaction.merge_adjacent_files_created))
         );
+
         if let Some(snapshot_count) = compaction.snapshot_count_after {
             println!("      Snapshots     {}", format_integer(u128::from(snapshot_count)));
         }
     }
+
     println!();
     println!("  Throughput");
     println!("    Rows/s            {}", format_decimal(report.rows_per_second, 2));
@@ -393,6 +409,7 @@ async fn register_table_copy_notifications(
     table_ids: &[u32],
 ) -> Vec<TableCopyNotifications> {
     let mut notifications = Vec::with_capacity(table_ids.len());
+
     for table_id in table_ids {
         let table_id = *table_id;
         let finished = store
@@ -412,6 +429,7 @@ async fn wait_for_table_copies(
     notifications: Vec<TableCopyNotifications>,
 ) -> Result<()> {
     let mut tasks = JoinSet::new();
+
     for notification in notifications {
         tasks.spawn(async move {
             let table_id = notification.table_id;
@@ -502,6 +520,7 @@ async fn run_ducklake_compaction(args: &RunArgs) -> Result<Option<DuckLakeCompac
     if !args.ducklake_compact_after_copy {
         return Ok(None);
     }
+
     if args.destination.destination != DestinationType::DuckLake {
         bail!("--ducklake-compact-after-copy requires a DuckLake destination");
     }
@@ -588,6 +607,7 @@ async fn collect_ducklake_file_stats(
     if url.scheme() != "file" {
         return Ok(None);
     }
+
     let root = url
         .to_file_path()
         .map_err(|_| anyhow::anyhow!("DuckLake file data path is not a valid local path"))?;
@@ -599,6 +619,7 @@ async fn collect_ducklake_file_stats(
     .await
     .context("DuckLake file statistics task panicked")??;
     file_bytes.sort_unstable();
+
     if file_bytes.is_empty() {
         return Ok(Some(DuckLakeFileStats {
             file_count: 0,
@@ -636,6 +657,7 @@ fn collect_parquet_file_bytes(path: &Path, file_bytes: &mut Vec<u64>) -> Result<
             file_bytes.push(entry.metadata()?.len());
         }
     }
+
     Ok(())
 }
 

@@ -103,6 +103,7 @@ impl ApplyLoopTasks {
 
         // No final feedback is needed: persisted checkpoints govern replay.
         abort_and_join_result(self.feedback_sender_task).await?;
+
         if let Err(error) = self.schema_cleanup_task.await {
             warn!(error = %error, "failed to join optional schema cleanup task");
         }
@@ -261,6 +262,7 @@ mod tests {
                 if expected_kind == ErrorKind::TaskPanic {
                     panic!("Test feedback task panic");
                 }
+
                 std::future::ready::<EtlResult<()>>(Err(etl_error!(
                     ErrorKind::SourceConnectionFailed,
                     "Test feedback failure"
@@ -268,6 +270,7 @@ mod tests {
             }));
             let (handle, sender) = FeedbackHandle::create(sink, Duration::from_secs(10));
             let mut tasks = test_apply_loop_tasks(handle, tokio::spawn(sender));
+
             if expected_kind == ErrorKind::TaskCancelled {
                 tasks.feedback_sender_task.abort();
             } else {

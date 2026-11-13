@@ -24,6 +24,7 @@ fn row_values(row: &TableRow) -> (i32, String) {
     let [Cell::I32(id), Cell::String(value)] = row.values() else {
         panic!("Fixture rows must contain an integer and text");
     };
+
     (*id, value.clone())
 }
 
@@ -47,6 +48,7 @@ async fn assert_inheritance_copy_scope(
     if row_filter.is_some() && below_version!(database.server_version(), POSTGRES_15) {
         return;
     }
+
     let client = database.client.as_ref().unwrap();
     client
         .batch_execute(
@@ -57,6 +59,7 @@ async fn assert_inheritance_copy_scope(
         )
         .await
         .unwrap();
+
     if max_copy_connections > 1 {
         // Give the planner enough physical blocks to schedule multiple CTID
         // ranges.
@@ -77,6 +80,7 @@ async fn assert_inheritance_copy_scope(
             .get(0);
         assert!(blocks > 16);
     }
+
     let only = if only_parent { "only " } else { "" };
     let filter = row_filter.map_or_else(String::new, |filter| format!(" where ({filter})"));
     client
@@ -115,20 +119,25 @@ async fn assert_inheritance_copy_scope(
 
     let mut copied = Vec::new();
     let mut ready = Vec::new();
+
     for table_id in &members {
         copied.push(store.notify_on_table_sync_complete(*table_id).await);
         ready.push(store.notify_on_table_state_type(*table_id, TableStateType::Ready).await);
     }
+
     pipeline.start().await.unwrap();
+
     for notify in copied {
         notify.notified().await;
     }
 
     let mut conditions = vec![EventCondition::TableCount(EventType::Insert, parent_id, 1)];
+
     if !only_parent {
         conditions.push(EventCondition::TableCount(EventType::Update, child_id, 1));
         conditions.push(EventCondition::TableCount(EventType::Insert, child_id, 1));
     }
+
     let changes_seen = destination.wait_for_events(conditions).await;
     // The parent insert proves decoding passed the child changes even when it
     // is unpublished.
@@ -143,25 +152,32 @@ async fn assert_inheritance_copy_scope(
         .await
         .unwrap();
     changes_seen.notified().await;
+
     for notify in ready {
         notify.notified().await;
     }
+
     pipeline.shutdown_and_wait().await.unwrap();
 
     let copies = destination.get_table_rows().await;
     assert_eq!(copies.len(), members.len());
     let parent_rows = sorted_rows(copies.get(&parent_id).unwrap());
     let mut expected_parent_rows = vec![(1, "parent-before".to_owned())];
+
     if row_filter.is_none() {
         expected_parent_rows.insert(0, (-1, "filtered-out".to_owned()));
     }
+
     if max_copy_connections > 1 {
         expected_parent_rows.extend((1000..3000).map(|id| (id, "x".repeat(500))));
     }
+
     assert_eq!(parent_rows.len(), expected_parent_rows.len());
+
     for (actual, expected) in parent_rows.iter().zip(&expected_parent_rows) {
         assert_eq!(actual, expected);
     }
+
     if only_parent {
         assert!(!copies.contains_key(&child_id));
     } else {
@@ -173,6 +189,7 @@ async fn assert_inheritance_copy_scope(
 
     let mut inserts = Vec::new();
     let mut updates = Vec::new();
+
     for event in destination.get_events().await {
         match event {
             Event::Insert(insert) => {
@@ -182,18 +199,22 @@ async fn assert_inheritance_copy_scope(
                 let UpdatedTableRow::Full(row) = update.updated_table_row else {
                     panic!("Small fixture text values must produce full updates");
                 };
+
                 updates.push((update.replicated_table_schema.id(), row_values(&row)));
             }
             _ => {}
         }
     }
+
     let mut expected_inserts = vec![(parent_id, (4, "parent-new".to_owned()))];
+
     if only_parent {
         assert!(updates.is_empty());
     } else {
         expected_inserts.push((child_id, (3, "child-new".to_owned())));
         assert_eq!(updates, vec![(child_id, (2, "child-after".to_owned()))]);
     }
+
     inserts.sort_by_key(|(id, _)| id.into_inner());
     expected_inserts.sort_by_key(|(id, _)| id.into_inner());
     assert_eq!(inserts, expected_inserts);

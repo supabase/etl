@@ -132,12 +132,14 @@ impl PreparedRows {
     /// Generates payloads and allocates cells before any timing starts.
     fn generate(workload: &Workload) -> Result<Self> {
         let ordinary = Self::variants(workload.row_bytes, workload.rows, 1, workload.shape)?;
+
         let large = match workload.large_every {
             Some((every, bytes)) => {
                 Self::variants(bytes, workload.rows.div_ceil(every), 7, PayloadShape::Structured)?
             }
             None => Vec::new(),
         };
+
         Ok(Self { ordinary, large })
     }
 
@@ -154,6 +156,7 @@ impl PreparedRows {
         (0..count)
             .map(|i| {
                 let variant_seed = seed * 1_000_003 + u64::try_from(i)?;
+
                 let payload = match shape {
                     PayloadShape::Structured => structured_text(row_bytes, variant_seed, 88),
                     PayloadShape::NearDuplicate => {
@@ -177,6 +180,7 @@ impl PreparedRows {
                         payload
                     }
                 };
+
                 ensure!(payload.len() == row_bytes, "Fixture payload length changed");
                 Ok(TableRow::new(vec![Cell::I32(i32::try_from(i)?), Cell::String(payload)]))
             })
@@ -274,6 +278,7 @@ fn run(workload: &Workload, rows: &PreparedRows) -> Result<Sample> {
     let mut sampled_body = 0usize;
 
     let started = Instant::now();
+
     for index in 0..workload.rows {
         for batch in builder.push_row(
             &cols,
@@ -283,14 +288,18 @@ fn run(workload: &Workload, rows: &PreparedRows) -> Result<Sample> {
         )? {
             record_batch(batch, &mut request_sizes, &mut emitted_rows)?;
         }
+
         let footprint = builder.footprint();
         sampled_scratch = sampled_scratch.max(footprint.scratch_capacity);
         sampled_body = sampled_body.max(footprint.body_capacity);
     }
+
     let row_frames = builder.footprint().row_frames;
+
     for batch in builder.finish()? {
         record_batch(batch, &mut request_sizes, &mut emitted_rows)?;
     }
+
     let elapsed = started.elapsed();
     ensure!(emitted_rows == workload.rows, "Encoder output row count differs from input");
 
@@ -347,6 +356,7 @@ fn benchmark(workload: &Workload, repeat: u16) -> Result<WorkloadReport> {
             return Err(error).with_context(|| format!("Workload {} failed", workload.name));
         }
     };
+
     Ok(WorkloadReport {
         workload: workload.name,
         rows: workload.rows,
@@ -375,6 +385,7 @@ fn print_table(reports: &[WorkloadReport]) {
         "ratio",
         "frames"
     );
+
     for report in reports {
         match &report.outcome {
             Outcome::Accepted { sample, .. } => println!(
@@ -395,6 +406,7 @@ fn print_table(reports: &[WorkloadReport]) {
             }
         }
     }
+
     println!("* Fill excludes the trailing request. MiB/s and ratio use TEXT payload bytes.");
 }
 
@@ -407,6 +419,7 @@ pub fn main() -> Result<()> {
         .filter(|workload| args.filter.as_deref().is_none_or(|f| workload.name.contains(f)))
         .collect();
     ensure!(!selected.is_empty(), "No workloads match the filter");
+
     if cfg!(debug_assertions) {
         eprintln!("Warning: debug build; use --release for performance comparisons.");
     }
@@ -415,6 +428,7 @@ pub fn main() -> Result<()> {
         .into_iter()
         .map(|workload| benchmark(workload, args.repeat))
         .collect::<Result<Vec<_>>>()?;
+
     if args.json {
         for report in &reports {
             println!("{}", serde_json::to_string(report)?);
@@ -422,6 +436,7 @@ pub fn main() -> Result<()> {
     } else {
         print_table(&reports);
     }
+
     ensure!(
         reports.iter().all(|report| matches!(report.outcome, Outcome::Accepted { .. })),
         "An encoder workload rejected a normally accepted row"

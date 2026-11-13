@@ -32,11 +32,13 @@ fn build_clients(
 
 fn build_batch(cols: &[ColumnSchema], rows: &[TableRow], offset: &OffsetToken) -> RowBatch {
     let mut builder = RowBatchBuilder::new(TableId::new(1));
+
     for row in rows {
         let completed =
             builder.push_row(cols, row, CdcMeta::new(CdcOperation::Insert, "0"), offset).unwrap();
         assert!(completed.is_empty(), "test rows must fit one request");
     }
+
     builder.finish().unwrap().into_iter().next().unwrap()
 }
 
@@ -292,6 +294,7 @@ async fn channel_reopen_can_rewind_offset() {
         expected_rows_parsed: u64,
     ) -> (u64, u64, u64) {
         let mut last_status = None;
+
         for _ in 0..18 {
             tokio::time::sleep(Duration::from_secs(5)).await;
             let status = stream
@@ -304,6 +307,7 @@ async fn channel_reopen_can_rewind_offset() {
             {
                 return (status.rows_inserted, status.rows_parsed, status.rows_error_count);
             }
+
             last_status = Some(status);
         }
 

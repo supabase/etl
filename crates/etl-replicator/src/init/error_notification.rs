@@ -14,15 +14,18 @@ pub(crate) fn init(
     let Some(supabase_config) = &replicator_config.supabase else {
         return Ok(None);
     };
+
     let Some(api_url) = &supabase_config.api_url else {
         return Ok(None);
     };
+
     if api_url.trim().is_empty() {
         return Err(ReplicatorError::config(ValidationError::InvalidFieldValue {
             field: "supabase.api_url".to_owned(),
             constraint: "must not be blank".to_owned(),
         }));
     }
+
     let api_key = supabase_config
         .api_key
         .as_ref()

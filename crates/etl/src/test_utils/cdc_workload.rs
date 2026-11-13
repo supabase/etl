@@ -372,6 +372,7 @@ impl Planner {
     fn note(&mut self, intent: NoteIntent) -> Note {
         let sequence = self.next_note;
         self.next_note += 1;
+
         match intent {
             NoteIntent::Null => Note::Null,
             NoteIntent::Small => Note::Small(sequence),
@@ -457,6 +458,7 @@ impl Planner {
             }
             OpIntent::Truncate { table } => PlannedOp::Truncate { table },
         };
+
         self.apply(op);
 
         op
@@ -467,6 +469,7 @@ impl Planner {
         let rollback = intent.rollback && !force_commit;
         let committed_tables = rollback.then(|| self.tables.clone());
         let ops = intent.ops.iter().map(|op| self.plan_op(*op)).collect();
+
         if let Some(committed_tables) = committed_tables {
             self.tables = committed_tables;
         }
@@ -505,8 +508,10 @@ impl Planner {
             if position == straddle_commit {
                 self.commit_straddle(straddle.as_ref(), &mut after_fault);
             }
+
             after_fault.push(AfterFaultStep::Tx(self.plan_tx(tx, false)));
         }
+
         if straddle_commit == intent.after_fault.len() {
             self.commit_straddle(straddle.as_ref(), &mut after_fault);
         }
@@ -530,6 +535,7 @@ impl Planner {
         for op in &straddle.ops {
             self.apply(*op);
         }
+
         self.truncate_blocked = false;
         steps.push(AfterFaultStep::CommitStraddle);
     }
@@ -695,15 +701,19 @@ pub async fn create_workload_tables(
             name: "note",
             alteration: "set storage external",
         }];
+
         if matches!(workload.identities[table], IdentityMode::Full) {
             modifications.push(TableModification::ReplicaIdentity { value: "full" });
         }
+
         database.alter_table(name.clone(), &modifications).await.unwrap();
     }
+
     database.create_publication(WORKLOAD_PUBLICATION, &names).await.unwrap();
 
     let tables = WorkloadTables { names, ids, identities: workload.identities };
     let client = database.client.as_ref().unwrap();
+
     for op in &workload.initial_rows {
         client.batch_execute(&op.sql(&tables)).await.unwrap();
     }
@@ -914,6 +924,7 @@ impl<'a> WorkloadRunner<'a> {
         let Some(xid) = self.run_until_commit(tx).await? else {
             return Ok(None);
         };
+
         let committed = notify_on_commit(destination, xid).await;
         self.commit(tx, phase, xid).await?;
 
@@ -924,14 +935,17 @@ impl<'a> WorkloadRunner<'a> {
     /// transaction ID of a transaction that still needs to commit.
     async fn run_until_commit(&mut self, tx: &PlannedTx) -> Result<Option<u32>, TestCaseError> {
         execute(self.client, "begin").await?;
+
         for op in &tx.ops {
             execute(self.client, &op.sql(self.tables)).await?;
         }
+
         let xid = current_xid(self.client).await?;
 
         if tx.rollback {
             execute(self.client, "rollback").await?;
             self.history.rolled_back.push(xid);
+
             return Ok(None);
         }
 
@@ -973,9 +987,11 @@ impl<'a> WorkloadRunner<'a> {
     ) -> Result<StraddleSession, TestCaseError> {
         let (client, _) = connect_to_pg_database(config).await;
         execute(&client, "begin").await?;
+
         for op in &straddle.ops {
             execute(&client, &op.sql(self.tables)).await?;
         }
+
         let xid = current_xid(&client).await?;
 
         Ok(StraddleSession { client, xid, event_count: straddle.ops.len() })
@@ -1051,6 +1067,7 @@ impl FromTableRow for WorkloadRecord {
         let [Cell::I64(id), note, Cell::I32(counter)] = table_row.values() else {
             return None;
         };
+
         let note = match note {
             Cell::Null => None,
             Cell::String(note) => Some(note.clone()),
@@ -1133,6 +1150,7 @@ fn data_event_payload(event: &Event) -> Option<(PgLsn, u64, String)> {
                     format!("partial {:?} missing {:?}", row.values(), row.missing_column_indexes())
                 }
             };
+
             Some((
                 update.commit_lsn,
                 update.tx_ordinal,
@@ -1184,6 +1202,7 @@ pub fn assert_phase_delivered_once(
             })?;
 
         let mut counts = BTreeMap::<u64, usize>::new();
+
         for (event_commit_lsn, tx_ordinal, _) in events.iter().filter_map(data_event_payload) {
             if event_commit_lsn == commit_lsn {
                 *counts.entry(tx_ordinal).or_default() += 1;
@@ -1294,6 +1313,7 @@ impl WorkloadCoverage {
                     if matches!(update.updated_table_row, UpdatedTableRow::Partial(_)) {
                         add(&self.partial_updates, 1);
                     }
+
                     if update_changes_key(update) {
                         add(&self.key_changes, 1);
                     }
@@ -1314,6 +1334,7 @@ fn update_changes_key(update: &UpdateEvent) -> bool {
         Some(OldTableRow::Full(row) | OldTableRow::Key(row)) => row.values().first(),
         None => return false,
     };
+
     let new_id = match &update.updated_table_row {
         UpdatedTableRow::Full(row) => row.values().first(),
         UpdatedTableRow::Partial(row) => row.values().first(),
@@ -1357,10 +1378,12 @@ pub fn assert_workload_converged(
     coverage: &WorkloadCoverage,
 ) -> Result<(), TestCaseError> {
     let mut commit_lsns = BTreeMap::<u32, PgLsn>::new();
+
     for event in events {
         let Event::Begin(begin) = event else {
             continue;
         };
+
         let previous = commit_lsns.insert(begin.xid, begin.commit_lsn);
         prop_assert!(
             previous.is_none_or(|previous| previous == begin.commit_lsn),
@@ -1380,10 +1403,12 @@ pub fn assert_workload_converged(
     // source order, one per table otherwise.
     let mut last_positions = BTreeMap::<Option<TableId>, (PgLsn, u64)>::new();
     let mut first_deliveries = Vec::new();
+
     for event in events {
         let Some((commit_lsn, tx_ordinal, payload)) = data_event_payload(event) else {
             continue;
         };
+
         match positions.get_mut(&(commit_lsn, tx_ordinal)) {
             Some((first_payload, count)) => {
                 prop_assert!(
@@ -1399,6 +1424,7 @@ pub fn assert_workload_converged(
                         data_event_table_ids(event).into_iter().map(Some).collect()
                     }
                 };
+
                 for stream in streams {
                     if let Some((last_lsn, last_ordinal)) =
                         last_positions.insert(stream, (commit_lsn, tx_ordinal))
@@ -1410,6 +1436,7 @@ pub fn assert_workload_converged(
                         );
                     }
                 }
+
                 positions.insert((commit_lsn, tx_ordinal), (payload, 1));
                 first_deliveries.push(event.clone());
             }
@@ -1417,11 +1444,13 @@ pub fn assert_workload_converged(
     }
 
     let mut expected_lsns = BTreeSet::new();
+
     for tx in &history.committed {
         let allowed = deliveries(tx.phase);
         // A range that admits zero deliveries marks transactions a table copy
         // may absorb, so they can be missing or reach only some tables.
         let may_be_absorbed = allowed.contains(&0);
+
         let Some(&commit_lsn) = commit_lsns.get(&tx.xid) else {
             prop_assert!(
                 may_be_absorbed,
@@ -1431,12 +1460,14 @@ pub fn assert_workload_converged(
             );
             continue;
         };
+
         expected_lsns.insert(commit_lsn);
 
         let tx_positions: Vec<usize> = positions
             .range((commit_lsn, 0)..=(commit_lsn, u64::MAX))
             .map(|(_, (_, count))| *count)
             .collect();
+
         if !may_be_absorbed {
             prop_assert_eq!(
                 tx_positions.len(),

@@ -135,6 +135,7 @@ async fn run_roulette_workload(
 ) -> Result<WorkloadHistory, TestCaseError> {
     let client = database.client.as_ref().unwrap();
     let mut runner = WorkloadRunner::new(client, tables);
+
     for tx in case.workload.before_fault() {
         runner.execute_and_wait(tx, TxPhase::BeforeFault, destination).await?;
     }
@@ -206,6 +207,7 @@ async fn run_walsender_roulette_case(
         destination.clone(),
     );
     let mut sync_complete = Vec::new();
+
     for table_id in tables.ids() {
         sync_complete.push(store.notify_on_table_sync_complete(*table_id).await);
     }
@@ -218,6 +220,7 @@ async fn run_walsender_roulette_case(
         for notification in &sync_complete {
             wait_for_notification(notification, "table synchronization to complete").await?;
         }
+
         run_roulette_workload(&database, &tables, &destination, &apply_slot_name, case).await
     }
     .await;
@@ -630,6 +633,7 @@ async fn shutdown_drains_pending_write_events_before_destination_shutdown() {
     if let Ok(result) = tokio::time::timeout(Duration::from_secs(2), &mut shutdown_task).await {
         panic!("shutdown completed while the write response was withheld: {result:?}");
     }
+
     assert!(!destination.shutdown_called().await);
 
     // WHEN: the held response is released
@@ -704,6 +708,7 @@ async fn shutdown_without_drain_abandons_pending_write_events() {
             if write_lsn.is_some_and(|write_lsn| write_lsn >= second_insert_lsn) {
                 break;
             }
+
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })

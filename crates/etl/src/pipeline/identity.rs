@@ -84,6 +84,7 @@ mod tests {
             assert_eq!(serde_json::from_value::<PipelineId>(json.clone()).unwrap(), id);
             assert_eq!(serde_json::to_value(&id).unwrap(), json);
         }
+
         assert!(serde_json::from_str::<PipelineId>("150").is_err());
     }
 }

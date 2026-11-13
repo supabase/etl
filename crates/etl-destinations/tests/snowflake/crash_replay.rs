@@ -46,6 +46,7 @@ fn workload_record(row: &[Value]) -> Result<WorkloadRecord, TestCaseError> {
     let [id, note, counter] = row else {
         return Err(TestCaseError::fail("unexpected Snowflake row shape"));
     };
+
     let note = match note {
         Value::Null => None,
         Value::String(note) => Some(note.clone()),

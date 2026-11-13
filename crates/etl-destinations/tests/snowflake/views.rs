@@ -96,9 +96,11 @@ async fn companion_view_lifecycle_and_ownership() {
         let mut other_config =
             Config::new(config.account(), config.user(), config.database(), "INFORMATION_SCHEMA")
                 .unwrap();
+
         if let Some(role) = config.role() {
             other_config = other_config.with_role(role);
         }
+
         let other_sql = SqlClient::new(other_config, Arc::clone(&auth), reqwest::Client::new());
         assert_eq!(query_rows(&other_sql, &query).await.unwrap(), expected);
 
@@ -420,6 +422,7 @@ async fn companion_view_lifecycle_and_ownership() {
         for name in [&keyless_view, &keyless_pending] {
             sql.execute_ddl(&format!("create view {name} as select 42 as sentinel")).await.unwrap();
         }
+
         fresh().startup().await.unwrap();
         let keyless_renamed = ReplicatedTableSchema::all(Arc::new(TableSchema::with_snapshot_id(
             keyless.id(),
@@ -448,6 +451,7 @@ async fn companion_view_lifecycle_and_ownership() {
         store.prepare_table_state_for_copy(keyless.id()).await.unwrap();
         store.store_table_schema(keyless.inner().clone()).await.unwrap();
         write_table_rows(&reset, &keyless, vec![]).await.unwrap();
+
         for name in [&keyless_view, &keyless_pending] {
             assert_eq!(
                 query_rows(&sql, &format!("select sentinel from {name}")).await.unwrap(),

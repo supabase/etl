@@ -1331,6 +1331,7 @@ async fn describe_table_schema_pins_etl_connection_output_settings() {
         "idle_in_transaction_session_timeout",
         "application_name",
     ];
+
     for (name, value) in TEST_MIGRATION_OPTIONS.to_key_value_pairs() {
         if unpinned.contains(&name.as_str()) {
             continue;

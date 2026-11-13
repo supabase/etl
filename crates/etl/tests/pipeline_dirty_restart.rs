@@ -81,6 +81,7 @@ async fn run_dirty_restart_case(
         .start()
         .await
         .map_err(|error| TestCaseError::fail(format!("pipeline failed to start: {error}")))?;
+
     for table_id in table_ids {
         wait_for_table_sync_complete(&first_store, table_id, WORKLOAD_TIMEOUT).await.map_err(
             |error| {
@@ -98,6 +99,7 @@ async fn run_dirty_restart_case(
 
     let client = database.client.as_ref().unwrap();
     let mut runner = WorkloadRunner::new(client, &tables);
+
     for tx in case.workload.before_fault() {
         runner.execute_and_wait(tx, TxPhase::BeforeFault, &first_destination).await?;
     }
@@ -178,6 +180,7 @@ async fn run_dirty_restart_case(
             }
         }
     }
+
     let history = runner.into_history();
 
     // Apply promotes a table to `Ready` only once a relation or change on the
@@ -191,6 +194,7 @@ async fn run_dirty_restart_case(
         if !written {
             continue;
         }
+
         wait_for_table_state_type(
             &restarted_store,
             table_id,
@@ -217,11 +221,13 @@ async fn run_dirty_restart_case(
             .map_err(|error| TestCaseError::fail(format!("failed to read table state: {error}")))?
             .ok_or_else(|| TestCaseError::fail("table state was missing after restart"))?;
         let table_state_type = TableStateType::from(&table_state);
+
         let expected = if written {
             matches!(table_state_type, TableStateType::Ready)
         } else {
             matches!(table_state_type, TableStateType::SyncDone | TableStateType::Ready)
         };
+
         prop_assert!(
             expected,
             "table {} ended in {:?} after restart (written after fault: {})",
@@ -235,6 +241,7 @@ async fn run_dirty_restart_case(
             table_id
         );
     }
+
     prop_assert_eq!(
         restarted_destination.write_table_rows_called().await,
         0,

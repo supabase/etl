@@ -141,6 +141,7 @@ async fn run_sync_crash_case(
         for tx in case.workload.before_fault() {
             runner.execute(tx, TxPhase::BeforeFault).await?;
         }
+
         runner.execute(case.workload.fault_tx(), TxPhase::Fault).await
     })
     .await
@@ -195,8 +196,10 @@ async fn run_sync_crash_case(
         let AfterFaultStep::Tx(tx) = step else {
             unreachable!("generated workloads have no straddling transaction");
         };
+
         runner.execute_and_wait(tx, TxPhase::AfterFault, &restarted_destination).await?;
     }
+
     let history = runner.into_history();
 
     // Apply promotes a table to `Ready` only once a change on the current
@@ -243,9 +246,11 @@ async fn run_sync_crash_case(
     // A copy interrupted mid-write must start over from a fresh snapshot.
     if matches!(case.crash_point, SyncCrashPoint::DuringCopy) {
         let mut recopied = false;
+
         for table_id in table_ids {
             recopied |= restarted_destination.was_table_dropped_for_copy(table_id).await;
         }
+
         prop_assert!(recopied, "restart did not recopy the table whose copy crashed");
     }
 

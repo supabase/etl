@@ -1954,6 +1954,7 @@ async fn special_temporal_values_survive_copy_and_cdc() {
         .map_err(RedactedDuckDbError::from)
         .unwrap();
     assert_eq!(total, 2);
+
     for (name, predicate) in [
         (
             "date and timestamptz",
@@ -2145,6 +2146,7 @@ async fn bounded_shutdown_replays_partial_commits_under_mixed_traffic() {
             {
                 break;
             }
+
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
@@ -2157,6 +2159,7 @@ async fn bounded_shutdown_replays_partial_commits_under_mixed_traffic() {
         let (committed, release) = pause_after_atomic_batch_commit_for_tests(&lake_users.id());
         let base = 1000 + round * 1000;
         let mut burst = "begin;".to_owned();
+
         // Consecutive operations on one table form a sequence longer than one
         // atomic destination batch, without relation changes splitting it.
         for id in base..base + 64 {
@@ -2168,6 +2171,7 @@ async fn bounded_shutdown_replays_partial_commits_under_mixed_traffic() {
                  insert into {users} (id, name, age) values ({id}, 'reused', 2);"
             ));
         }
+
         burst.push_str("commit;");
         client.batch_execute(&burst).await.unwrap();
         let burst_lsn: PgLsn =
@@ -2307,5 +2311,6 @@ async fn bounded_shutdown_replays_partial_commits_under_mixed_traffic() {
         next.start().await.unwrap();
         pipeline = next;
     }
+
     pipeline.shutdown_and_wait().await.unwrap();
 }

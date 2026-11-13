@@ -253,6 +253,7 @@ impl From<Error> for EtlError {
                 err,
             );
         }
+
         if matches!(&err, Error::UnsupportedIdentity(_)) {
             return classified_error(
                 ErrorKind::SourceReplicaIdentityError,
@@ -260,6 +261,7 @@ impl From<Error> for EtlError {
                 err,
             );
         }
+
         if matches!(&err, Error::UnsupportedLayout(_)) {
             return classified_error(
                 ErrorKind::DestinationLayoutUnsupported,
@@ -267,6 +269,7 @@ impl From<Error> for EtlError {
                 err,
             );
         }
+
         if matches!(&err, Error::RowTooLarge { .. }) {
             return classified_error(
                 ErrorKind::UnsupportedValueInDestination,
@@ -320,6 +323,7 @@ impl From<Error> for EtlError {
             Error::DatabaseNotFound(_) => (ErrorKind::ConfigError, "Snowflake database not found"),
             Error::SchemaNotFound { .. } => (ErrorKind::ConfigError, "Snowflake schema not found"),
         };
+
         classified_error(kind, description, err)
     }
 }
@@ -602,6 +606,7 @@ mod tests {
         ] {
             assert_eq!(error.retryability(), Retryability::Retryable, "{error:?}");
         }
+
         for error in [
             http(StatusCode::UNAUTHORIZED),
             http(StatusCode::BAD_REQUEST),
@@ -633,6 +638,7 @@ mod tests {
         assert_eq!(unavailable.retryability(), Retryability::Retryable);
         assert!(unavailable.source().is_some());
         assert_eq!(unauthorized.retryability(), Retryability::Permanent);
+
         for (source, kind) in [
             (
                 Error::UnsupportedIdentity("invalid key".into()),

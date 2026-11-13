@@ -77,12 +77,15 @@ fn build_mask_bytes(table_schema: &TableSchema, column_names: &HashSet<String>) 
 /// Writes mask bytes as `(0,1,1)` for log and error display.
 fn write_mask_bytes(f: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
     write!(f, "(")?;
+
     for (i, &value) in bytes.iter().enumerate() {
         if i > 0 {
             write!(f, ",")?;
         }
+
         write!(f, "{value}")?;
     }
+
     write!(f, ")")
 }
 
@@ -336,6 +339,7 @@ impl<I: Iterator> Iterator for SizedIterator<I> {
         if item.is_some() {
             self.len = self.len.saturating_sub(1);
         }
+
         item
     }
 
@@ -708,6 +712,7 @@ impl ReplicatedTableSchema {
         if !before_columns.is_sorted_by_key(|column| column.ordinal_position) {
             before_columns.sort_unstable_by_key(|column| column.ordinal_position);
         }
+
         if !after_columns.is_sorted_by_key(|column| column.ordinal_position) {
             after_columns.sort_unstable_by_key(|column| column.ordinal_position);
         }
@@ -1081,6 +1086,7 @@ impl ColumnAlteration {
             "column alteration should change its identified field"
         );
         let mut expected_after = before_column_schema.clone();
+
         match kind {
             ColumnAlterationKind::Rename => {
                 expected_after.name.clone_from(&after_column_schema.name);
@@ -1098,6 +1104,7 @@ impl ColumnAlteration {
                     .clone_from(&after_column_schema.default_expression);
             }
         }
+
         debug_assert_eq!(
             expected_after, after_column_schema,
             "column alteration should change only the field identified by its kind"
@@ -1545,6 +1552,7 @@ impl SchemaOperationPlanner {
         // This reverse lookup identifies the rename unblocked when another
         // rename releases its after-name. Validated after-names are unique.
         let mut waiting_ordinal_by_after_name = HashMap::new();
+
         for change in altered_columns {
             if !change.name_changed()
                 || self.column_name_mapping.equivalent(
@@ -1586,6 +1594,7 @@ impl SchemaOperationPlanner {
                 let before_name = rename.before_column_schema.name.clone();
                 self.occupied_destination_names.remove(&before_name);
                 self.occupied_destination_names.insert(rename.after_name.clone());
+
                 if let Some(waiting_ordinal) = waiting_ordinal_by_after_name.get(&before_name)
                     && pending_renames.contains_key(waiting_ordinal)
                 {
@@ -1600,6 +1609,7 @@ impl SchemaOperationPlanner {
                     after_column_schema,
                     ColumnAlterationKind::Rename,
                 );
+
                 continue;
             }
 
@@ -1609,6 +1619,7 @@ impl SchemaOperationPlanner {
             let Some((&ordinal_position, rename)) = pending_renames.first_key_value() else {
                 break;
             };
+
             if !pending_renames
                 .values()
                 .any(|pending_rename| pending_rename.before_column_schema.name == rename.after_name)
@@ -1624,6 +1635,7 @@ impl SchemaOperationPlanner {
                     "{DDL_TEMPORARY_COLUMN_PREFIX}{ordinal_position}_{temporary_name_sequence}"
                 );
                 temporary_name_sequence += 1;
+
                 if self.reserved_destination_names.insert(candidate.clone()) {
                     break candidate;
                 }
@@ -1636,11 +1648,13 @@ impl SchemaOperationPlanner {
             let before_destination_name = before_column_schema.name.clone();
             self.occupied_destination_names.remove(&before_destination_name);
             self.occupied_destination_names.insert(temporary_name.clone());
+
             if let Some(waiting_ordinal) =
                 waiting_ordinal_by_after_name.get(&before_destination_name)
             {
                 ready_renames.insert(*waiting_ordinal);
             }
+
             self.push_alteration(
                 before_column_schema,
                 temporary_column_schema.clone(),
@@ -1882,6 +1896,7 @@ mod tests {
                 SchemaOperation::AlterColumn { alteration } => {
                     let before = alteration.before_column_schema();
                     let after = alteration.after_column_schema();
+
                     match alteration.kind() {
                         ColumnAlterationKind::Rename => {
                             format!("rename:{}->{}", before.name, after.name)
@@ -1970,6 +1985,7 @@ mod tests {
                             None
                         );
                     }
+
                     columns_by_ordinal.insert(after.ordinal_position, after.clone());
                 }
             }
@@ -2276,9 +2292,11 @@ mod tests {
                 plan_schema_change(&before_schema, &after_schema, ColumnNameMapping::Identity);
 
             assert_eq!(operation_names(&plan), ["modify-default:status"]);
+
             let [SchemaOperation::AlterColumn { alteration }] = plan.ordered_operations() else {
                 panic!("expected one default alteration");
             };
+
             assert_eq!(alteration.kind(), ColumnAlterationKind::Default);
             assert_eq!(
                 alteration.before_column_schema().default_expression.as_deref(),
@@ -2415,6 +2433,7 @@ mod tests {
                 let SchemaOperation::AlterColumn { alteration } = operation else {
                     panic!("expected only column alterations");
                 };
+
                 alteration
             })
             .collect();
@@ -2445,6 +2464,7 @@ mod tests {
         assert_eq!(alterations[2].after_column_schema(), &nullable_column);
         assert_eq!(alterations[3].before_column_schema(), &nullable_column);
         assert_eq!(alterations[3].after_column_schema(), &after_column);
+
         for operations in alterations.windows(2) {
             assert_eq!(operations[0].after_column_schema(), operations[1].before_column_schema());
         }
@@ -2876,6 +2896,7 @@ mod tests {
         assert!(change.name_changed());
         assert!(change.nullability_changed());
         assert!(change.default_changed());
+
         let [
             SchemaOperation::AlterColumn { alteration: nullability },
             SchemaOperation::AlterColumn { alteration: default },
@@ -2883,6 +2904,7 @@ mod tests {
         else {
             panic!("expected nullability and default alterations");
         };
+
         assert_eq!(nullability.kind(), ColumnAlterationKind::Nullability);
         assert_eq!(default.kind(), ColumnAlterationKind::Default);
         assert_eq!(nullability.before_column_schema().name, "a");
@@ -3045,6 +3067,7 @@ mod tests {
         else {
             panic!("expected the ordered structural and metadata operations");
         };
+
         assert_eq!(blocking_drop.name, "b");
         assert_eq!(unrelated_drop.name, "unused");
         assert_eq!(rename.kind(), ColumnAlterationKind::Rename);
@@ -3082,6 +3105,7 @@ mod tests {
         else {
             panic!("expected the rename cycle followed by metadata alterations");
         };
+
         assert_eq!(temporary_rename.kind(), ColumnAlterationKind::Rename);
         assert_eq!(temporary_rename.before_column_schema().name, "a");
         assert!(
@@ -3303,6 +3327,7 @@ mod tests {
         fn build_endpoints(raw: &RawTransition) -> (ReplicatedTableSchema, ReplicatedTableSchema) {
             let mut attnum = 0;
             let mut before_columns = Vec::with_capacity(raw.column_count);
+
             for index in 0..raw.column_count {
                 attnum += raw.attnum_gaps[index];
                 before_columns.push((
@@ -3327,6 +3352,7 @@ mod tests {
                     survivor_names.swap(left % len, right % len);
                 }
             }
+
             for (position, name) in survivor_names.iter_mut().enumerate() {
                 if raw.fresh_rename[position]
                     && let Some(fresh_name) = free_names.pop_front()
@@ -3336,6 +3362,7 @@ mod tests {
             }
 
             let mut after_columns = Vec::with_capacity(survivors.len() + raw.additions.len());
+
             for (position, &index) in survivors.iter().enumerate() {
                 let (before_column, _) = &before_columns[index];
                 let facts = raw.fact_tweaks[position].unwrap_or(raw.before_facts[index]);
@@ -3344,10 +3371,12 @@ mod tests {
                     raw.before_mask[index] ^ raw.mask_flips[position],
                 ));
             }
+
             for &(gap, replicated, facts) in &raw.additions {
                 let Some(name) = free_names.pop_front() else {
                     break;
                 };
+
                 attnum += gap;
                 after_columns.push((column(name, attnum, facts), replicated));
             }
@@ -3362,6 +3391,7 @@ mod tests {
             column_name_mapping: ColumnNameMapping,
         ) -> Option<(String, String)> {
             let mut seen: HashMap<String, &str> = HashMap::new();
+
             for column in schema.column_schemas() {
                 if let Some(first) =
                     seen.insert(column_name_mapping.map_name(&column.name), &column.name)
@@ -3369,6 +3399,7 @@ mod tests {
                     return Some((first.to_owned(), column.name.clone()));
                 }
             }
+
             None
         }
 
@@ -3394,23 +3425,28 @@ mod tests {
         fn rename_cycles(renames: &HashMap<String, String>) -> usize {
             let mut visited: HashSet<&str> = HashSet::new();
             let mut cycles = 0;
+
             for start in renames.keys() {
                 if visited.contains(start.as_str()) {
                     continue;
                 }
+
                 let mut path = Vec::new();
                 let mut current = start.as_str();
                 while let Some(next) = renames.get(current) {
                     if !visited.insert(current) {
                         break;
                     }
+
                     path.push(current);
                     current = next;
                 }
+
                 if current == start.as_str() && !path.is_empty() {
                     cycles += 1;
                 }
             }
+
             cycles
         }
 
@@ -3422,6 +3458,7 @@ mod tests {
         ) -> Result<(), TestCaseError> {
             let before_collision = endpoint_collision(before_schema, column_name_mapping);
             let after_collision = endpoint_collision(after_schema, column_name_mapping);
+
             let plan = match before_schema.plan_schema_change(after_schema, column_name_mapping) {
                 Ok(plan) => {
                     prop_assert_eq!(before_collision, None);
@@ -3439,15 +3476,18 @@ mod tests {
                     prop_assert!(
                         column_name_mapping.equivalent(&first_column_name, &second_column_name)
                     );
+
                     let endpoint_schema = match endpoint {
                         SchemaEndpoint::Before => before_schema,
                         SchemaEndpoint::After => after_schema,
                     };
+
                     for name in [&first_column_name, &second_column_name] {
                         prop_assert!(
                             endpoint_schema.column_schemas().any(|column| &column.name == name)
                         );
                     }
+
                     return Ok(());
                 }
                 Err(error) => {
@@ -3462,6 +3502,7 @@ mod tests {
                 .map(|column| (column.name.clone(), column))
                 .collect();
             let mut planned_renames = 0;
+
             for operation in plan.ordered_operations() {
                 match operation {
                     SchemaOperation::DropColumn { before_column_schema, .. } => {
@@ -3481,6 +3522,7 @@ mod tests {
                         let after = alteration.after_column_schema();
                         let removed = model.remove(&before.name);
                         prop_assert_eq!(removed.as_ref(), Some(before));
+
                         if alteration.kind() == ColumnAlterationKind::Rename {
                             planned_renames += 1;
                             prop_assert!(before.name != after.name);
@@ -3488,6 +3530,7 @@ mod tests {
                         } else {
                             prop_assert_eq!(&before.name, &after.name);
                         }
+
                         model.insert(after.name.clone(), after.clone());
                     }
                 }
@@ -3548,9 +3591,11 @@ mod tests {
         fn schema_plans_replay_legally_onto_the_after_endpoint() {
             run_property("schema plan replay", &raw_transition(), |raw| {
                 let (before_schema, after_schema) = build_endpoints(raw);
+
                 for column_name_mapping in COLUMN_NAME_MAPPINGS {
                     check_plan_replay(&before_schema, &after_schema, column_name_mapping)?;
                 }
+
                 Ok(())
             });
         }

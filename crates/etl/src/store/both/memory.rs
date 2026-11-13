@@ -50,6 +50,7 @@ impl MemoryStoreData {
     /// Sets table states, recording each replaced state for rollback.
     pub(crate) fn update_table_states(&mut self, updates: Vec<(TableId, TableState)>) {
         let states = Arc::make_mut(&mut self.table_states);
+
         for (table_id, state) in updates {
             if let Some(replaced_state) = states.insert(table_id, state) {
                 self.table_state_history.entry(table_id).or_default().push(replaced_state);

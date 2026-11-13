@@ -157,6 +157,7 @@ mod tests {
             if let Ok(token) = input.parse::<OffsetToken>() {
                 assert_canonical(input, &token)?;
             }
+
             Ok(())
         });
     }

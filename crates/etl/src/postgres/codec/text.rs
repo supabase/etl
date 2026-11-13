@@ -176,6 +176,7 @@ fn strip_array_dimensions_prefix(input: &str) -> EtlResult<&str> {
         }
 
         let digits_start = index;
+
         while matches!(bytes.get(index), Some(b'0'..=b'9')) {
             index += 1;
         }
@@ -285,6 +286,7 @@ where
                         if !in_quotes {
                             val_quoted = true;
                         }
+
                         in_quotes = !in_quotes;
                     }
                     '\\' => in_escape = true,
@@ -1074,6 +1076,7 @@ mod tests {
             if groups <= 0 {
                 return 0;
             }
+
             let last = digits.last().copied().unwrap_or(0);
             let trailing_zeros =
                 (0..4).take_while(|power| last % 10i16.pow(power + 1) == 0).count();
@@ -1096,10 +1099,12 @@ mod tests {
             let digits = (1i16..=9999, vec(0i16..=9999, 0..=6), 1i16..=9999).prop_map(
                 |(first, middle, last)| {
                     let mut digits = vec![first];
+
                     if !middle.is_empty() {
                         digits.extend(middle);
                         digits.push(last);
                     }
+
                     digits
                 },
             );

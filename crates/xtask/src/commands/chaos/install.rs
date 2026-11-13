@@ -80,5 +80,6 @@ fn run(argv: &[&str]) -> Result<()> {
     if !status.success() {
         anyhow::bail!("'{}' exited with {status}", argv.join(" "));
     }
+
     Ok(())
 }

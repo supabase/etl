@@ -176,6 +176,7 @@ impl TableSyncWorkerPool {
             if stopping && matches!(&result, Err(error) if error.is_cancelled()) {
                 continue;
             }
+
             let mut workers = self.workers.write().await;
             if let Err(err) = Self::handle_worker_result(&mut workers, result) {
                 *workers_join_set = JoinSet::new();
@@ -266,6 +267,7 @@ mod tests {
         while !task.is_finished() {
             tokio::task::yield_now().await;
         }
+
         assert_eq!(
             pool.wait_all(&force_stop).await.unwrap_err().kind(),
             ErrorKind::DestinationError

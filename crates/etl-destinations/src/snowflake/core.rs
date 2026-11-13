@@ -91,9 +91,11 @@ fn take_data_events(iter: &mut EventIter) -> Vec<(TableId, Vec<Event>)> {
                 continue;
             }
         };
+
         let Some(event) = iter.next() else {
             break;
         };
+
         let index = *table_indexes.entry(table_id).or_insert_with(|| {
             tables.push((table_id, Vec::new()));
             tables.len() - 1
@@ -110,10 +112,12 @@ fn take_data_events(iter: &mut EventIter) -> Vec<(TableId, Vec<Event>)> {
 /// the later truncate. Duplicate tables are collapsed only within one event.
 fn take_truncate_operations(iter: &mut EventIter) -> Vec<(ReplicatedTableSchema, OffsetToken)> {
     let mut operations = Vec::new();
+
     while matches!(iter.peek(), Some(Event::Truncate(_))) {
         if let Some(Event::Truncate(truncate)) = iter.next() {
             let offset = OffsetToken::new(truncate.commit_lsn, truncate.tx_ordinal);
             let mut table_ids = HashSet::new();
+
             for schema in truncate.truncated_tables {
                 if table_ids.insert(schema.id()) {
                     operations.push((schema, offset.clone()));
@@ -147,6 +151,7 @@ where
         && metadata.is_applied()
     {
         ensure_destination_schema_matches_metadata("Snowflake", table_id, &metadata, table_schema)?;
+
         if client.is_table_ready(table_id).await {
             return Ok(());
         }
@@ -161,6 +166,7 @@ where
     let snapshot_id = table_schema.inner().snapshot_id;
     let replication_mask = table_schema.replication_mask().clone();
     schema::validate_no_cdc_collisions(&columns).map_err(EtlError::from)?;
+
     let creating_metadata = match store.get_destination_table_metadata(table_id).await? {
         None => {
             let table_name = try_stringify_table_name(table_schema.name())?.to_uppercase();
@@ -210,6 +216,7 @@ where
                 .prepare_view(&table, metadata.table_id(), table_schema)
                 .await
                 .map_err(EtlError::from)?;
+
             return Ok(());
         }
         Some(metadata) if metadata.is_creating() => {
@@ -356,6 +363,7 @@ where
             })?;
         ensure_snowflake_metadata_applied(table_id, &metadata)?;
         ensure_destination_schema_matches_metadata("Snowflake", table_id, &metadata, table_schema)?;
+
         if self.client.is_table_ready(table_id).await {
             return Ok(());
         }
@@ -420,6 +428,7 @@ where
                     }
                     _ => unreachable!("data groups contain only row events"),
                 };
+
                 for batch in completed {
                     self.client
                         .send_streaming_batch(table_id, batch)
@@ -432,17 +441,20 @@ where
                 self.client.send_streaming_batch(table_id, batch).await.map_err(EtlError::from)?;
             }
         }
+
         Ok(())
     }
 
     async fn apply_relation_events(&self, iter: &mut EventIter) -> EtlResult<bool> {
         let mut applied_schema_change = false;
+
         while matches!(iter.peek(), Some(Event::Relation(_))) {
             if let Some(Event::Relation(rel)) = iter.next() {
                 applied_schema_change |=
                     self.handle_relation_event(&rel.replicated_table_schema).await?;
             }
         }
+
         Ok(applied_schema_change)
     }
 
@@ -520,6 +532,7 @@ where
         let table_id = e.replicated_table_schema.id();
         let offset = OffsetToken::new(e.commit_lsn, e.tx_ordinal);
         let cols = self.prepare_columns(columns, &e.replicated_table_schema).await?;
+
         if self.client.reconcile_replay_offset(table_id, &offset).await? {
             return Ok(Completed::default());
         }
@@ -555,6 +568,7 @@ where
                         "Snowflake data segment contains multiple schema snapshots or projections"
                     );
                 }
+
                 Ok(&cached.columns)
             }
             None => {
@@ -584,6 +598,7 @@ where
                 )
             );
         };
+
         ensure_snowflake_metadata_applied(table_id, &metadata)?;
 
         let current_snapshot_id = metadata.snapshot_id();
@@ -605,6 +620,7 @@ where
         if current_snapshot_id == new_snapshot_id {
             self.initialize_table(new_schema).await?;
             info!(table_id = ?table_id, "schema unchanged, skipping relation event");
+
             return Ok(false);
         }
 
@@ -653,6 +669,7 @@ where
 
         let table = self.client.lock_table(table_id).await;
         self.client.invalidate_view(&table).await;
+
         if plan.ordered_operations().iter().any(|operation| match operation {
             SchemaOperation::DropColumn { .. } => true,
             SchemaOperation::AlterColumn { alteration } => {
@@ -726,10 +743,12 @@ where
                 else {
                     return Ok(());
                 };
+
                 // Never publish a view over interrupted raw DDL.
                 if !metadata.is_applied() {
                     return Ok(());
                 }
+
                 let schema = self
                     .writer
                     .store
@@ -858,6 +877,7 @@ where
             // so encoded output never accumulates for the whole copy batch.
             let zero = OffsetToken::zero();
             let mut builder = RowBatchBuilder::new(table_id);
+
             for row in &table_rows {
                 let completed = builder
                     .push_row(
@@ -1034,9 +1054,11 @@ mod tests {
         let mut after = before.clone();
         after.snapshot_id = test_snapshot_id(20, 20);
         after.column_schemas[1].typ = after_type;
+
         if rename {
             after.column_schemas[1].name = "renamed_payload".into();
         }
+
         // A new ordinal makes this a drop and addition rather than a rename.
         after.column_schemas[2] = ColumnSchema::new("added".into(), Type::JSONB, -1, 4, true);
         (ReplicatedTableSchema::all(Arc::new(before)), ReplicatedTableSchema::all(Arc::new(after)))
@@ -1358,6 +1380,7 @@ mod tests {
         else {
             panic!("initialization should not reacquire its table gate");
         };
+
         assert_eq!(result.unwrap_err().kind(), ErrorKind::DestinationAuthenticationError);
         assert!(
             store.get_destination_table_metadata(schema.id()).await.unwrap().unwrap().is_applied()

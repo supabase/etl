@@ -179,6 +179,7 @@ mod clickhouse {
             Some((name, _)) => (name, true),
             None => (app_version, false),
         };
+
         if !has_digest && !reference.contains(['/', ':']) {
             return Some(reference);
         }
@@ -259,6 +260,7 @@ mod clickhouse {
                 store.clone(),
             )?
         };
+
         destination.validate_engine_support().await?;
 
         Ok(Pipeline::new(replicator_config.pipeline, store, destination))
@@ -376,6 +378,7 @@ mod ducklake {
             ConfigDuckLakeMaintenanceMode::Kubernetes => DuckLakeMaintenanceMode::Kubernetes,
             ConfigDuckLakeMaintenanceMode::Postgres => DuckLakeMaintenanceMode::Postgres,
         };
+
         let external_maintenance = DuckLakeExternalMaintenanceConfig {
             mode: maintenance_mode,
             pipeline_id: PipelineId::from(&replicator_config.pipeline.id),
@@ -449,9 +452,11 @@ mod snowflake {
 
         let mut config = snowflake_destination::Config::new(account_id, user, database, schema)
             .map_err(ReplicatorError::config)?;
+
         if let Some(r) = role {
             config = config.with_role(r);
         }
+
         config = config.with_private_key(private_key.clone(), private_key_passphrase.clone());
         let auth = std::sync::Arc::new(
             snowflake_destination::AuthManager::new(config).map_err(ReplicatorError::config)?,

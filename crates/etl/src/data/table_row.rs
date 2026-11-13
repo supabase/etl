@@ -295,9 +295,11 @@ fn estimate_json_allocated_bytes(value: &serde_json::Value) -> usize {
         serde_json::Value::String(value) => value.capacity(),
         serde_json::Value::Array(values) => {
             let mut total = values.capacity().saturating_mul(size_of::<serde_json::Value>());
+
             for value in values {
                 total = total.saturating_add(estimate_json_allocated_bytes(value));
             }
+
             total
         }
         serde_json::Value::Object(values) => {
@@ -330,9 +332,11 @@ fn estimate_array_allocated_bytes(value: &ArrayCell) -> usize {
         ArrayCell::F64(values) => values.capacity().saturating_mul(size_of::<Option<f64>>()),
         ArrayCell::Numeric(values) => {
             let mut total = values.capacity().saturating_mul(size_of::<Option<PgNumeric>>());
+
             for value in values.iter().flatten() {
                 total = total.saturating_add(estimated_pg_numeric_allocated_bytes(value));
             }
+
             total
         }
         ArrayCell::Date(values) => {
@@ -353,24 +357,30 @@ fn estimate_array_allocated_bytes(value: &ArrayCell) -> usize {
         }
         ArrayCell::String(values) => {
             let mut total = values.capacity().saturating_mul(size_of::<Option<String>>());
+
             for value in values.iter().flatten() {
                 total = total.saturating_add(value.capacity());
             }
+
             total
         }
         ArrayCell::Json(values) => {
             let mut total =
                 values.capacity().saturating_mul(size_of::<Option<serde_json::Value>>());
+
             for value in values.iter().flatten() {
                 total = total.saturating_add(estimate_json_allocated_bytes(value));
             }
+
             total
         }
         ArrayCell::Bytes(values) => {
             let mut total = values.capacity().saturating_mul(size_of::<Option<Vec<u8>>>());
+
             for value in values.iter().flatten() {
                 total = total.saturating_add(value.capacity());
             }
+
             total
         }
     }
@@ -482,6 +492,7 @@ mod tests {
         let serde_json::Value::Array(array_values) = &array else {
             unreachable!();
         };
+
         let expected_array_bytes = array_values.capacity() * size_of::<serde_json::Value>()
             + array_values.iter().map(estimate_json_allocated_bytes).sum::<usize>();
         assert_eq!(estimate_json_allocated_bytes(&array), expected_array_bytes);
@@ -491,6 +502,7 @@ mod tests {
         let serde_json::Value::Object(object_values) = &object else {
             unreachable!();
         };
+
         let (key, value) = object_values.iter().next().unwrap();
         let expected_object_bytes = size_of::<String>()
             + size_of::<serde_json::Value>()

@@ -130,6 +130,7 @@ impl FromStr for SnapshotId {
         let Some((commit_lsn, message_lsn)) = s.split_once(':') else {
             return Err(SchemaError::InvalidSnapshotId(s.to_owned()));
         };
+
         if message_lsn.contains(':') {
             return Err(SchemaError::InvalidSnapshotId(s.to_owned()));
         }
@@ -194,10 +195,12 @@ mod snapshot_id_tests {
 
             assert!(SnapshotId::initial() <= bound);
             assert!(SnapshotId::new(PgLsn::from(frontier - 1), PgLsn::from(u64::MAX)) <= bound);
+
             for message_lsn in [0, 100, u64::MAX] {
                 assert!(SnapshotId::new(PgLsn::from(frontier), PgLsn::from(message_lsn)) > bound);
             }
         }
+
         assert_eq!(SnapshotId::before_lsn(PgLsn::from(0)), SnapshotId::initial());
     }
 

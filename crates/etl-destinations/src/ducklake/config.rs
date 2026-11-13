@@ -247,6 +247,7 @@ fn vendored_extension_dir(
     if let Some(root) = env_override {
         let directory = root.join(DUCKDB_EXTENSION_VERSION).join(platform_dir);
         ensure_vendored_extension_dir(&directory)?;
+
         return Ok(Some(directory));
     }
 
@@ -255,7 +256,9 @@ fn vendored_extension_dir(
         if !directory.exists() {
             continue;
         }
+
         ensure_vendored_extension_dir(&directory)?;
+
         return Ok(Some(directory));
     }
 
@@ -395,9 +398,11 @@ pub(super) fn catalog_conninfo_from_url(catalog_url: &Url) -> EtlResult<String> 
     if let Some(dbname) = config.get_dbname() {
         push_conninfo_pair(&mut parts, "dbname", dbname);
     }
+
     if let Some(user) = config.get_user() {
         push_conninfo_pair(&mut parts, "user", user);
     }
+
     if let Some(password) = config.get_password() {
         let password = std::str::from_utf8(password).map_err(|e| {
             classified_error(
@@ -408,12 +413,15 @@ pub(super) fn catalog_conninfo_from_url(catalog_url: &Url) -> EtlResult<String> 
         })?;
         push_conninfo_pair(&mut parts, "password", password);
     }
+
     if let Some(options) = config.get_options() {
         push_conninfo_pair(&mut parts, "options", options);
     }
+
     if let Some(application_name) = config.get_application_name() {
         push_conninfo_pair(&mut parts, "application_name", application_name);
     }
+
     if let Some(ssl_cert) = config.get_ssl_cert() {
         let ssl_cert = std::str::from_utf8(ssl_cert).map_err(|e| {
             classified_error(
@@ -424,6 +432,7 @@ pub(super) fn catalog_conninfo_from_url(catalog_url: &Url) -> EtlResult<String> 
         })?;
         push_conninfo_pair(&mut parts, "sslcert", ssl_cert);
     }
+
     if let Some(ssl_key) = config.get_ssl_key() {
         let ssl_key = std::str::from_utf8(ssl_key).map_err(|e| {
             classified_error(
@@ -434,6 +443,7 @@ pub(super) fn catalog_conninfo_from_url(catalog_url: &Url) -> EtlResult<String> 
         })?;
         push_conninfo_pair(&mut parts, "sslkey", ssl_key);
     }
+
     if let Some(ssl_root_cert) = config.get_ssl_root_cert() {
         let ssl_root_cert = std::str::from_utf8(ssl_root_cert).map_err(|e| {
             classified_error(
@@ -454,6 +464,7 @@ pub(super) fn catalog_conninfo_from_url(catalog_url: &Url) -> EtlResult<String> 
     {
         parts.push(format!("connect_timeout={}", connect_timeout.as_secs()));
     }
+
     if explicit_query_options.contains("tcp_user_timeout")
         && let Some(tcp_user_timeout) = config.get_tcp_user_timeout()
     {
@@ -463,14 +474,17 @@ pub(super) fn catalog_conninfo_from_url(catalog_url: &Url) -> EtlResult<String> 
     if explicit_query_options.contains("keepalives") {
         parts.push(format!("keepalives={}", if config.get_keepalives() { "1" } else { "0" }));
     }
+
     if explicit_query_options.contains("keepalives_idle") {
         parts.push(format!("keepalives_idle={}", config.get_keepalives_idle().as_secs()));
     }
+
     if explicit_query_options.contains("keepalives_interval")
         && let Some(keepalives_interval) = config.get_keepalives_interval()
     {
         parts.push(format!("keepalives_interval={}", keepalives_interval.as_secs()));
     }
+
     if explicit_query_options.contains("keepalives_retries")
         && let Some(keepalives_retries) = config.get_keepalives_retries()
     {
@@ -519,6 +533,7 @@ pub(super) fn catalog_attach_target(catalog_url: &Url) -> EtlResult<String> {
 /// Serializes hosts from [`PgConfig`] into a libpq-compatible host string.
 pub(super) fn serialize_hosts(hosts: &[Host]) -> EtlResult<String> {
     let mut values = Vec::with_capacity(hosts.len());
+
     for host in hosts {
         match host {
             Host::Tcp(host) => values.push(libpq_tcp_host(host).to_owned()),
@@ -549,12 +564,15 @@ pub(super) fn push_conninfo_pair(parts: &mut Vec<String>, key: &str, value: &str
 /// as libpq `key=value` conninfo.
 pub(super) fn quote_libpq_conninfo_value(value: &str) -> String {
     let mut quoted = String::from("'");
+
     for ch in value.chars() {
         if matches!(ch, '\'' | '\\') {
             quoted.push('\\');
         }
+
         quoted.push(ch);
     }
+
     quoted.push('\'');
     quoted
 }
@@ -631,6 +649,7 @@ pub(super) fn build_setup_plan(
         }
         DuckDbExtensionStrategy::InstallFromRepository => None,
     };
+
     build_setup_plan_with_strategy(
         catalog_url,
         data_path,
@@ -709,33 +728,41 @@ fn build_setup_plan_with_strategy(
             let ducklake_extension =
                 vendored_extension_path(extension_root, DUCKLAKE_EXTENSION_FILE)?;
             let mut sql = format!("LOAD {};", quote_literal(&ducklake_extension));
+
             if needs_postgres {
                 let postgres_extension =
                     vendored_extension_path(extension_root, POSTGRES_SCANNER_EXTENSION_FILE)?;
                 sql.push_str(&format!(" LOAD {};", quote_literal(&postgres_extension)));
             }
+
             if needs_httpfs {
                 let httpfs_extension =
                     vendored_extension_path(extension_root, HTTPFS_EXTENSION_FILE)?;
                 sql.push_str(&format!(" LOAD {};", quote_literal(&httpfs_extension)));
             }
+
             sql
         }
         DuckDbExtensionStrategy::InstallFromRepository => {
             let mut sql = String::from("INSTALL ducklake; LOAD ducklake;");
+
             if needs_postgres {
                 sql.push_str(" INSTALL postgres; LOAD postgres;");
             }
+
             if needs_httpfs {
                 sql.push_str(" INSTALL httpfs; LOAD httpfs;");
             }
+
             sql
         }
     };
+
     steps.push(DuckLakeSetupStep { label: "load_extensions", sql: extension_sql });
 
     if needs_httpfs && let Some(s3) = s3 {
         let secret_name = quote_identifier("ducklake_s3");
+
         if let Some(endpoint) = &s3.endpoint {
             secret_options.insert("ENDPOINT", quote_literal(endpoint));
         }
@@ -756,6 +783,7 @@ fn build_setup_plan_with_strategy(
             ),
         });
     }
+
     let metadata_schema_clause = metadata_schema
         .map(|schema| format!(", METADATA_SCHEMA {}", quote_literal(schema)))
         .unwrap_or_default();
@@ -794,6 +822,7 @@ mod tests {
         let tempdir = TempDir::new().unwrap();
         let extension_dir = tempdir.path().join(DUCKDB_EXTENSION_VERSION).join(platform_dir);
         fs::create_dir_all(&extension_dir).unwrap();
+
         for filename in
             [DUCKLAKE_EXTENSION_FILE, HTTPFS_EXTENSION_FILE, POSTGRES_SCANNER_EXTENSION_FILE]
         {
@@ -854,6 +883,7 @@ mod tests {
                     ))
                     .unwrap();
                 }
+
                 conn.execute_batch(&step.sql).unwrap();
             }
 
@@ -879,6 +909,7 @@ mod tests {
                 conn.execute_batch(&format!("create table {LAKE_CATALOG}.items (id integer)"))
                     .unwrap();
             }
+
             conn.execute_batch(&format!("insert into {LAKE_CATALOG}.items values (8)")).unwrap();
             let count: i64 = conn
                 .query_row(&format!("select count(*) from {LAKE_CATALOG}.items"), [], |row| {
@@ -897,6 +928,7 @@ mod tests {
         let catalog_path = temp.path().join("legacy.duckdb");
         let catalog_url = Url::from_file_path(&catalog_path).unwrap();
         let data_url = Url::from_directory_path(temp.path().join("data")).unwrap();
+
         {
             let metadata = Connection::open(&catalog_path).unwrap();
             // Only the version record is needed: the format check must happen

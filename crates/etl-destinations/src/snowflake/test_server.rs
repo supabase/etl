@@ -74,6 +74,7 @@ async fn serve_requests(
     let url = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
         let mut requests = Vec::new();
+
         for (status, body) in responses {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut request = Vec::new();
@@ -82,10 +83,12 @@ async fn serve_requests(
                 if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
                     break index + 4;
                 }
+
                 let read = stream.read(&mut chunk).await.unwrap();
                 assert_ne!(read, 0);
                 request.extend_from_slice(&chunk[..read]);
             };
+
             let content_length = std::str::from_utf8(&request[..head_end])
                 .unwrap()
                 .lines()
@@ -100,6 +103,7 @@ async fn serve_requests(
                 assert_ne!(read, 0);
                 request.extend_from_slice(&chunk[..read]);
             }
+
             requests.extend(record(&request, head_end));
             let response = format!(
                 "HTTP/1.1 {status} Test\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
@@ -107,6 +111,7 @@ async fn serve_requests(
             );
             stream.write_all(response.as_bytes()).await.unwrap();
         }
+
         requests
     });
 

@@ -139,6 +139,7 @@ where
     .await?;
 
     let mut metadata = HashMap::new();
+
     for row in rows {
         let row = decode_metadata_row(row)?;
         metadata.insert(row.table_id, row);

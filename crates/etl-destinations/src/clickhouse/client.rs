@@ -58,6 +58,7 @@ fn record_ddl_metrics(kind: DdlKind, start: Instant, err: Option<&EtlError>) {
         "kind" => kind.as_label(),
     )
     .record(start.elapsed().as_secs_f64());
+
     if let Some(err) = err {
         metrics::counter!(
             ETL_CLICKHOUSE_DDL_ERRORS_TOTAL,
@@ -161,6 +162,7 @@ fn is_insert_layout_rejection(error: &clickhouse::error::Error) -> bool {
     let clickhouse::error::Error::BadResponse(message) = error else {
         return false;
     };
+
     clickhouse_error_code(message).is_some_and(|code| INSERT_LAYOUT_REJECTION_CODES.contains(&code))
 }
 
@@ -177,6 +179,7 @@ fn clickhouse_error_code(message: &str) -> Option<u32> {
     if !tail.is_empty() && !tail.starts_with('.') {
         return None;
     }
+
     digits.parse().ok()
 }
 
@@ -213,13 +216,16 @@ fn is_permission_denied(error: &(dyn std::error::Error + 'static)) -> bool {
             if io_error.kind() == std::io::ErrorKind::PermissionDenied {
                 return true;
             }
+
             if let Some(inner) = io_error.get_ref() {
                 current = Some(inner);
                 continue;
             }
         }
+
         current = error.source();
     }
+
     false
 }
 
@@ -250,6 +256,7 @@ fn http_status(message: &str) -> Option<u16> {
     {
         return None;
     }
+
     status.parse().ok()
 }
 
@@ -339,6 +346,7 @@ impl RowBinaryLayout {
             columns.iter().map(|column| quote_identifier(&column.name)).collect::<Vec<_>>();
         let mut header = Vec::new();
         rb_varint(columns.len(), &mut header);
+
         for value in columns
             .iter()
             .map(|column| &column.name)
@@ -557,20 +565,24 @@ impl ClickHouseClient {
         Self {
             inner: Arc::new({
                 let client = client.with_url(url.to_string()).with_user(user);
+
                 let client = match &config.product_info {
                     Some(product_info) => {
                         client.with_product_info(product_info.name(), product_info.version())
                     }
                     None => client,
                 };
+
                 let client = match database {
                     Some(database) => client.with_database(database),
                     None => client,
                 };
+
                 let client = match password {
                     Some(password) => client.with_password(password),
                     None => client,
                 };
+
                 client
                     .with_option("connect_timeout", floor_secs(config.connectivity_check_timeout))
                     .with_option(
@@ -876,10 +888,12 @@ impl ClickHouseClient {
                 // A profile can disable the header type check, which would read
                 // the row bytes as the table's types again.
                 .with_option("input_format_with_types_use_header", "1");
+
             if let Some(batch_id) = copy_batch_id {
                 insert = insert
                     .with_option("insert_deduplication_token", format!("{batch_id}-{statements}"));
             }
+
             let mut insert = insert.buffered_with_capacity(BUFFERED_CAPACITY);
             insert.write_buffered(&layout.header);
             // Only row bytes count toward the budget, so every statement
@@ -942,6 +956,7 @@ impl ClickHouseClient {
                     .increment(1);
                 }
             }
+
             result.map_err(|error| InsertRowsError { error, layout_rejected })?;
             statements += 1;
         }
@@ -1014,9 +1029,11 @@ async fn pause_before_insert_statement_for_tests(statement_index: u64) {
             .position(|armed| armed.statement_index == statement_index)
             .map(|index| armed_pauses.remove(index))
     };
+
     let Some(armed) = armed else {
         return;
     };
+
     let _ = armed.reached.send(());
     // A test that aborts the paused task never sends; a dropped sender
     // resumes normally.
@@ -1541,9 +1558,11 @@ mod tests {
         // WHEN: each failure is classified.
         // THEN: only the rejections count.
         let bad_response = |message: &str| clickhouse::error::Error::BadResponse(message.into());
+
         for message in rejections {
             assert!(is_insert_layout_rejection(&bad_response(message)), "{message}");
         }
+
         for message in transient {
             assert!(!is_insert_layout_rejection(&bad_response(message)), "{message}");
         }

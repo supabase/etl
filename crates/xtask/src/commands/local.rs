@@ -32,6 +32,7 @@ pub(crate) fn prepare_local_databases() -> Result<InitConfig> {
     }
 
     let database_url = config.database_url();
+
     if let Some(compose) = &compose {
         wait_for_docker_services(compose, &config)?;
     } else {
@@ -269,9 +270,11 @@ fn apply_compose_env(cmd: &mut Command, config: &InitConfig) {
     if let Some(value) = &config.postgres_data_volume {
         cmd.env("POSTGRES_DATA_VOLUME", value);
     }
+
     if let Some(value) = &config.postgres_replica_data_volume {
         cmd.env("POSTGRES_REPLICA_DATA_VOLUME", value);
     }
+
     if let Some(value) = &config.clickhouse_data_volume {
         cmd.env("CLICKHOUSE_DATA_VOLUME", value);
     }
@@ -307,6 +310,7 @@ where
     F: FnMut() -> Result<bool>,
 {
     println!("⏳ Waiting for {description} to be ready...");
+
     loop {
         if ready()? {
             return Ok(());

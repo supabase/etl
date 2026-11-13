@@ -226,6 +226,7 @@ pub(super) fn spawn_jemalloc_metrics_task() -> AbortOnDropHandle<()> {
                 return;
             }
         };
+
         let allocated_mib = match stats::allocated::mib() {
             Ok(mib) => mib,
             Err(err) => {
@@ -233,6 +234,7 @@ pub(super) fn spawn_jemalloc_metrics_task() -> AbortOnDropHandle<()> {
                 return;
             }
         };
+
         let active_mib = match stats::active::mib() {
             Ok(mib) => mib,
             Err(err) => {
@@ -240,6 +242,7 @@ pub(super) fn spawn_jemalloc_metrics_task() -> AbortOnDropHandle<()> {
                 return;
             }
         };
+
         let resident_mib = match stats::resident::mib() {
             Ok(mib) => mib,
             Err(err) => {
@@ -247,6 +250,7 @@ pub(super) fn spawn_jemalloc_metrics_task() -> AbortOnDropHandle<()> {
                 return;
             }
         };
+
         let mapped_mib = match stats::mapped::mib() {
             Ok(mib) => mib,
             Err(err) => {
@@ -254,6 +258,7 @@ pub(super) fn spawn_jemalloc_metrics_task() -> AbortOnDropHandle<()> {
                 return;
             }
         };
+
         let retained_mib = match stats::retained::mib() {
             Ok(mib) => mib,
             Err(err) => {
@@ -261,6 +266,7 @@ pub(super) fn spawn_jemalloc_metrics_task() -> AbortOnDropHandle<()> {
                 return;
             }
         };
+
         let metadata_mib = match stats::metadata::mib() {
             Ok(mib) => mib,
             Err(err) => {
@@ -274,6 +280,7 @@ pub(super) fn spawn_jemalloc_metrics_task() -> AbortOnDropHandle<()> {
             if let Err(err) = epoch_mib.advance() {
                 warn!(error = %err, "failed to advance jemalloc epoch");
                 tokio::time::sleep(POLL_INTERVAL).await;
+
                 continue;
             }
 
@@ -298,6 +305,7 @@ pub(super) fn spawn_jemalloc_metrics_task() -> AbortOnDropHandle<()> {
             // fragmentation.
             let fragmentation =
                 if resident > 0.0 { (resident - allocated) / resident } else { 0.0 };
+
             gauge!(JEMALLOC_FRAGMENTATION_RATIO, APP_TYPE_LABEL => APP_TYPE_VALUE)
                 .set(fragmentation);
 

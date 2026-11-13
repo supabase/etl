@@ -121,6 +121,7 @@ async fn assert_publication_table_ids_for_partition_hierarchy(
         PublishedPartitionTarget::Middle => hierarchy.p_2026_table_name.clone(),
         PublishedPartitionTarget::Leaf => partition_table_name(&hierarchy.p_2026_table_name, "01"),
     };
+
     let publication_name = format!("pub_{test_name}");
     database
         .create_publication_with_config(
@@ -145,6 +146,7 @@ async fn assert_publication_table_ids_for_partition_hierarchy(
         }
         (PublishedPartitionTarget::Leaf, _) => HashSet::from([hierarchy.p_2026_01_table_id]),
     };
+
     let table_ids = client
         .get_publication_table_ids(&publication_name)
         .await
@@ -184,6 +186,7 @@ async fn assert_publication_table_ids_for_expanded_publication(
         .unwrap();
 
     let publication_name = format!("pub_{test_name}");
+
     match expansion {
         PublicationExpansion::AllTables => {
             database
@@ -215,6 +218,7 @@ async fn assert_publication_table_ids_for_expanded_publication(
         .unwrap()
         .into_iter()
         .collect::<HashSet<_>>();
+
     let expected_table_ids = if publish_via_partition_root {
         HashSet::from([parent_table_id, regular_table_id])
     } else {
@@ -243,6 +247,7 @@ async fn count_stream_rows(stream: CopyOutStream) -> u64 {
     pin!(stream);
 
     let mut row_count = 0;
+
     while let Some(row) = stream.next().await {
         row.unwrap();
         row_count += 1;
@@ -277,6 +282,7 @@ where
     let mut counts = MessageCounts::default();
 
     pin!(stream);
+
     while let Some(event) = stream.next().await {
         if let Ok(event) = event {
             match event {
@@ -286,6 +292,7 @@ where
                     LogicalReplicationMessage::Origin(_) => counts.origin_count += 1,
                     LogicalReplicationMessage::Message(message) => {
                         counts.message_count += 1;
+
                         if message.prefix().is_ok_and(|prefix| prefix == "supabase_etl_ddl") {
                             counts.ddl_message_count += 1;
                         }
@@ -317,6 +324,7 @@ async fn collect_ddl_messages(
     let mut messages = Vec::with_capacity(expected_count);
 
     pin!(stream);
+
     while messages.len() < expected_count {
         let event = timeout(Duration::from_secs(10), stream.next())
             .await
@@ -446,6 +454,7 @@ async fn collect_update_delete_messages(
     let mut messages = Vec::with_capacity(expected_count);
 
     pin!(stream);
+
     while messages.len() < expected_count {
         let event = timeout(Duration::from_secs(10), stream.next())
             .await
@@ -625,15 +634,18 @@ async fn replication_channel_binding_requires_tls() {
     if !database.config.tls.enabled {
         let error = config.connect(NoTls).await.err().unwrap();
         assert_eq!(error.source().unwrap().to_string(), "server did not use channel binding");
+
         return;
     }
 
     let mut roots = RootCertStore::empty();
+
     for certificate in
         CertificateDer::pem_slice_iter(database.config.tls.trusted_root_certs.as_bytes())
     {
         roots.add(certificate.unwrap()).unwrap();
     }
+
     let tls_config = ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();
     let (client, connection) = config.connect(MakeRustlsConnect::new(tls_config)).await.unwrap();
 
@@ -695,6 +707,7 @@ async fn temporary_slots_are_removed_when_the_creating_session_ends() {
     for use_snapshot in [false, true] {
         let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
         let slot_name = test_slot_name("temporary_slot");
+
         if use_snapshot {
             let (transaction, _) =
                 client.create_table_copy_slot(&slot_name, table_id, &config).await.unwrap();
@@ -880,6 +893,7 @@ async fn apply_slot_creation_exempts_lock_timeout() {
 
     database.run_sql("begin").await.unwrap();
     database.run_sql("insert into test.writer (id) values (1)").await.unwrap();
+
     let release_writer = async {
         // Observe slot creation waiting before measuring the exemption.
         timeout(Duration::from_secs(10), async {
@@ -899,6 +913,7 @@ async fn apply_slot_creation_exempts_lock_timeout() {
                 if row.get::<_, i64>(0) == 1 {
                     break;
                 }
+
                 database.run_sql("select pg_stat_clear_snapshot()").await.unwrap();
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -908,6 +923,7 @@ async fn apply_slot_creation_exempts_lock_timeout() {
         tokio::time::sleep(Duration::from_secs(31)).await;
         database.run_sql("commit").await.unwrap();
     };
+
     let (apply_result, ()) = timeout(Duration::from_secs(60), async {
         tokio::join!(apply_client.create_slot(&apply_slot, &config), release_writer,)
     })
@@ -1456,6 +1472,7 @@ async fn table_copy_stream_with_ctid_partition() {
     assert!(!snapshot_id.is_empty(), "snapshot id should not be empty");
 
     let mut total_rows = 0;
+
     for planned_partition in partitions {
         let (partition, _) = planned_partition.into_parts();
         let mut child = transaction.fork_child().await.unwrap();
@@ -1495,6 +1512,7 @@ async fn table_copy_stream_quotes_names_and_respects_row_filter() {
         eprintln!("Skipping test: PostgreSQL 15+ required for row filters");
         return;
     }
+
     let publication_name = r#"pub'"; select 1; --\"#;
     let column_name = r#"age'"; select 1; --\"#;
     let quoted_column = quote_identifier(column_name);
@@ -1538,6 +1556,7 @@ async fn table_copy_stream_quotes_names_and_respects_row_filter() {
         .unwrap();
     let snapshot = transaction.export_snapshot().await.unwrap();
     let mut partitioned_rows = 0;
+
     for planned in estimate.plan_ctid_partitions(2).unwrap() {
         let (partition, _) = planned.into_parts();
         let mut child = transaction.fork_child().await.unwrap();
@@ -2085,6 +2104,7 @@ async fn start_logical_replication() {
     // We create a table with a publication and 10 entries.
     database.create_table(test_table_name("table_1"), true, &[("age", "integer")]).await.unwrap();
     database.create_publication("my_publication", &[test_table_name("table_1")]).await.unwrap();
+
     for i in 0..10 {
         database
             .insert_values(

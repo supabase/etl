@@ -429,6 +429,7 @@ async fn composite_key_changes_inner(engine: ClickHouseEngine, full_identity: bo
         ))
         .await
         .unwrap();
+
     if full_identity {
         database
             .run_sql(&format!(
@@ -438,6 +439,7 @@ async fn composite_key_changes_inner(engine: ClickHouseEngine, full_identity: bo
             .await
             .unwrap();
     }
+
     let publication_name = "test_pub_composite_changes";
     database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
     database
@@ -470,6 +472,7 @@ async fn composite_key_changes_inner(engine: ClickHouseEngine, full_identity: bo
         .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 4)])
         .await;
     let tx = database.begin_transaction().await;
+
     for change in [
         "set id = 3, tenant_id = 30, value = 'moved' where id = 1 and tenant_id = 10",
         "set id = 1, tenant_id = 10, value = 'reused' where id = 3 and tenant_id = 30",
@@ -480,6 +483,7 @@ async fn composite_key_changes_inner(engine: ClickHouseEngine, full_identity: bo
             .await
             .unwrap();
     }
+
     tx.commit_transaction().await;
     updated.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
@@ -545,6 +549,7 @@ async fn deferrable_primary_key_is_rejected_inner(engine: ClickHouseEngine) {
         )
         .await
         .unwrap();
+
     for statement in
         ["add primary key (id) deferrable initially immediate", "replica identity full"]
     {
@@ -553,6 +558,7 @@ async fn deferrable_primary_key_is_rejected_inner(engine: ClickHouseEngine) {
             .await
             .unwrap();
     }
+
     let publication_name = "test_pub_deferrable_key";
     database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
     database
@@ -588,6 +594,7 @@ async fn deferrable_primary_key_is_rejected_inner(engine: ClickHouseEngine) {
     else {
         panic!("a deferrable primary key should error the table");
     };
+
     assert!(matches!(retry_policy, TableRetryPolicy::ManualRetry));
     assert_eq!(source_err.kind(), ErrorKind::SourceSchemaError);
     assert_eq!(source_err.description(), Some(DEFERRABLE_KEY_REJECTION));
@@ -695,6 +702,7 @@ async fn nan_key_changes_inner(engine: ClickHouseEngine, array_keys: bool) {
     install_crypto_provider();
     let mut database = spawn_source_database().await;
     let table_name = test_table_name("nan_changes");
+
     let (real_type, double_type, nan_key, finite_key, projection) = if array_keys {
         (
             "real[] not null",
@@ -712,6 +720,7 @@ async fn nan_key_changes_inner(engine: ClickHouseEngine, array_keys: bool) {
             "bucket, real_key, double_key, value",
         )
     };
+
     let table_id = database
         .create_table(
             table_name.clone(),
@@ -772,6 +781,7 @@ async fn nan_key_changes_inner(engine: ClickHouseEngine, array_keys: bool) {
         .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 5)])
         .await;
     let tx = database.begin_transaction().await;
+
     for change in [
         "set value = 'same_key' where bucket = 1".to_owned(),
         format!("set real_key = {finite_key}, value = 'real_moved' where bucket = 2"),
@@ -788,6 +798,7 @@ async fn nan_key_changes_inner(engine: ClickHouseEngine, array_keys: bool) {
             .await
             .unwrap();
     }
+
     tx.commit_transaction().await;
     updated.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
@@ -2443,6 +2454,7 @@ async fn schema_change_add_column_inner(engine: ClickHouseEngine) {
         "id",
     );
     let rows: Vec<AddColumnRow> = clickhouse_db.query(&query).await;
+
     let current_view_rows = if matches!(engine, ClickHouseEngine::ReplacingMergeTree) {
         let rows: Vec<AddColumnRow> = clickhouse_db
             .query(
@@ -2745,6 +2757,7 @@ async fn schema_change_ordered_name_reuse_inner(engine: ClickHouseEngine) {
     let query =
         current_state_query(engine, clickhouse_table_name, "id, status, name, age", &["id"], "id");
     let rows: Vec<CombinedSchemaChangeRow> = clickhouse_db.query(&query).await;
+
     let current_view_rows = if matches!(engine, ClickHouseEngine::ReplacingMergeTree) {
         let rows: Vec<CombinedSchemaChangeRow> = clickhouse_db
             .query("select id, status, name, age from \"test_schema__multi__current\" order by id")

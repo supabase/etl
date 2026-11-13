@@ -49,6 +49,7 @@ impl Validate for ReplicatorConfig {
     fn validate(&self) -> Result<(), ValidationError> {
         self.destination.validate()?;
         self.pipeline.validate()?;
+
         if let Some(health) = &self.health {
             health.validate()?;
         }
@@ -56,6 +57,7 @@ impl Validate for ReplicatorConfig {
         if let Some(sentry) = &self.sentry {
             sentry.validate()?;
         }
+
         if let Some(supabase) = &self.supabase {
             supabase.validate()?;
         }
@@ -94,6 +96,7 @@ impl Validate for ReplicatorConfigWithoutSecrets {
     fn validate(&self) -> Result<(), ValidationError> {
         self.destination.validate()?;
         self.pipeline.validate()?;
+
         if let Some(health) = &self.health {
             health.validate()?;
         }

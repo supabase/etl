@@ -213,6 +213,7 @@ impl ArrowColumnValues {
                 ));
             }
         }
+
         Ok(())
     }
 
@@ -557,6 +558,7 @@ fn array_cell_to_sql_literal(arr: ArrayCell) -> String {
 /// `FLOAT` values arrive widened to `f64`, which represents them exactly.
 fn float_literal(value: f64, is_double: bool) -> String {
     let sql_type = if is_double { "DOUBLE" } else { "FLOAT" };
+
     if value.is_nan() {
         format!("CAST('NaN' AS {sql_type})")
     } else if value.is_infinite() {
@@ -659,6 +661,7 @@ fn array_cell_to_value(arr: ArrayCell) -> Value {
         }
         ArrayCell::Bytes(v) => v.into_iter().map(|o| o.map_or(Value::Null, Value::Blob)).collect(),
     };
+
     Value::List(values)
 }
 
@@ -843,6 +846,7 @@ pub(super) mod tests {
             let PreparedRows::SqlLiterals(rows) = prepared else {
                 panic!("expected SQL literals for special temporal values");
             };
+
             let conn = duckdb::Connection::open_in_memory().unwrap();
             let valid: bool = conn
                 .query_row(
@@ -863,6 +867,7 @@ pub(super) mod tests {
     #[test]
     fn temporal_sql_literals_preserve_calendar_years() {
         let conn = duckdb::Connection::open_in_memory().unwrap();
+
         for year in [-43, 0, 12023] {
             let date = NaiveDate::from_ymd_opt(year, 2, 1).unwrap();
             let timestamp = date.and_hms_opt(11, 12, 13).unwrap();
@@ -936,6 +941,7 @@ pub(super) mod tests {
             let Value::Double(parsed) = parse_float_literal(conn, &literal, "double") else {
                 return Err(TestCaseError::fail("expected a double"));
             };
+
             prop_assert!(
                 f64_matches(value, parsed),
                 "literal {literal} for {value:e} ({:#018x}) parsed as {parsed:e} ({:#018x})",
@@ -952,6 +958,7 @@ pub(super) mod tests {
             let Value::Float(parsed) = parse_float_literal(conn, &literal, "float") else {
                 return Err(TestCaseError::fail("expected a float"));
             };
+
             prop_assert!(
                 f32_matches(value, parsed),
                 "literal {literal} for {value:e} ({:#010x}) parsed as {parsed:e} ({:#010x})",
@@ -1042,6 +1049,7 @@ pub(super) mod tests {
                     Self::Appender => "appender",
                     Self::Copy => "copy",
                 };
+
                 DuckLakeTableName::new("public", table)
             }
         }
@@ -1191,11 +1199,13 @@ pub(super) mod tests {
                                 fraction.iter().map(|digit| char::from(b'0' + digit)).collect();
                             let is_zero = integer == "0" && fraction.bytes().all(|b| b == b'0');
                             let sign = if negative && !is_zero { "-" } else { "" };
+
                             let text = if fraction.is_empty() {
                                 format!("{sign}{integer}")
                             } else {
                                 format!("{sign}{integer}.{fraction}")
                             };
+
                             Cell::Numeric(PgNumeric::from_str(&text).unwrap())
                         });
                     case_for(PgType::NUMERIC, numeric_typmod(precision, scale), value)
@@ -1279,6 +1289,7 @@ pub(super) mod tests {
         /// has it, so `varchar` numerics are unaffected.
         pub(in crate::ducklake) fn readback_expression(typ: &PgType, column: &str) -> String {
             let column = crate::ducklake::sql::quote_identifier(column);
+
             match *typ {
                 PgType::NUMERIC => {
                     format!("regexp_replace(cast({column} as varchar), '^(-?)\\.', '\\10.')")
@@ -1319,6 +1330,7 @@ pub(super) mod tests {
         /// from the cell's Postgres meaning rather than from any encoder.
         pub(in crate::ducklake) fn expected_value(cell: &Cell) -> Value {
             let micros = |unit_micros: i64| Value::Timestamp(TimeUnit::Microsecond, unit_micros);
+
             match cell {
                 Cell::Null => Value::Null,
                 Cell::Bool(value) => Value::Boolean(*value),
@@ -1430,12 +1442,15 @@ pub(super) mod tests {
             conn.execute_batch(&format!(
                 "create or replace temp table stage as select id, v from {target} limit 0;"
             ))?;
+
             match prepared_rows {
                 PreparedRows::Appender(rows) => {
                     let mut appender = conn.appender("stage")?;
+
                     for values in rows {
                         appender.append_row(duckdb::appender_params_from_iter(values))?;
                     }
+
                     appender.flush()?;
                 }
                 PreparedRows::ArrowRecordBatch(record_batch) => {
@@ -1448,6 +1463,7 @@ pub(super) mod tests {
                     conn.execute_batch(&format!("insert into stage values {};", rows.join(", ")))?;
                 }
             }
+
             conn.execute_batch(&format!(
                 "insert into {target} select id, v from stage; drop table stage;"
             ))
@@ -1466,6 +1482,7 @@ pub(super) mod tests {
             let column_schemas = schema.column_schemas().cloned().collect::<Vec<_>>();
             conn.execute_batch(&build_create_table_sql_ducklake(&table_name, &column_schemas))
                 .unwrap();
+
             let prepared_rows = match path {
                 EncoderPath::SqlLiteral => PreparedRows::SqlLiterals(
                     rows.into_iter().map(table_row_to_sql_literal).collect(),
@@ -1477,6 +1494,7 @@ pub(super) mod tests {
                 ),
                 EncoderPath::Copy => prepare_copy_rows(schema, rows).unwrap(),
             };
+
             load_prepared_rows(conn, &table_name, &prepared_rows).map_err(|error| {
                 TestCaseError::fail(format!("{path:?} write of {:?} failed: {error}", case.typ))
             })?;
@@ -1531,6 +1549,7 @@ pub(super) mod tests {
                     "{:?} stored a different row set",
                     path
                 );
+
                 for ((id, actual), (_, cell)) in stored.iter().zip(&path_rows) {
                     let expected = expected_value(cell);
                     prop_assert!(
@@ -1541,6 +1560,7 @@ pub(super) mod tests {
                     );
                 }
             }
+
             Ok(())
         }
 

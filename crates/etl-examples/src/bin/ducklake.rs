@@ -85,6 +85,7 @@ impl TypedValueParser for RedactedUrlParser {
                     ContextValue::String("[redacted]".to_owned()),
                 );
             }
+
             error
         })
     }

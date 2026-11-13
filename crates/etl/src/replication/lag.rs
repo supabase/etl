@@ -242,6 +242,7 @@ impl ReplicationLagMonitor {
                 interval.tick().await;
 
                 let workers = monitor.snapshot();
+
                 let sample = match tokio::time::timeout(
                     SAMPLE_TIMEOUT,
                     monitor.source_pool.sample_pipeline_lag(&monitor.pipeline_id),
@@ -489,6 +490,7 @@ mod tests {
                     {
                         return None;
                     }
+
                     (series.starts_with(&format!("{name}{{")))
                         .then(|| value.parse::<f64>().unwrap())
                 })
@@ -538,6 +540,7 @@ mod tests {
         monitor.spawn_replication_lag_metrics_task().await.unwrap();
 
         let rendered = metrics.render();
+
         for name in names {
             let series: Vec<_> =
                 rendered.lines().filter(|line| line.starts_with(&format!("{name}{{"))).collect();

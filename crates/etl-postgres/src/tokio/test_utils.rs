@@ -600,6 +600,7 @@ impl<G: GenericClient> PgDatabase<G> {
             {
                 info!(slot_name, iteration, "slot invalidated successfully");
                 invalidated = true;
+
                 break;
             }
         }
@@ -781,6 +782,7 @@ async fn try_connect_with_config(
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
         let mut root_store = RootCertStore::empty();
+
         for cert in
             CertificateDer::pem_slice_iter(pg_connection_config.tls.trusted_root_certs.as_bytes())
         {

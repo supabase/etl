@@ -102,11 +102,13 @@ fn ducklake_column_definition(
     let column_name = quote_identifier(&column_schema.name);
     let duckdb_type =
         postgres_column_type_to_ducklake_sql(&column_schema.typ, column_schema.modifier);
+
     let default_clause = if include_default {
         ducklake_default_clause(column_schema).unwrap_or_default()
     } else {
         String::new()
     };
+
     let nullability = if include_not_null && !column_schema.nullable { " not null" } else { "" };
     format!("{column_name} {duckdb_type}{default_clause}{nullability}")
 }
@@ -260,13 +262,16 @@ pub(super) fn build_partition_by_sql_ducklake(
     columns: &[DuckLakePartitionColumn],
 ) -> String {
     let table_name = qualified_lake_table_name(table_name);
+
     if columns.is_empty() {
         return format!("alter table {table_name} reset partitioned by");
     }
+
     let keys = columns
         .iter()
         .map(|key| {
             let column = quote_identifier(key.column());
+
             match key.transform() {
                 DuckLakePartitionTransform::Identity {} => column,
                 DuckLakePartitionTransform::Bucket { count } => {
@@ -293,11 +298,13 @@ pub(super) fn build_set_sorted_by_sql_ducklake(
                 DuckLakeSortDirection::Asc => "asc",
                 DuckLakeSortDirection::Desc => "desc",
             };
+
             let nulls = match column.nulls {
                 Some(DuckLakeSortNulls::First) => " nulls first",
                 Some(DuckLakeSortNulls::Last) => " nulls last",
                 None => "",
             };
+
             format!("{} {direction}{nulls}", quote_identifier(&column.name))
         })
         .collect::<Vec<_>>()
@@ -675,12 +682,15 @@ mod tests {
     fn decode_duckdb_string(literal: &str) -> Option<String> {
         let mut chars = literal.strip_prefix('\'')?.strip_suffix('\'')?.chars().peekable();
         let mut value = String::new();
+
         while let Some(ch) = chars.next() {
             if ch == '\'' {
                 chars.next_if_eq(&'\'')?;
             }
+
             value.push(ch);
         }
+
         Some(value)
     }
 

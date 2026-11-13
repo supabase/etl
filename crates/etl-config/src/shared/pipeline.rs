@@ -201,6 +201,7 @@ impl Validate for TableSyncCopyConfig {
         };
 
         let mut seen_table_ids = HashSet::with_capacity(table_ids.len());
+
         for table_id in table_ids {
             if !seen_table_ids.insert(table_id) {
                 return Err(ValidationError::InvalidFieldValue {
@@ -960,6 +961,7 @@ mod tests {
             let public: PipelineConfigWithoutSecrets = serde_json::from_value(json).unwrap();
             assert_eq!(serde_json::to_value(public).unwrap()["id"], id);
         }
+
         let mut json = pipeline_config_json();
         json["id"] = serde_json::json!(150);
         assert!(serde_json::from_value::<PipelineConfig>(json.clone()).is_err());
@@ -1077,6 +1079,7 @@ mod tests {
             let without_secrets = PipelineConfigWithoutSecrets::from(config.clone());
             for result in [config.validate(), without_secrets.validate()] {
                 assert_eq!(result.is_ok(), valid, "delay_ms={delay_ms}");
+
                 if let Err(ValidationError::InvalidFieldValue { field, .. }) = result {
                     assert_eq!(field, "table_error_retry_delay_ms");
                 }
@@ -1090,12 +1093,15 @@ mod tests {
     fn pipeline_refresh_interval_defaults_and_overrides() {
         for (copy_ms, lag_ms) in [(None, None), (Some(1_000), None), (Some(1_000), Some(30_000))] {
             let mut json = pipeline_config_json();
+
             if let Some(copy_ms) = copy_ms {
                 json["table_sync_monitor_refresh_interval_ms"] = copy_ms.into();
             }
+
             if let Some(lag_ms) = lag_ms {
                 json["replication_lag_refresh_interval_ms"] = lag_ms.into();
             }
+
             let config: PipelineConfig = serde_json::from_value(json.clone()).unwrap();
             let without_secrets: PipelineConfigWithoutSecrets =
                 serde_json::from_value(json).unwrap();
@@ -1104,6 +1110,7 @@ mod tests {
             assert_eq!(config.memory_refresh_interval_ms, 100);
             assert_eq!(config.table_sync_monitor_refresh_interval_ms, copy_ms.unwrap_or(10_000));
             assert_eq!(config.replication_lag_refresh_interval_ms, lag_ms.unwrap_or(10_000));
+
             for without_secrets in [without_secrets, converted] {
                 assert_eq!(
                     without_secrets.memory_refresh_interval_ms,
@@ -1119,6 +1126,7 @@ mod tests {
                 );
                 without_secrets.validate().unwrap();
             }
+
             config.validate().unwrap();
         }
     }

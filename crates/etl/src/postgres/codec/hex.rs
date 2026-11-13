@@ -18,6 +18,7 @@ pub(crate) fn parse_bytea_hex_string(value: &str) -> EtlResult<Vec<u8>> {
     };
 
     let mut result = Vec::with_capacity(value.len() / 2);
+
     if !value.len().is_multiple_of(2) {
         bail!(
             ErrorKind::ConversionError,

@@ -111,12 +111,15 @@ impl ClickHouseTestDatabase {
     fn new(url: Url, user: String, password: Option<String>, database: String) -> Self {
         let build_client = |db: Option<&str>| {
             let mut c = Client::default().with_url(url.as_str()).with_user(&user);
+
             if let Some(db) = db {
                 c = c.with_database(db);
             }
+
             if let Some(pw) = &password {
                 c = c.with_password(pw);
             }
+
             c
         };
 
@@ -135,6 +138,7 @@ impl ClickHouseTestDatabase {
     pub async fn create_database(&self) {
         let database = quote_identifier(&self.database);
         let query = format!("CREATE DATABASE IF NOT EXISTS {database}");
+
         for attempt in 1..=5 {
             match self.root_client.query(&query).execute().await.map_err(redact_clickhouse_error) {
                 Ok(()) => return,
@@ -321,6 +325,7 @@ impl Drop for ClickHouseTestDatabase {
                     {
                         eprintln!("warning: failed to drop test ClickHouse database: {error}");
                     }
+
                     if let Some(user) = settings_user
                         && let Err(error) = root_client
                             .query(&format!("drop user if exists {user}"))

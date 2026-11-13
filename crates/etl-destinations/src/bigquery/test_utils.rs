@@ -109,6 +109,7 @@ pub fn skip_if_missing_bigquery_env_vars() -> bool {
 
     let require = std::env::var_os(REQUIRE_BIGQUERY_CREDENTIALS_ENV).is_some_and(|v| !v.is_empty());
     let mut missing_env_vars = Vec::new();
+
     if !has_sa_key_path {
         missing_env_vars.push(BIGQUERY_SA_KEY_PATH_ENV);
     } else if !has_sa_key_file {
@@ -118,6 +119,7 @@ pub fn skip_if_missing_bigquery_env_vars() -> bool {
                  an existing file"
             );
         }
+
         eprintln!(
             "skipping bigquery integration test: {BIGQUERY_SA_KEY_PATH_ENV} does not point to an \
              existing file"
@@ -695,6 +697,7 @@ where
     for table_row in table_rows {
         parsed_table_rows.push(table_row.into());
     }
+
     parsed_table_rows.sort();
 
     parsed_table_rows

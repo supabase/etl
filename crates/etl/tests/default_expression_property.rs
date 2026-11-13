@@ -383,6 +383,7 @@ fn integer_case() -> impl Strategy<Value = DefaultCase> {
                 Some(fraction) => format!("{whole}.{fraction}"),
                 None => whole.to_string(),
             };
+
             let literal = if quoted { quote(&number) } else { number };
 
             DefaultCase { column_type: column_type.to_owned(), literal }
@@ -401,10 +402,12 @@ fn numeric_case() -> impl Strategy<Value = DefaultCase> {
     (column_type, any::<bool>(), "[0-9]{1,10}", prop::option::of("[0-9]{1,8}"), any::<bool>())
         .prop_map(|(column_type, negative, whole, fraction, quoted)| {
             let sign = if negative { "-" } else { "" };
+
             let number = match fraction {
                 Some(fraction) => format!("{sign}{whole}.{fraction}"),
                 None => format!("{sign}{whole}"),
             };
+
             let literal = if quoted { quote(&number) } else { number };
 
             DefaultCase { column_type, literal }
@@ -427,6 +430,7 @@ fn float_case(value_changing_casts: bool) -> impl Strategy<Value = DefaultCase> 
             } else {
                 cast
             };
+
             // Numeric constants become `numeric` values; quoted literals with a
             // float cast become float constants rendered by the float output
             // function, which is the one that honors `extra_float_digits`.
@@ -455,6 +459,7 @@ fn text_case(value_changing_casts: bool) -> impl Strategy<Value = DefaultCase> {
     let value = prop::collection::vec(select(vec!['a', 'b', ' ', '\'', '\\', 'é', 'ß']), 0..9)
         .prop_map(|chars| chars.into_iter().collect::<String>());
     let unchanging_cast = select(vec!["", "::text", "::character varying"]).prop_map(str::to_owned);
+
     let cast = if value_changing_casts {
         prop_oneof![
             unchanging_cast,
@@ -686,12 +691,16 @@ fn check_literal_denotes_backfill(
         if !harness.add_defaulted_column(case, settings).await {
             return Ok(());
         }
+
         let column = harness.bootstrap_column().await;
+
         let target_type =
             if ignore_type_modifier { &column.typname } else { &column.formatted_type };
+
         let Some((variant, mut denoted)) = harness.denoted_value(&column, target_type).await else {
             return Ok(());
         };
+
         let backfilled = harness.backfilled_value().await.ok_or_else(|| "null".to_owned());
         // `numeric(p,s)` pads to its scale, so `0` and `0.0` are the same
         // value.
@@ -725,6 +734,7 @@ fn check_ddl_message_matches_bootstrap(
         if !harness.add_defaulted_column(case, settings).await {
             return Ok(());
         }
+
         // Always drain the slot, so the next case sees only its own message.
         let message = harness.ddl_message_column().await;
         let bootstrap = harness.bootstrap_column().await;
@@ -952,6 +962,7 @@ async fn unknown_type_default_denotes_backfilled_text() {
         // rendering says `public.reg_target`, replicated rows `reg_target`.
         ("public.d_reg", "'public.reg_target'", false),
     ];
+
     for settings in [SessionSettings::etl(), hostile] {
         for (column_type, literal, expect_kept) in cases {
             let case =
@@ -973,6 +984,7 @@ async fn unknown_type_default_denotes_backfilled_text() {
                     expect_kept,
                     "{column_type} default {literal}: {column:?}"
                 );
+
                 if let Some(parsed) = kept {
                     let (_, text) = plain_literal(&parsed);
                     assert_eq!(Some(text), backfilled, "{column_type} default {literal}");

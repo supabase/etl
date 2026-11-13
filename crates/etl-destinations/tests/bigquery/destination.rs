@@ -56,6 +56,7 @@ fn test_snapshot_id(value: u64) -> SnapshotId {
 async fn copy_then_transaction_replay_preserves_current_rows() {
     install_crypto_provider();
     init_test_tracing();
+
     if skip_if_missing_bigquery_env_vars() {
         return;
     }
@@ -175,14 +176,17 @@ async fn copy_then_transaction_replay_preserves_current_rows() {
 async fn boundary_underscore_names_survive_destination_lifecycle() {
     install_crypto_provider();
     init_test_tracing();
+
     if skip_if_missing_bigquery_env_vars() {
         return;
     }
+
     let database = setup_bigquery_database().await;
     let store = MemoryStore::new();
     let cases = table_name_schemas();
     let destination = database.build_destination(1.to_string().into(), store.clone()).await;
     let mut original_metadata = Vec::new();
+
     for (schema, name) in &cases {
         store.store_table_schema(schema.inner().clone()).await.unwrap();
         write_table_rows(
@@ -196,9 +200,11 @@ async fn boundary_underscore_names_survive_destination_lifecycle() {
         assert!(metadata.table_id().starts_with(&format!("{name}_")));
         original_metadata.push(metadata);
     }
+
     destination.shutdown().await.unwrap();
 
     let restarted = database.build_destination(1.to_string().into(), store.clone()).await;
+
     for ((schema, _), metadata) in cases.iter().zip(&original_metadata) {
         write_events(
             &restarted,
@@ -219,6 +225,7 @@ async fn boundary_underscore_names_survive_destination_lifecycle() {
         let rows = database.query_table(schema.name().clone()).await.unwrap();
         assert_eq!(rows.len(), 2);
     }
+
     let (schema, name) = &cases[0];
     write_events(
         &restarted,
@@ -267,6 +274,7 @@ async fn boundary_underscore_names_survive_destination_lifecycle() {
     .await
     .unwrap();
     reset.shutdown().await.unwrap();
+
     for (index, (schema, _)) in cases.iter().enumerate() {
         let rows = database.query_table(schema.name().clone()).await.unwrap();
         let mut names: Vec<String> = rows
@@ -866,6 +874,7 @@ async fn copy_table_can_be_dropped_and_recreated_repeatedly() {
         bigquery_database.build_destination(1_u64.to_string().into(), store.clone()).await;
 
     let mut physical_ids = HashSet::new();
+
     for iteration in 1..=3 {
         let users_rows = vec![
             TableRow::new(vec![
@@ -918,6 +927,7 @@ async fn table_creation_recovers_after_destination_restart() {
     }
 
     let bigquery_database = setup_bigquery_database().await;
+
     for delete_before_restart in [false, true] {
         let store = MemoryStore::new();
         let table_name = format!("destination_creation_recovery_{}", uuid::Uuid::new_v4().simple());
@@ -938,6 +948,7 @@ async fn table_creation_recovers_after_destination_restart() {
         if delete_before_restart {
             drop_table_for_copy(&destination, &replicated_table_schema).await.unwrap();
         }
+
         let creating_metadata = etl::destination::DestinationTableMetadata::new_creating(
             applied_metadata.table_id().to_owned(),
             applied_metadata.snapshot_id(),

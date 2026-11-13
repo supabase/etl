@@ -127,6 +127,7 @@ mod tests {
         for id in ["1", "150", DEFAULT_COPY_PIPELINE_ID, DEFAULT_STREAMING_PIPELINE_ID] {
             assert!(is_snowflake_run_schema(&format!("bench_{id}"), "bench_"));
         }
+
         for name in ["bench_", "bench_manual", "bench_1_archive", "other_150"] {
             assert!(!is_snowflake_run_schema(name, "bench_"));
         }
@@ -428,6 +429,7 @@ impl<D> CountingDestination<D> {
     /// Sets the CDC row-event target used by [`Self::wait_for_cdc_target`].
     pub fn set_cdc_target(&self, target: u64) {
         self.stats.cdc_target.store(target, Ordering::Release);
+
         if self.stats.cdc_data_events.load(Ordering::Acquire) >= target {
             self.notify.notify_waiters();
         }
@@ -449,6 +451,7 @@ impl<D> CountingDestination<D> {
         if counts.total_events > 0 {
             stats.event_batches.fetch_add(1, Ordering::Relaxed);
         }
+
         stats.total_events.fetch_add(counts.total_events, Ordering::Relaxed);
         stats.total_event_bytes.fetch_add(counts.total_event_bytes, Ordering::Relaxed);
         stats.cdc_data_events.fetch_add(counts.data_events, Ordering::Release);
@@ -501,6 +504,7 @@ where
 
         self.stats.table_rows.fetch_add(row_count, Ordering::Relaxed);
         self.stats.table_row_bytes.fetch_add(row_bytes, Ordering::Relaxed);
+
         if row_count > 0 {
             self.stats.table_row_batches.fetch_add(1, Ordering::Relaxed);
         }
@@ -737,6 +741,7 @@ impl BenchDestination {
                 if let Err(error) = drop_stale_snowflake_run_schemas(&target).await {
                     warn!(error = %error, "failed to drop stale snowflake run schemas");
                 }
+
                 // Replace, not reuse: a crashed run with this pipeline id
                 // leaves tables that this run's fresh store does not own.
                 target
@@ -1075,6 +1080,7 @@ pub async fn cleanup_replication_slots(
     let pool = pg_pool(pg).await?;
 
     drop_replication_slot(&pool, &format!("supabase_etl_apply_{pipeline_id}")).await;
+
     for table_id in table_ids {
         drop_replication_slot(&pool, &format!("supabase_etl_table_sync_{pipeline_id}_{table_id}"))
             .await;
@@ -1147,6 +1153,7 @@ pub fn finish_run<T>(
     cleanup_results: impl IntoIterator<Item = Result<()>>,
 ) -> Result<T> {
     let mut result = run_result;
+
     for cleanup_result in cleanup_results {
         if let Err(error) = cleanup_result {
             if result.is_ok() {
@@ -1168,6 +1175,7 @@ fn clickhouse_run_database(database: &str, pipeline_id: &str) -> String {
 #[cfg(feature = "clickhouse")]
 fn clickhouse_root_client(url: &Url, user: &str, password: Option<&str>) -> clickhouse::Client {
     let client = clickhouse::Client::default().with_url(url.as_str()).with_user(user);
+
     match password {
         Some(password) => client.with_password(password),
         None => client,
@@ -1284,6 +1292,7 @@ where
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create report directory {}", parent.display()))?;
     }
+
     let json = serde_json::to_string_pretty(report)?;
     fs::write(path, format!("{json}\n"))
         .with_context(|| format!("failed to write benchmark report to {}", path.display()))
@@ -1302,6 +1311,7 @@ pub fn format_integer(value: u128) -> String {
         {
             formatted.push(',');
         }
+
         formatted.push(ch);
     }
 
@@ -1314,6 +1324,7 @@ pub fn format_decimal(value: f64, digits: usize) -> String {
     let Some((integer, fraction)) = raw.split_once('.') else {
         return raw;
     };
+
     format!("{}.{}", format_integer_str(integer), fraction)
 }
 
@@ -1330,6 +1341,7 @@ fn format_integer_str(value: &str) -> String {
     let Some(unsigned) = value.strip_prefix('-') else {
         return format_integer(value.parse::<u128>().unwrap_or(0));
     };
+
     format!("-{}", format_integer(unsigned.parse::<u128>().unwrap_or(0)))
 }
 
@@ -1397,9 +1409,11 @@ pub fn split_table_name(table_name: &str) -> Result<(String, String)> {
 
 fn classify_events(events: &[Event]) -> EventBatchCounts {
     let mut counts = EventBatchCounts { total_events: events.len() as u64, ..Default::default() };
+
     for event in events {
         let event_bytes = event.size_hint() as u64;
         counts.total_event_bytes += event_bytes;
+
         match event {
             Event::Insert(_) => {
                 counts.inserts += 1;

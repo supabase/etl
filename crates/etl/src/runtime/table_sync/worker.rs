@@ -413,6 +413,7 @@ where
             RetryDirective::Manual => TableRetryPolicy::ManualRetry,
             RetryDirective::NoRetry => TableRetryPolicy::NoRetry,
         };
+
         let mut table_error = TableError::from_error_policy(&err, &policy, retry_policy.clone());
 
         let mut state_guard = state.lock().await;
@@ -438,6 +439,7 @@ where
             TableRetryPolicy::ManualRetry => "manual",
             TableRetryPolicy::NoRetry => "no_retry",
         };
+
         counter!(
             ETL_WORKER_ERRORS_TOTAL,
             WORKER_TYPE_LABEL => "table_sync",
@@ -680,6 +682,7 @@ where
 
             return Ok(TableSyncWorkerResult::Shutdown);
         };
+
         let _permit = permit.map_err(|err| {
             etl_error!(
                 ErrorKind::InvalidState,
@@ -709,6 +712,7 @@ where
         ) else {
             return Ok(TableSyncWorkerResult::Shutdown);
         };
+
         let mut replication_client = replication_client?;
         replication_client.set_slot_creation_monitor(self.slot_creation_monitor.clone());
 
@@ -867,11 +871,13 @@ mod tests {
     #[test]
     fn timed_retry_policy_preserves_delay() {
         let now = DateTime::from_timestamp(0, 0).unwrap();
+
         for delay_ms in [1_000, 86_400_000] {
             let policy = timed_retry_policy(Duration::from_millis(delay_ms), now).unwrap();
             let TableRetryPolicy::TimedRetry { next_retry } = policy else {
                 panic!("Expected timed retry policy");
             };
+
             assert_eq!((next_retry - now).to_std().unwrap(), Duration::from_millis(delay_ms));
         }
     }

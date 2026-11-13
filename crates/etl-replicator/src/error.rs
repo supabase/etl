@@ -79,6 +79,7 @@ impl ReplicatorError {
         if !matches!(self, ReplicatorError::Etl(_)) {
             let mut source = Error::source(self);
             let mut idx = 1usize;
+
             while let Some(err) = source {
                 out.push_str(&format!("Cause {idx}: {err}\n"));
                 source = err.source();
@@ -91,6 +92,7 @@ impl ReplicatorError {
         {
             out.push_str("Backtrace:\n");
             out.push_str(&backtrace.to_string());
+
             if !out.ends_with('\n') {
                 out.push('\n');
             }

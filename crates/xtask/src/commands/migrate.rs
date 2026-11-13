@@ -134,6 +134,7 @@ impl DatabaseEnv {
         if let Some(pg_ssl_mode) = &self.pg_ssl_mode {
             cmd.env("PGSSLMODE", pg_ssl_mode);
         }
+
         if let Some(pg_ssl_root_cert) = &self.pg_ssl_root_cert {
             cmd.env("PGSSLROOTCERT", pg_ssl_root_cert);
         }

@@ -142,10 +142,12 @@ impl std::fmt::Display for DuckLakeTableName {
 fn encode_replay_component(value: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut encoded = String::with_capacity(value.len() * 2);
+
     for byte in value.bytes() {
         encoded.push(char::from(HEX[usize::from(byte >> 4)]));
         encoded.push(char::from(HEX[usize::from(byte & 15)]));
     }
+
     encoded
 }
 
@@ -161,6 +163,7 @@ pub fn validate_ducklake_table_namespace(namespace: Option<&str>) -> Result<(), 
             constraint: "must be nonempty and contain no NUL characters".to_owned(),
         });
     }
+
     if namespace.is_some_and(|namespace| namespace.bytes().any(|byte| byte.is_ascii_uppercase())) {
         return Err(ValidationError::InvalidFieldValue {
             field: "table_namespace".to_owned(),
@@ -168,6 +171,7 @@ pub fn validate_ducklake_table_namespace(namespace: Option<&str>) -> Result<(), 
                 .to_owned(),
         });
     }
+
     Ok(())
 }
 
@@ -278,10 +282,12 @@ mod tests {
         // This legacy name would collide with an unescaped length-prefixed key.
         let legacy = DuckLakeTableName::new("v2:9:project_a3:a", "b1:c");
         assert_ne!(dotted.id(), legacy.id());
+
         for table in [&a, &b, &dotted, &other] {
             assert!(!table.id().contains('.'));
             assert!(!DuckLakeTableName::replay_key_matches_namespace(&table.id(), None));
         }
+
         assert!(DuckLakeTableName::replay_key_matches_namespace(&a.id(), Some("project_a")));
         assert!(!DuckLakeTableName::replay_key_matches_namespace(&b.id(), Some("project_a")));
         assert!(DuckLakeTableName::replay_key_matches_namespace(&legacy.id(), None));

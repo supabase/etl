@@ -37,6 +37,7 @@ where
     let Some(result) = with_shutdown!(initialize(), shutdown_signal.wait()) else {
         return Ok(());
     };
+
     let mut pipeline = result?;
 
     let startup_result = with_shutdown!(pipeline.start(), shutdown_signal.wait());

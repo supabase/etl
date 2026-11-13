@@ -175,10 +175,12 @@ fn unix_epoch() -> NaiveDate {
 fn bytes_to_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(bytes.len() * 2);
+
     for &b in bytes {
         s.push(HEX[(b >> 4) as usize] as char);
         s.push(HEX[(b & 0x0f) as usize] as char);
     }
+
     s
 }
 
@@ -192,6 +194,7 @@ pub(crate) fn rb_varint(mut v: usize, buf: &mut Vec<u8>) {
             buf.push(byte);
             return;
         }
+
         buf.push(byte | 0x80);
     }
 }
@@ -205,6 +208,7 @@ pub(crate) fn rb_encode_nullable(val: ClickHouseValue, buf: &mut Vec<u8>) -> Etl
             rb_encode_value(v, buf)?;
         }
     }
+
     Ok(())
 }
 
@@ -246,11 +250,13 @@ pub(crate) fn rb_encode_value(val: ClickHouseValue, buf: &mut Vec<u8>) -> EtlRes
         // Array elements are always Nullable in ClickHouse: Array(Nullable(T)).
         ClickHouseValue::Array(items) => {
             rb_varint(items.len(), buf);
+
             for item in items {
                 rb_encode_nullable(item, buf)?;
             }
         }
     }
+
     Ok(())
 }
 
@@ -280,6 +286,7 @@ pub(crate) fn encode_to_row_binary(
             (ColumnEncoding::Array | ColumnEncoding::Required, val) => rb_encode_value(val, buf)?,
         }
     }
+
     Ok(())
 }
 
@@ -378,6 +385,7 @@ mod tests {
     fn cell_to_clickhouse_value_uuid() {
         let u = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
         let expected_bytes = *u.as_bytes();
+
         if let ClickHouseValue::Uuid(bytes) = cell_to_clickhouse_value(Cell::Uuid(u)).unwrap() {
             assert_eq!(bytes, expected_bytes);
         } else {
@@ -589,6 +597,7 @@ mod tests {
         ] {
             assert!(cell_to_clickhouse_value(cell).is_err());
         }
+
         let value = cell_to_clickhouse_value(Cell::Time(etl::data::PgTime::EndOfDay)).unwrap();
         assert!(matches!(value, ClickHouseValue::String(value) if value == "24:00:00"));
     }
@@ -621,13 +630,16 @@ mod tests {
             /// Reads an unsigned LEB128 length.
             fn length(&mut self) -> Result<usize, String> {
                 let mut value = 0usize;
+
                 for shift in (0..64).step_by(7) {
                     let [byte] = self.take::<1>()?;
                     value |= usize::from(byte & 0x7f) << shift;
+
                     if byte & 0x80 == 0 {
                         return Ok(value);
                     }
                 }
+
                 Err("length varint too long".to_owned())
             }
 
@@ -649,6 +661,7 @@ mod tests {
             fn cells<T: Clone>(values: &[Option<T>], cell: fn(T) -> Cell) -> Vec<Cell> {
                 values.iter().map(|value| value.clone().map_or(Cell::Null, cell)).collect()
             }
+
             match array {
                 ArrayCell::Bool(values) => cells(values, Cell::Bool),
                 ArrayCell::String(values) => cells(values, Cell::String),
@@ -698,13 +711,16 @@ mod tests {
                     if reader.length()? != elements.len() {
                         return Err(format!("array length differs for {cell:?}"));
                     }
+
                     for element in &elements {
                         check_nullable(reader, element)?;
                     }
+
                     true
                 }
                 other => return Err(format!("generator produced unexpected cell {other:?}")),
             };
+
             if ok { Ok(()) } else { Err(format!("value differs for {cell:?}")) }
         }
 
@@ -812,6 +828,7 @@ mod tests {
                 encode_to_row_binary(values, &encodings, &mut bytes).unwrap();
 
                 let mut reader = Reader(&bytes);
+
                 for (encoding, cell) in columns {
                     let checked = match (encoding, cell) {
                         (ColumnEncoding::Nullable, cell) => check_nullable(&mut reader, cell),
@@ -821,8 +838,10 @@ mod tests {
                         },
                         (_, cell) => check_value(&mut reader, cell),
                     };
+
                     checked.map_err(TestCaseError::fail)?;
                 }
+
                 prop_assert!(reader.0.is_empty(), "{} trailing bytes", reader.0.len());
                 Ok(())
             });

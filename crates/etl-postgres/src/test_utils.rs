@@ -26,6 +26,7 @@ fn test_database_shard() -> u16 {
     let Ok(shards) = std::env::var(TESTS_DATABASE_SHARDS) else {
         return 0;
     };
+
     let shards: u16 = shards.parse().expect("TESTS_DATABASE_SHARDS must be a positive integer");
     let slot: u16 = std::env::var(NEXTEST_TEST_GLOBAL_SLOT)
         .expect("TESTS_DATABASE_SHARDS requires running under nextest")

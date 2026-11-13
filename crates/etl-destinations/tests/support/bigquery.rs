@@ -748,6 +748,7 @@ where
     for table_row in table_rows {
         parsed_table_rows.push(table_row.into());
     }
+
     parsed_table_rows.sort();
 
     parsed_table_rows

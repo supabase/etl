@@ -271,9 +271,11 @@ fn run_clickhouse_tests(config: &TestClickhouseConfig, sccache: bool) -> Result<
     );
 
     let mut cmd = Command::new("cargo");
+
     if !config.cargo_toolchain.is_empty() {
         cmd.arg(format!("+{}", config.cargo_toolchain));
     }
+
     cmd.args(&test_args);
     test_env.apply_to(&mut cmd);
     maybe_configure_sccache(&mut cmd, sccache);
@@ -299,6 +301,7 @@ fn test_args(config: &TestClickhouseConfig) -> Vec<String> {
     if !config.test_name_filter.is_empty() {
         args.push(config.test_name_filter.clone());
     }
+
     args
 }
 

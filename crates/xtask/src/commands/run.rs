@@ -67,6 +67,7 @@ fn run_replicator(args: RunReplicatorArgs) -> Result<()> {
     let config_dir = replicator_config_dir()?;
     let detected = detect_replicator_destination(&config_dir)?;
     let destination = resolve_replicator_destination(args.destination, detected)?;
+
     if replicator_config_has_placeholders(&config_dir)? {
         bail!(
             "Replicator configuration in {} still contains placeholder secrets.\nDo not put real \

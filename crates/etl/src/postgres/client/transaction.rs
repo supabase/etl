@@ -54,6 +54,7 @@ fn build_ctid_copy_query(
     partition: &CtidPartition,
 ) -> String {
     let quoted_table_name = table_name.as_quoted_identifier();
+
     let ctid_predicate = match partition {
         CtidPartition::OpenStart { end_tid } => {
             format!("ctid < {}::tid", quote_literal(end_tid))
@@ -115,6 +116,7 @@ fn plan_ctid_partitions_for_table_blocks(
     let effective_partitions = requested_partitions.min(table_blocks);
 
     let mut partitions = Vec::with_capacity(usize::from(num_partitions));
+
     for i in 0..effective_partitions {
         // Proportional block boundaries cover [0, table_blocks) exactly and
         // avoid producing empty trailing ranges when table_blocks is not
@@ -415,6 +417,7 @@ impl<'a> PgReplicationTransactionCore<'a> {
         );
 
         let mut estimates = BTreeMap::new();
+
         for message in self.transaction.simple_query(&estimate_query).await? {
             if let SimpleQueryMessage::Row(row) = message {
                 let table_id = get_row_value(&row, "table_id", "pg_class")?;
@@ -456,9 +459,11 @@ impl<'a> PgReplicationTransactionCore<'a> {
         );
 
         let mut leaves = Vec::new();
+
         for msg in self.transaction.simple_query(&query).await? {
             if let SimpleQueryMessage::Row(row) = msg {
                 let leaf_id = get_row_value::<TableId>(&row, "oid", "pg_class")?;
+
                 // Foreign partitions have no local heap to scan. Skipping one
                 // would make an incomplete root copy appear successful.
                 if row.try_get("relkind")? != Some("r") {
@@ -468,6 +473,7 @@ impl<'a> PgReplicationTransactionCore<'a> {
                         format!("Table {table_id} contains non-heap partition {leaf_id}")
                     );
                 }
+
                 leaves.push(leaf_id);
             }
         }
@@ -536,6 +542,7 @@ impl<'a> PgReplicationTransactionCore<'a> {
                 return Ok(());
             }
         }
+
         bail!(
             ErrorKind::SourceSchemaError,
             "Copy source changed during name resolution",
@@ -573,6 +580,7 @@ impl<'a> PgReplicationTransactionCore<'a> {
             // PostgreSQL 14 has no publication row filters or rowfilter column.
             _ => "null::text".to_owned(),
         };
+
         let query = format!(
             "select n.nspname as schema_name, c.relname as table_name,
                     {row_filter} as row_filter
@@ -958,6 +966,7 @@ impl<'a> PgChildReplicationTransaction<'a> {
                 self.locked_relations.insert(source_id);
             }
         }
+
         self.core
             .get_table_copy_stream_with_ctid_partition(
                 table_id,
@@ -1028,6 +1037,7 @@ mod tests {
         assert_eq!(ranges.last(), Some(&(8, table_blocks)));
 
         let mut expected_start_block = 0;
+
         for (start_block, end_block_exclusive) in ranges {
             assert_eq!(start_block, expected_start_block);
             assert!(end_block_exclusive > start_block);

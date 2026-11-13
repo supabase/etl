@@ -197,6 +197,7 @@ mod tests {
         let tasks = TaskRegistry::new();
         spawn_panicked_task(&tasks).await;
         let mut release_senders = Vec::new();
+
         for _ in 0..TASK_REAP_THRESHOLD {
             release_senders.push(spawn_parked_task(&tasks).await);
         }
@@ -205,6 +206,7 @@ mod tests {
 
         assert_eq!(error.kind(), ErrorKind::TaskPanic);
         assert!(tasks.inner.lock().await.is_empty());
+
         for sender in &mut release_senders {
             sender.closed().await;
         }
@@ -256,18 +258,22 @@ mod tests {
                     tasks.spawn(async {}).await;
                 }
             };
+
             tokio::pin!(register);
 
             assert_pending(register.as_mut());
+
             if use_factory {
                 assert_eq!(factory_rx.try_recv(), Err(oneshot::error::TryRecvError::Empty));
             }
 
             drop(guard);
             register.await;
+
             if use_factory {
                 factory_rx.await.unwrap();
             }
+
             let _guard = tasks.drain().await.unwrap();
         }
     }
@@ -306,6 +312,7 @@ mod tests {
             } else {
                 tasks.shutdown().await.unwrap_err()
             };
+
             assert_eq!(error.kind(), ErrorKind::TaskPanic);
             assert!(tasks.inner.lock().await.is_empty());
             assert!(lifetime_rx.await.is_err());

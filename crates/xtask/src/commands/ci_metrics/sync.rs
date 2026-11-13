@@ -160,6 +160,7 @@ pub(super) async fn run(
         eprintln!("ci-metrics: another sync holds the lock; nothing to do");
         return Ok(());
     }
+
     let result = run_locked(conn, client, config).await;
     store::unlock(conn).await?;
     result
@@ -184,6 +185,7 @@ async fn run_locked(
     };
 
     let mut exhausted = false;
+
     match syncer.sync_workflows(conn).await {
         Ok(()) => {}
         Err(SyncError::Exhausted) => exhausted = true,
@@ -238,6 +240,7 @@ async fn run_locked(
             }
         }
     }
+
     if !syncer.low_rate_limit {
         match syncer
             .sync_code_scanning(conn, settings.history_since, settings.analyses_backfilled)
@@ -312,6 +315,7 @@ impl Syncer<'_> {
             if self.low_rate_limit || self.client.requests_sent() >= self.request_limit {
                 return Err(SyncError::Exhausted);
             }
+
             let result = match target {
                 Target::Path(path) => self.client.get(path, query).await,
                 Target::Url(url) => {
@@ -320,11 +324,13 @@ impl Syncer<'_> {
                         .await
                 }
             };
+
             let response = match result {
                 Ok(response) => response,
                 Err(error) if attempt < MAX_TRIES => {
                     eprintln!("ci-metrics: transient request failure, retrying: {error:#}");
                     tokio::time::sleep(backoff(attempt)).await;
+
                     continue;
                 }
                 Err(error) => return Err(SyncError::Day { kind: "network", source: error }),
@@ -351,25 +357,30 @@ impl Syncer<'_> {
             if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
                 return Err(SyncError::Denied { status });
             }
+
             if status.is_server_error() {
                 if attempt < MAX_TRIES {
                     tokio::time::sleep(backoff(attempt)).await;
                     continue;
                 }
+
                 return Err(SyncError::Day {
                     kind: "github_server_error",
                     source: anyhow!("GitHub returned HTTP status {status}"),
                 });
             }
+
             if status.is_success() || status == StatusCode::NOT_FOUND || status == StatusCode::GONE
             {
                 return Ok(response);
             }
+
             return Err(SyncError::Day {
                 kind: "github_status",
                 source: anyhow!("GitHub returned HTTP status {status}"),
             });
         }
+
         Err(SyncError::Exhausted)
     }
 
@@ -386,6 +397,7 @@ impl Syncer<'_> {
                 source: anyhow!("GitHub returned HTTP status {}", response.status()),
             });
         }
+
         let has_next = response.has_next_page();
         let value =
             response.json().map_err(|source| SyncError::Day { kind: "github_payload", source })?;
@@ -401,9 +413,11 @@ impl Syncer<'_> {
             for workflow in &listing.workflows {
                 store::upsert_workflow(conn, workflow).await?;
             }
+
             if !has_next {
                 return Ok(());
             }
+
             page += 1;
         }
     }
@@ -416,6 +430,7 @@ impl Syncer<'_> {
         let mut batch = self.list_day(start, end).await?;
         let stored = store::load_stored_runs(conn, start, end).await?;
         let known_artifacts = store::load_known_artifacts(conn, start, end).await?;
+
         for run in &batch.runs {
             let stored_run = stored.get(&run.id);
             let stored_attempts =
@@ -433,6 +448,7 @@ impl Syncer<'_> {
             {
                 continue;
             }
+
             for attempt in plan::attempts_to_refresh(stored_attempts, run.run_attempt) {
                 let response = self
                     .request(&format!("actions/runs/{}/attempts/{attempt}", run.id), &[])
@@ -444,6 +460,7 @@ impl Syncer<'_> {
                     batch.attempts.push(attempt_run);
                 }
             }
+
             let jobs = self.fetch_jobs(run.id).await?;
             let known = known_artifacts.get(&run.id).cloned().unwrap_or_default();
             let known_stored = known.values().any(|stored| *stored);
@@ -453,6 +470,7 @@ impl Syncer<'_> {
             } else {
                 (Vec::new(), Vec::new(), None)
             };
+
             batch.details.push(RunDetails {
                 run_id: run.id,
                 run_attempt: run.run_attempt,
@@ -465,15 +483,18 @@ impl Syncer<'_> {
         }
 
         let mut tx = conn.begin().await?;
+
         for run in batch.attempts.iter().chain(&batch.runs) {
             store::upsert_run(&mut tx, run).await?;
         }
+
         for details in &batch.details {
             for job in &details.jobs {
                 // Jobs of an attempt GitHub no longer returns cannot be stored.
                 if !store::run_attempt_exists(&mut tx, job.run_id, job.run_attempt).await? {
                     continue;
                 }
+
                 let failed_step = job
                     .steps
                     .iter()
@@ -482,7 +503,9 @@ impl Syncer<'_> {
                 store::upsert_job(&mut tx, job, detail_status(self.now, job), failed_step).await?;
                 self.totals.jobs += 1;
             }
+
             let mut inserted = 0;
+
             for manifest in &details.manifests {
                 // A manifest's job belongs to its attempt. If GitHub no longer
                 // returns that attempt, neither it nor the job was stored, so
@@ -494,23 +517,28 @@ impl Syncer<'_> {
                     self.totals.skipped_manifests += 1;
                     continue;
                 }
+
                 let stored = store::insert_manifest(&mut tx, manifest).await?;
                 self.totals.test_results += stored.test_results;
                 self.totals.audit_findings += stored.audit_findings;
                 inserted += 1;
             }
+
             for rejection in &details.rejections {
                 store::insert_rejection(&mut tx, rejection, self.now).await?;
             }
+
             // `available` must mean a manifest is stored: if every new one was
             // skipped and none was stored before, leave the status unchanged.
             let status = match details.artifact_status {
                 Some("available") if inserted == 0 && !details.known_stored => None,
                 status => status,
             };
+
             if let Some(status) = status {
                 store::set_artifact_status(&mut tx, details.run_id, status).await?;
             }
+
             self.totals.manifests += inserted;
             store::mark_details_fetched(&mut tx, details.run_id, details.run_attempt, self.now)
                 .await?;
@@ -519,6 +547,7 @@ impl Syncer<'_> {
 
         let complete = batch.listing_complete;
         let mut final_at = None;
+
         if complete {
             let ids: Vec<i64> = batch.runs.iter().map(|run| run.id).collect();
             self.totals.deleted_runs +=
@@ -528,6 +557,7 @@ impl Syncer<'_> {
                 final_at = Some(self.now);
             }
         }
+
         let run_count = i32::try_from(batch.runs.len()).unwrap_or(i32::MAX);
         let refetched_at = (complete && task.refetch_details).then_some(self.now);
         store::record_day(
@@ -579,13 +609,17 @@ impl Syncer<'_> {
                             ),
                         });
                     }
+
                     let middle = window_start + (window_end - window_start) / 2;
                     windows.push((window_start, middle));
                     windows.push((middle, window_end));
+
                     break;
                 }
+
                 total = Some(listing.total_count);
                 seen.extend(listing.workflow_runs.iter().map(|run| run.id));
+
                 for run in listing.workflow_runs {
                     // Pages can shift while listing; keep the newest snapshot.
                     match runs.get(&run.id) {
@@ -595,17 +629,21 @@ impl Syncer<'_> {
                         }
                     }
                 }
+
                 if !has_next {
                     break;
                 }
+
                 page += 1;
             }
+
             if let Some(total) = total
                 && (seen.len() as u64) < total
             {
                 complete = false;
             }
         }
+
         // A shifted page can hide a run; only a listing covering every reported
         // run counts as complete.
         Ok(DayBatch {
@@ -627,6 +665,7 @@ impl Syncer<'_> {
             if response.status() == StatusCode::NOT_FOUND {
                 return Ok(jobs);
             }
+
             let has_next = response.has_next_page();
             let listing: JobPage = response
                 .json()
@@ -635,9 +674,11 @@ impl Syncer<'_> {
                 || listing.jobs.is_empty()
                 || jobs.len() as u64 + listing.jobs.len() as u64 >= listing.total_count;
             jobs.extend(listing.jobs);
+
             if done {
                 return Ok(jobs);
             }
+
             page += 1;
         }
     }
@@ -663,18 +704,22 @@ impl Syncer<'_> {
             let done = !has_next
                 || listing.artifacts.is_empty()
                 || u64::try_from(page * PER_PAGE).unwrap_or(u64::MAX) >= listing.total_count;
+
             for artifact in listing.artifacts {
                 let Some(ingest) = trust.ingest(manifest::artifact_kind(&artifact.name), jobs)
                 else {
                     continue;
                 };
+
                 if known.contains_key(&artifact.id) {
                     continue;
                 }
+
                 if artifact.expired {
                     expired = true;
                     continue;
                 }
+
                 let mut reject = |reason: Rejection, run_attempt: Option<i32>| {
                     rejections.push(RejectionRow {
                         artifact_id: artifact.id,
@@ -684,10 +729,12 @@ impl Syncer<'_> {
                         reason: reason.as_str(),
                     });
                 };
+
                 if artifact.size_in_bytes > MAX_ARCHIVE_BYTES {
                     reject(Rejection::TooLarge, None);
                     continue;
                 }
+
                 let response = self.download(&artifact.archive_download_url).await?;
                 if response.status() == StatusCode::GONE
                     || response.status() == StatusCode::NOT_FOUND
@@ -695,10 +742,12 @@ impl Syncer<'_> {
                     expired = true;
                     continue;
                 }
+
                 if response.truncated() {
                     reject(Rejection::TooLarge, None);
                     continue;
                 }
+
                 let archive = response.into_body();
                 match read_archive(&archive, run, jobs, ingest).await {
                     Ok(Ok(row)) => manifests.push(row.with_artifact(artifact.id)),
@@ -706,9 +755,11 @@ impl Syncer<'_> {
                     Err(source) => return Err(SyncError::Day { kind: "artifact_io", source }),
                 }
             }
+
             if done {
                 break;
             }
+
             page += 1;
         }
 
@@ -722,6 +773,7 @@ impl Syncer<'_> {
         } else {
             None
         };
+
         Ok((manifests, rejections, status))
     }
 
@@ -734,6 +786,7 @@ impl Syncer<'_> {
         analyses_backfilled: bool,
     ) -> Result<(), SyncError> {
         let mut alert_numbers = HashSet::new();
+
         for state in ALERT_STATES {
             let mut page = 1;
             loop {
@@ -745,12 +798,15 @@ impl Syncer<'_> {
                     store::upsert_alert(conn, alert).await?;
                     alert_numbers.insert(alert.number);
                 }
+
                 if !has_next {
                     break;
                 }
+
                 page += 1;
             }
         }
+
         self.totals.code_scanning_alerts = alert_numbers.len() as u64;
 
         let history_start = history_since.and_hms_opt(0, 0, 0).map(|start| start.and_utc());
@@ -768,11 +824,13 @@ impl Syncer<'_> {
             // the boundary of what is already stored.
             let mut tx = conn.begin().await?;
             let mut new = 0;
+
             for analysis in &analyses {
                 if store::insert_analysis(&mut tx, analysis).await? {
                     new += 1;
                 }
             }
+
             // A full page of new analyses means the pass may span pages. Until
             // it ends cleanly, older analyses might be missing, so record that:
             // an interrupted pass then resumes paging to the start next sync.
@@ -780,6 +838,7 @@ impl Syncer<'_> {
                 store::set_analyses_backfilled(&mut tx, false).await?;
                 backfilled = false;
             }
+
             tx.commit().await?;
             self.totals.new_analyses += new;
             let reached_history = analyses
@@ -792,8 +851,10 @@ impl Syncer<'_> {
                 if !backfilled {
                     store::set_analyses_backfilled(conn, true).await?;
                 }
+
                 return Ok(());
             }
+
             // Pages are newest first. With no gaps before this pass, a page
             // holding an already stored analysis means every older one is
             // stored too, so the pass is complete.
@@ -801,8 +862,10 @@ impl Syncer<'_> {
                 if !backfilled {
                     store::set_analyses_backfilled(conn, true).await?;
                 }
+
                 return Ok(());
             }
+
             page += 1;
         }
     }
@@ -814,9 +877,11 @@ impl Syncer<'_> {
         let mut after: Option<String> = None;
         loop {
             let mut query = vec![("per_page", PER_PAGE.to_string())];
+
             if let Some(cursor) = &after {
                 query.push(("after", cursor.clone()));
             }
+
             let response = self.request("dependabot/alerts", &query).await?;
             if !response.status().is_success() {
                 return Err(SyncError::Day {
@@ -824,17 +889,20 @@ impl Syncer<'_> {
                     source: anyhow!("GitHub returned HTTP status {}", response.status()),
                 });
             }
+
             let alerts: Vec<DependabotAlert> = response
                 .json()
                 .map_err(|source| SyncError::Day { kind: "github_payload", source })?;
             for alert in &alerts {
                 store::upsert_dependabot_alert(conn, alert).await?;
             }
+
             self.totals.dependabot_alerts += alerts.len() as u64;
 
             let Some(next) = response.next_link() else {
                 return Ok(());
             };
+
             let cursor = next_cursor(next).ok_or_else(|| SyncError::Day {
                 kind: "github_payload",
                 source: anyhow!("GitHub's next Dependabot alert page has no cursor"),
@@ -846,6 +914,7 @@ impl Syncer<'_> {
                     source: anyhow!("GitHub's Dependabot alert pages made no progress"),
                 });
             }
+
             after = Some(cursor);
         }
     }
@@ -902,11 +971,13 @@ impl ManifestTrust {
         if run.status != "completed" || run.is_fork() {
             return Self { benchmarks: false, tests: None, audits: false };
         }
+
         let from_main = match run.event.as_str() {
             "schedule" => true,
             "workflow_dispatch" | "push" => run.head_branch.as_deref() == Some("main"),
             _ => false,
         };
+
         let tests = if run.workflow_path() != TEST_WORKFLOW {
             None
         } else if from_main {
@@ -916,6 +987,7 @@ impl ManifestTrust {
         } else {
             None
         };
+
         Self {
             benchmarks: from_main && run.workflow_path() == BENCHMARK_WORKFLOW,
             tests,
@@ -988,6 +1060,7 @@ async fn read_archive(
     let Some(listing) = listing.and_then(|bytes| String::from_utf8(bytes).ok()) else {
         return Ok(Err((Rejection::InvalidArchive, None)));
     };
+
     let entries = match manifest::parse_archive_listing(&listing) {
         Ok(entries) => entries,
         Err(reason) => return Ok(Err((reason, None))),
@@ -996,6 +1069,7 @@ async fn read_archive(
     let Some(manifest_bytes) = read_entry(path, MANIFEST_FILE_NAME).await? else {
         return Ok(Err((Rejection::TooLarge, None)));
     };
+
     match ingest {
         Ingest::Benchmark => benchmark_row(path, &entries, &manifest_bytes, run, jobs).await,
         Ingest::Test { job_id, scope } => Ok(test_row(&manifest_bytes, run, jobs, job_id, scope)),
@@ -1017,6 +1091,7 @@ async fn benchmark_row(
             Ok(parsed) => parsed,
             Err(reason) => return Ok(Err((reason, None))),
         };
+
     let run_attempt = parsed.run_attempt();
 
     let mut reports = BTreeMap::new();
@@ -1024,11 +1099,14 @@ async fn benchmark_row(
         if !entries.iter().any(|entry| &entry.name == name) {
             return Ok(Err((Rejection::Invalid, Some(run_attempt))));
         }
+
         let Some(bytes) = read_entry(path, name).await? else {
             return Ok(Err((Rejection::TooLarge, Some(run_attempt))));
         };
+
         reports.insert(name.clone(), bytes);
     }
+
     let payload = match manifest::benchmark_payload(&parsed, &reports) {
         Ok(payload) => payload,
         Err(reason) => return Ok(Err((reason, Some(run_attempt)))),
@@ -1074,9 +1152,11 @@ fn test_row(
     let mut tests = parsed.into_tests();
     let total = tests.len();
     let failed = tests.iter().filter(|test| test.status() == TestStatus::Failed).count();
+
     if scope == TestScope::Failures {
         tests.retain(|test| test.status() == TestStatus::Failed);
     }
+
     Ok(ManifestRow {
         artifact_id: 0,
         run_id: run.id,
@@ -1110,6 +1190,7 @@ fn audit_row(
     if resolve_job(jobs, run_attempt, Some(job_id), "").is_none() {
         return Err((Rejection::UnmatchedJob, Some(run_attempt)));
     }
+
     Ok(ManifestRow {
         artifact_id: 0,
         run_id: run.id,
@@ -1128,9 +1209,11 @@ fn audit_row(
 /// display name when exactly one job of the attempt matches.
 fn resolve_job(jobs: &[Job], run_attempt: i32, job_id: Option<i64>, job_name: &str) -> Option<i64> {
     let attempt_jobs = || jobs.iter().filter(move |job| job.run_attempt == run_attempt);
+
     if let Some(job_id) = job_id {
         return attempt_jobs().find(|job| job.id == job_id).map(|job| job.id);
     }
+
     let mut matches = attempt_jobs().filter(|job| job.name == job_name);
     let job = matches.next()?;
     matches.next().is_none().then_some(job.id)
@@ -1151,9 +1234,11 @@ async fn run_unzip(
 ) -> Result<Option<Vec<u8>>> {
     let mut command = Command::new("unzip");
     command.args(flags).arg(archive);
+
     if let Some(entry) = entry {
         command.arg(entry);
     }
+
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1168,9 +1253,11 @@ async fn run_unzip(
         .read_to_end(&mut output)
         .await
         .context("Failed to read unzip output")?;
+
     if output.len() as u64 > max_bytes {
         return Ok(None);
     }
+
     let status = child.wait().await.context("Failed to wait for unzip")?;
     Ok(status.success().then_some(output))
 }
@@ -1375,6 +1462,7 @@ mod tests {
             ),
             Some("Y3Vy=".to_owned())
         );
+
         for url in [
             "https://api.github.com/repositories/1/dependabot/alerts?per_page=100",
             "https://api.github.com/repositories/1/dependabot/alerts?after=",

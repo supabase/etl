@@ -346,14 +346,17 @@ impl BenchmarkArgs {
         if !output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
+
             if !stdout.trim().is_empty() {
                 eprintln!("go-tpc prepare stdout:");
                 eprint!("{stdout}");
             }
+
             if !stderr.trim().is_empty() {
                 eprintln!("go-tpc prepare stderr:");
                 eprint!("{stderr}");
             }
+
             bail!("go-tpc prepare failed");
         }
 
@@ -401,6 +404,7 @@ impl BenchmarkArgs {
 
     fn validated_tpcc_tables(&self) -> Result<Vec<String>> {
         let mut tables = Vec::with_capacity(self.tpcc_tables.len());
+
         for table in &self.tpcc_tables {
             match table.as_str() {
                 "customer" | "district" | "item" | "new_order" | "order_line" | "orders"
@@ -818,6 +822,7 @@ fn benchmark_pipeline_id_base() -> Result<u64> {
 
 fn check_command(command: &str) -> Result<()> {
     let mut cmd = Command::new(command);
+
     if command == "go-tpc" {
         cmd.arg("version");
     } else {
@@ -898,6 +903,7 @@ fn aggregate_value(base: &Value, reports: &[Value]) -> Value {
     match base {
         Value::Object(base_object) => {
             let mut object = Map::new();
+
             for (key, value) in base_object {
                 let values = reports
                     .iter()
@@ -909,6 +915,7 @@ fn aggregate_value(base: &Value, reports: &[Value]) -> Value {
                     object.insert(key.clone(), value.clone());
                 }
             }
+
             Value::Object(object)
         }
         value => value.clone(),
@@ -930,6 +937,7 @@ fn aggregate_field(base: &Value, values: &[&Value]) -> Value {
 
 fn sample_summary(reports: &[Value]) -> Value {
     let mut summary = Map::new();
+
     let Some(base_object) = reports.first().and_then(Value::as_object) else {
         return Value::Object(summary);
     };
@@ -940,6 +948,7 @@ fn sample_summary(reports: &[Value]) -> Value {
         let Some(numbers) = numeric_values(&values) else {
             continue;
         };
+
         if numbers.is_empty() {
             continue;
         }
@@ -1062,6 +1071,7 @@ fn print_skip(name: &str, message: &str) {
 fn print_stderr_table(title: &str, left_header: &str, right_header: &str, rows: &[(&str, String)]) {
     let color = stderr_color_enabled();
     eprintln!("{}", paint(color, "36;1", title));
+
     for line in table_lines(left_header, right_header, rows) {
         eprintln!("{line}");
     }
@@ -1071,9 +1081,11 @@ fn print_stdout_table(title: &str, left_header: &str, right_header: &str, rows: 
     let color = stdout_color_enabled();
     println!();
     println!("{}", paint(color, "36;1", title));
+
     for line in table_lines(left_header, right_header, rows) {
         println!("{line}");
     }
+
     println!();
 }
 
@@ -1102,9 +1114,11 @@ fn table_lines(left_header: &str, right_header: &str, rows: &[(&str, String)]) -
     lines.push(border.clone());
     lines.push(format!("| {left_header:<left_width$} | {right_header:<right_width$} |"));
     lines.push(border.clone());
+
     for (label, value) in rows {
         lines.push(format!("| {label:<left_width$} | {value:<right_width$} |"));
     }
+
     lines.push(border);
     lines
 }
@@ -1134,9 +1148,11 @@ fn run_benchmark_binary(
 ) -> Result<Value> {
     let mut command = Command::new("cargo");
     command.args(["run", "--locked", "--quiet", "-p", "etl-benchmarks", "--release"]);
+
     if !matches!(destination, Destination::Null) {
         command.args(["--features", destination.as_arg()]);
     }
+
     command.args(["--bin", binary_name, "--"]).args(binary_args);
 
     print_phase(
@@ -1154,10 +1170,12 @@ fn run_benchmark_binary(
             eprintln!("{binary_name} stdout:");
             eprint!("{stdout}");
         }
+
         if !stderr.trim().is_empty() {
             eprintln!("{binary_name} stderr:");
             eprint!("{stderr}");
         }
+
         io::stderr().flush().context("failed to flush benchmark failure output")?;
         bail!("benchmark {binary_name} failed");
     }
@@ -1230,6 +1248,7 @@ fn report_rows(
 
 fn print_combined_summary(table_copy: Option<&Value>, table_streaming: Option<&Value>) {
     let mut rows = Vec::new();
+
     if let Some(report) = table_copy {
         rows.push([
             "Table copy".to_owned(),
@@ -1244,6 +1263,7 @@ fn print_combined_summary(table_copy: Option<&Value>, table_streaming: Option<&V
             report_number(report, "total_ms").map_or_else(|| "-".to_owned(), format_milliseconds),
         ]);
     }
+
     if let Some(report) = table_streaming {
         rows.push([
             "Table streaming".to_owned(),
@@ -1269,6 +1289,7 @@ fn print_combined_summary(table_copy: Option<&Value>, table_streaming: Option<&V
 fn print_summary_table(rows: &[[String; 4]]) {
     let headers = ["Benchmark", "Throughput", "Data rate", "Total"];
     let mut widths = headers.map(str::len);
+
     for row in rows {
         for (idx, value) in row.iter().enumerate() {
             widths[idx] = widths[idx].max(value.len());
@@ -1301,6 +1322,7 @@ fn print_summary_table(rows: &[[String; 4]]) {
         w3 = widths[3]
     );
     println!("{border}");
+
     for row in rows {
         println!(
             "| {:<w0$} | {:<w1$} | {:<w2$} | {:<w3$} |",
@@ -1314,6 +1336,7 @@ fn print_summary_table(rows: &[[String; 4]]) {
             w3 = widths[3]
         );
     }
+
     println!("{border}");
     println!();
 }
@@ -1349,6 +1372,7 @@ fn format_decimal(value: f64, digits: usize) -> String {
     let Some((integer, fraction)) = raw.split_once('.') else {
         return format_integer_str(&raw);
     };
+
     format!("{}.{}", format_integer_str(integer), fraction)
 }
 
@@ -1356,6 +1380,7 @@ fn format_integer_str(value: &str) -> String {
     let Some(unsigned) = value.strip_prefix('-') else {
         return format_integer(value.parse::<u64>().unwrap_or(0));
     };
+
     format!("-{}", format_integer(unsigned.parse::<u64>().unwrap_or(0)))
 }
 
@@ -1371,6 +1396,7 @@ fn format_integer(value: u64) -> String {
         {
             formatted.push(',');
         }
+
         formatted.push(ch);
     }
 

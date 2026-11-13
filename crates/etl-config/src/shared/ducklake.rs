@@ -163,19 +163,23 @@ impl Validate for DuckLakeTablePartitioningConfig {
         let mut tables = HashSet::with_capacity(self.declarations.tables.len());
         for (index, table) in self.declarations.tables.iter().enumerate() {
             let field = format!("table_partitioning.tables[{index}]");
+
             if table.schema.is_empty() || table.table.is_empty() {
                 return Err(ValidationError::InvalidFieldValue {
                     field,
                     constraint: "Schema and table names must not be empty".to_owned(),
                 });
             }
+
             if !tables.insert((&table.schema, &table.table)) {
                 return Err(ValidationError::InvalidFieldValue {
                     field,
                     constraint: "Table partition specifications must be unique".to_owned(),
                 });
             }
+
             let mut keys = HashSet::with_capacity(table.partition_by.len());
+
             for key in &table.partition_by {
                 if key.column.is_empty() || !keys.insert(key) {
                     return Err(ValidationError::InvalidFieldValue {
@@ -184,6 +188,7 @@ impl Validate for DuckLakeTablePartitioningConfig {
                             .to_owned(),
                     });
                 }
+
                 if let DuckLakePartitionTransform::Bucket { count } = key.transform
                     && (count == 0 || i32::try_from(count).is_err())
                 {
@@ -194,6 +199,7 @@ impl Validate for DuckLakeTablePartitioningConfig {
                 }
             }
         }
+
         Ok(())
     }
 }
@@ -215,6 +221,7 @@ mod tests {
         ] {
             assert!(serde_json::from_value::<DuckLakePartitionTransform>(transform).is_err());
         }
+
         for count in [0, u32::MAX] {
             let config: DuckLakeTablePartitioningConfig = serde_json::from_value(json!({
                 "tables": [{"schema": "public", "table": "events", "partition_by": [
@@ -224,6 +231,7 @@ mod tests {
             .unwrap();
             assert!(config.validate().is_err());
         }
+
         let config: DuckLakeTablePartitioningConfig = serde_json::from_value(json!({
             "tables": [{"schema": "public", "table": "events", "partition_by": [
                 {"column": "id", "transform": {"kind": "identity"}},
@@ -249,6 +257,7 @@ mod tests {
             assert!(!transform.supports_postgres_type(&Type::TEXT));
             assert!(!transform.supports_postgres_type(&Type::INT8));
         }
+
         assert!(DuckLakePartitionTransform::Day {}.supports_postgres_type(&Type::DATE));
         assert!(!DuckLakePartitionTransform::Hour {}.supports_postgres_type(&Type::DATE));
     }

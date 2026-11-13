@@ -207,9 +207,11 @@ impl Destination for DeferredEventsDestination {
                 None
             }
         };
+
         if let Some(gate) = gate {
             gate.apply(Ok(())).await?;
         }
+
         async_result.send(Ok(DestinationWriteStatus::Durable));
 
         Ok(())
@@ -270,10 +272,12 @@ impl Destination for DeferredEventsDestination {
                     DeferredEventsWrite::PartialBatch { durability, result: async_result }
                 }
             };
+
             assert!(self.writes_tx.send(write).is_ok());
 
             return Ok(());
         }
+
         drop(open_target_commit_lsn);
 
         if events.is_empty() {
@@ -816,9 +820,11 @@ async fn table_sync_handover_preserves_decoder_across_post_handoff_noop_ddl() {
     let Event::Relation(table_sync_relation) = &relation_events[0] else {
         unreachable!("grouped relation event should be a relation");
     };
+
     let Event::Relation(pending_relation) = &relation_events[1] else {
         unreachable!("grouped relation event should be a relation");
     };
+
     let Event::Insert(post_handoff_insert) = catchup_events.last().unwrap() else {
         unreachable!("grouped insert event should be an insert");
     };
@@ -1039,6 +1045,7 @@ async fn table_sync_ddl_without_relation_fails_before_persisting_sync_done() {
     let TableState::Errored { retry_policy, source_err, .. } = table_state else {
         panic!("an incomplete row-decoding state must not be persisted as SyncDone");
     };
+
     assert!(matches!(retry_policy, TableRetryPolicy::ManualRetry));
     assert_eq!(source_err.kind(), ErrorKind::InvalidState);
     assert_eq!(source_err.description(), Some("Table-sync decoding state is incomplete"));
@@ -1135,7 +1142,9 @@ async fn table_sync_quiescent_handover_does_not_persist_received_progress() {
             else {
                 panic!("expected accepted target-table event batch");
             };
+
             result.send(Ok(DestinationWriteStatus::Accepted));
+
             let Some(DeferredEventsWrite::DurabilityBarrier { result }) = writes_rx.recv().await
             else {
                 panic!("expected empty required-durability barrier");
@@ -1167,6 +1176,7 @@ async fn table_sync_quiescent_handover_does_not_persist_received_progress() {
     else {
         panic!("a durable terminal barrier must persist SyncDone with its decoder");
     };
+
     let checkpoint_before_unpause =
         store.get_replication_checkpoint(WorkerType::Apply).await.unwrap();
     assert!(checkpoint_before_unpause.is_none_or(|checkpoint| checkpoint < sync_done_lsn));
@@ -1257,6 +1267,7 @@ impl Destination for HoldingDmlDispatchDestination {
                 gate.apply(Ok(())).await?;
             }
         }
+
         self.inner.write_events(events, durability, result).await
     }
 }
@@ -1296,6 +1307,7 @@ async fn assert_apply_feedback_during_stall(
 
                 let row = client.query_one(&statement, &[&slot_name]).await.unwrap();
                 assert_eq!(row.get::<_, i32>(0), backend_pid);
+
                 if let Some(first_dml_commit_lsn) = first_held_dml_commit_lsn {
                     assert!(row.get::<_, PgLsn>(2) < first_dml_commit_lsn);
                 }
@@ -1334,6 +1346,7 @@ async fn feedback_continues_during_destination_dispatch() {
     let FaultAction::HoldResponse(gate) = fault else {
         panic!("FaultAction::hold must produce a hold gate");
     };
+
     let first_held_dml_commit_lsn = Arc::new(Mutex::new(None));
     let destination = TestDestinationWrapper::wrap(HoldingDmlDispatchDestination {
         inner: inner.clone(),
@@ -1769,6 +1782,7 @@ async fn run_schema_replay_scenario(
         SchemaReplayOrder::DmlBeforeDdl => 3,
         SchemaReplayOrder::DdlBeforeDml => 2,
     };
+
     let events_notify = destination
         .wait_for_events(vec![
             EventCondition::TableCount(EventType::Relation, table_id, event_count),
@@ -1786,6 +1800,7 @@ async fn run_schema_replay_scenario(
                     .await
                     .unwrap();
             }
+
             transaction
                 .alter_table(
                     table_name.clone(),
@@ -1821,6 +1836,7 @@ async fn run_schema_replay_scenario(
                     .await
                     .unwrap();
             }
+
             database
                 .alter_table(
                     table_name.clone(),
@@ -1860,12 +1876,14 @@ async fn run_schema_replay_scenario(
         [("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4), ("status", Type::TEXT)];
     let final_columns = [("id", Type::INT8), ("name", Type::TEXT), ("status", Type::TEXT)];
     let mut expected_events = Vec::new();
+
     if matches!(order, SchemaReplayOrder::DmlBeforeDdl) {
         expected_events.extend([
             ExpectedReplicatedEvent::Relation(initial_columns.as_slice()),
             ExpectedReplicatedEvent::Insert(initial_columns.as_slice()),
         ]);
     }
+
     expected_events.extend([
         ExpectedReplicatedEvent::Relation(added_columns.as_slice()),
         ExpectedReplicatedEvent::Insert(added_columns.as_slice()),
@@ -2822,9 +2840,11 @@ impl IdleDurabilityTest {
         .with_table_sync_copy_config(TableSyncCopyConfig::SkipAllTables)
         .with_settle_durable_interval_ms(settle_durable_interval_ms)
         .with_retry_config(PipelineConfig::MIN_TABLE_ERROR_RETRY_DELAY_MS, 1);
+
         if let Some(batch) = batch {
             builder = builder.with_batch_config(batch);
         }
+
         let mut pipeline = builder.build();
         let synced = store.notify_on_table_sync_complete(table_id).await;
 
@@ -2895,6 +2915,7 @@ impl IdleDurabilityTest {
                 if row.get::<_, Option<PgLsn>>(0).is_some_and(|lsn| lsn > target) {
                     break;
                 }
+
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
@@ -3060,6 +3081,7 @@ async fn catchup_retry_recopies_after_dispatched_write() {
     let DeferredEventsWrite::Batch { result, .. } = write else {
         panic!("Expected a catchup batch");
     };
+
     result.send(Ok(DestinationWriteStatus::Durable));
 
     errored.notified().await;
@@ -3101,6 +3123,7 @@ async fn durability_deadline_flushes_busy_successor_without_acknowledging_later_
     else {
         panic!("expected buffered work in the required-durability write");
     };
+
     assert_eq!(durability, WriteEventsDurability::RequireDurable);
     assert!(second_lsn > first_lsn);
     assert!(test.confirmed_lsn().await < first_lsn);
@@ -3213,6 +3236,7 @@ async fn durability_deadline_during_split_transaction_keeps_commit_boundary() {
     let DeferredEventsWrite::PartialBatch { durability, result } = write else {
         panic!("expected a split transaction");
     };
+
     assert_eq!(durability, WriteEventsDurability::MayDefer);
     fail::cfg(APPLY_LOOP_EXPIRE_DURABILITY_FP, "1*return(apply)").unwrap();
     result.send(Ok(DestinationWriteStatus::Accepted));
@@ -3233,6 +3257,7 @@ async fn durability_deadline_during_split_transaction_keeps_commit_boundary() {
             panic!("expected durability confirmation before the transaction commit");
         }
     };
+
     assert!(test.confirmed_lsn().await < first_lsn);
     result.send(Ok(DestinationWriteStatus::Durable));
 
@@ -3245,6 +3270,7 @@ async fn durability_deadline_during_split_transaction_keeps_commit_boundary() {
         test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(),
         Some(first_lsn)
     );
+
     let transaction_lsn = loop {
         match write {
             DeferredEventsWrite::PartialBatch { result, .. } => {
@@ -3257,15 +3283,18 @@ async fn durability_deadline_during_split_transaction_keeps_commit_boundary() {
                     Some(first_lsn)
                 );
                 result.send(Ok(DestinationWriteStatus::Durable));
+
                 break commit_end_lsn;
             }
             DeferredEventsWrite::DurabilityBarrier { .. } => panic!("unexpected extra barrier"),
         }
+
         write = tokio::time::timeout(IDLE_DURABILITY_WRITE_TIMEOUT, test.writes_rx.recv())
             .await
             .unwrap()
             .unwrap();
     };
+
     test.wait_for_flush(transaction_lsn).await;
     test.pipeline.shutdown_and_wait().await.unwrap();
     assert_checkpoint_reached(&test.store, &test.received_end_lsn, transaction_lsn).await;
@@ -3298,6 +3327,7 @@ async fn durability_age_observes_cdc_while_another_table_is_copying() {
     let FaultAction::HoldResponse(copy_gate) = fault else {
         panic!("FaultAction::hold must produce a hold gate");
     };
+
     *destination.copy_gate.lock().unwrap() = Some((copying_id, copy_gate));
     let pipeline_id = random_pipeline_id();
     let mut pipeline = PipelineBuilder::new(
@@ -3390,6 +3420,7 @@ async fn idle_durability_allows_multiple_writes_during_settle_interval() {
     first_result.send(Ok(DestinationWriteStatus::Accepted));
 
     let mut previous_lsn = first_lsn;
+
     for value in [2, 3] {
         test.insert(value).await;
         let (lsn, result) = test.next_batch().await;
@@ -3399,6 +3430,7 @@ async fn idle_durability_allows_multiple_writes_during_settle_interval() {
         result.send(Ok(DestinationWriteStatus::Accepted));
         previous_lsn = lsn;
     }
+
     assert!(test.confirmed_lsn().await < first_lsn);
 
     let barrier = test.next_barrier().await;
@@ -3464,6 +3496,7 @@ async fn idle_durability_buffers_resumed_traffic_without_acknowledging_it() {
             if row.get::<_, Option<PgLsn>>(0).is_some_and(|lsn| lsn > received_target) {
                 break;
             }
+
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
@@ -3551,6 +3584,7 @@ async fn idle_durability_shutdown_preserves_error_policy_and_checkpoint() {
         } else {
             assert!(result.unwrap_err().kinds().contains(&kind));
         }
+
         assert!(
             test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap()
                 < Some(commit_lsn)

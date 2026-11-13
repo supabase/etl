@@ -173,11 +173,13 @@ impl TestArgs {
 
         let mut test = Command::new("cargo");
         test.args(["nextest", "run"]);
+
         if let Some(archive) = &self.archive_file {
             test.arg("--archive-file").arg(archive).args(["--workspace-remap", "."]);
         } else {
             test.args(["--locked", "-p", "etl", "--features", "test-utils", "--test", "multigres"]);
         }
+
         test.args(["-E", "binary_id(etl::multigres)", "--run-ignored", "only", "--no-capture"]);
         test.env("MULTIGRES_GW_HOST", "127.0.0.1");
         test.env("MULTIGRES_GW_PORT", self.gateway_port.to_string());

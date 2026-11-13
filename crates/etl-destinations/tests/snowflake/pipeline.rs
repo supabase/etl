@@ -265,6 +265,7 @@ async fn durability_deadline_advances_live_snowflake_checkpoint() {
                     })
                     .unwrap();
                 wait_for_replication_checkpoint(&store, commit_end_lsn).await;
+
                 if value == 2 {
                     // The single-use hook must have been consumed by an
                     // Accepted result; a direct Durable result would leave it
@@ -275,6 +276,7 @@ async fn durability_deadline_advances_live_snowflake_checkpoint() {
                     ));
                 }
             }
+
             let events = destination.get_events().await;
             events
                 .iter()

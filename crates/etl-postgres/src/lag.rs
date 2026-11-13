@@ -229,6 +229,7 @@ where
     .await?;
 
     let mut metrics = PipelineLagMetrics::default();
+
     for row in rows {
         metrics.source_wal = SourceWalPositions {
             decoding_lsn: parse_lsn(row.decoding_lsn.as_deref())?,

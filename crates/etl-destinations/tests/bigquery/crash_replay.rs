@@ -41,6 +41,7 @@ fn workload_record(row: TableRow) -> Result<WorkloadRecord, TestCaseError> {
     else {
         return Err(TestCaseError::fail("unexpected BigQuery row shape"));
     };
+
     let id = parse_table_cell(id).ok_or_else(|| TestCaseError::fail("BigQuery row has no id"))?;
     let counter = parse_table_cell(counter)
         .ok_or_else(|| TestCaseError::fail("BigQuery row has no counter"))?;

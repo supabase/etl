@@ -473,6 +473,7 @@ mod tests {
         let Event::Insert(insert_event) = &insert else {
             unreachable!();
         };
+
         assert_eq!(
             insert.size_hint(),
             size_of::<Event>() + owned_heap_size_hint(&insert_event.table_row)
@@ -488,6 +489,7 @@ mod tests {
         let Event::Update(update_event) = &update else {
             unreachable!();
         };
+
         let update_heap_bytes = owned_heap_size_hint(&update_event.updated_table_row)
             + update_event.old_table_row.as_ref().map(owned_heap_size_hint).unwrap_or_default();
         assert_eq!(update.size_hint(), size_of::<Event>() + update_heap_bytes);

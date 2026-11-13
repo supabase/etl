@@ -64,6 +64,7 @@ pub(crate) fn varchar_literal() -> impl Strategy<Value = String> {
 pub(crate) fn bytea_literal() -> impl Strategy<Value = String> {
     proptest::collection::vec(any::<u8>(), 0..=16).prop_map(|bytes| {
         let mut literal = String::from("\\x");
+
         for byte in bytes {
             write!(literal, "{byte:02x}").unwrap();
         }
@@ -141,18 +142,23 @@ pub(crate) fn numeric_literal() -> impl Strategy<Value = String> {
     let finite = (any::<bool>(), digits(45), option::of(digits(45)), option::of(exponent))
         .prop_map(|(negative, int_digits, frac_digits, exponent)| {
             let mut literal = String::new();
+
             if negative {
                 literal.push('-');
             }
+
             for digit in int_digits {
                 literal.push((b'0' + digit) as char);
             }
+
             if let Some(frac_digits) = frac_digits {
                 literal.push('.');
+
                 for digit in frac_digits {
                     literal.push((b'0' + digit) as char);
                 }
             }
+
             if let Some(exponent) = exponent {
                 literal.push('e');
                 literal.push_str(&exponent.to_string());
@@ -332,6 +338,7 @@ impl JsonString {
     /// when escaped.
     fn render(&self, out: &mut String) {
         out.push('"');
+
         for &(c, unicode_escape) in &self.0 {
             match c {
                 _ if unicode_escape => {
@@ -351,6 +358,7 @@ impl JsonString {
                 c => out.push(c),
             }
         }
+
         out.push('"');
     }
 }
@@ -393,22 +401,27 @@ impl JsonNode {
             Self::String(value) => value.render(out),
             Self::Array(items) => {
                 out.push('[');
+
                 for (index, item) in items.iter().enumerate() {
                     if index > 0 {
                         out.push(',');
                     }
+
                     out.push_str(whitespace);
                     item.render(whitespace, out);
                 }
+
                 out.push_str(whitespace);
                 out.push(']');
             }
             Self::Object(entries) => {
                 out.push('{');
+
                 for (index, (key, value)) in entries.iter().enumerate() {
                     if index > 0 {
                         out.push(',');
                     }
+
                     out.push_str(whitespace);
                     key.render(out);
                     out.push_str(whitespace);
@@ -416,6 +429,7 @@ impl JsonNode {
                     out.push_str(whitespace);
                     value.render(whitespace, out);
                 }
+
                 out.push_str(whitespace);
                 out.push('}');
             }
@@ -460,6 +474,7 @@ impl JsonNode {
             }
             (Self::Object(entries), Value::Object(actual)) => {
                 let mut last_wins = BTreeMap::new();
+
                 for (key, value) in entries {
                     last_wins.insert(key.value(), value);
                 }
@@ -488,10 +503,12 @@ fn decimal_key(literal: &str) -> (bool, String, i64) {
 
     let mut digits = format!("{int_digits}{frac_digits}");
     let mut exponent = exponent - i64::try_from(frac_digits.len()).unwrap();
+
     while digits.ends_with('0') {
         digits.pop();
         exponent += 1;
     }
+
     let digits = digits.trim_start_matches('0');
     if digits.is_empty() {
         return (false, String::new(), 0);
@@ -512,14 +529,18 @@ fn json_number() -> impl Strategy<Value = String> {
     (any::<bool>(), int_digits, option::of("[0-9]{1,24}"), option::of(exponent)).prop_map(
         |(negative, int_digits, frac_digits, exponent)| {
             let mut literal = String::new();
+
             if negative {
                 literal.push('-');
             }
+
             literal.push_str(&int_digits);
+
             if let Some(frac_digits) = frac_digits {
                 literal.push('.');
                 literal.push_str(&frac_digits);
             }
+
             if let Some((marker, value)) = exponent {
                 literal.push_str(marker);
                 literal.push_str(&value.to_string());

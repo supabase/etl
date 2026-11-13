@@ -74,6 +74,7 @@ impl SeedArgs {
                 "[seed] keeping existing database {database} (use --force to drop and recreate)"
             );
             println!("[seed] connect with: psql -h {host} -p {port} -U <user> -d {database}");
+
             return Ok(());
         }
 
@@ -115,12 +116,14 @@ impl SeedArgs {
                 .unwrap_or_default();
 
         println!("[seed] done!");
+
         for line in counts.lines() {
             let line = line.trim();
             if !line.is_empty() {
                 println!("  {line}");
             }
         }
+
         println!("[seed] publication: {publication}");
         println!("[seed] connect with: psql -h {host} -p {port} -U <user> -d {database}");
 

@@ -51,6 +51,7 @@ impl<D> Inner<D> {
             if !should_retain {
                 notify.notify_one();
             }
+
             should_retain
         });
 
@@ -61,6 +62,7 @@ impl<D> Inner<D> {
             if !should_retain {
                 notify.notify_one();
             }
+
             should_retain
         });
     }
@@ -269,6 +271,7 @@ where
             let inner = self.inner.read().await;
             inner.wrapped_destination.clone()
         };
+
         let result = destination.startup().await;
 
         apply_response_fault(fault, result).await
@@ -298,6 +301,7 @@ where
         let mut inner = self.inner.write().await;
 
         let table_id = replicated_table_schema.id();
+
         if should_record_drop {
             inner.tables_dropped_for_copy.insert(table_id);
             inner.table_rows.remove(&table_id);
@@ -307,6 +311,7 @@ where
                     && has_table_id
                 {
                     truncate_event.truncated_tables.retain(|s| s.id() != table_id);
+
                     if truncate_event.truncated_tables.is_empty() {
                         return false;
                     }
@@ -355,6 +360,7 @@ where
         {
             let table_id = replicated_table_schema.id();
             let mut inner = self.inner.write().await;
+
             if should_record_table_rows {
                 inner.table_rows.entry(table_id).or_default().extend(table_rows);
             }
@@ -414,6 +420,7 @@ where
 
                 {
                     let mut inner = inner.write().await;
+
                     if should_record_events {
                         inner.events.extend(events);
                     }
@@ -442,6 +449,7 @@ where
         };
 
         let mut errors = Vec::new();
+
         if let Err(err) = destination.shutdown().await {
             errors.push(err);
         }

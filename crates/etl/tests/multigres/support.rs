@@ -38,6 +38,7 @@ impl Multigres {
         target_lsn: PgLsn,
     ) {
         let started_at = Instant::now();
+
         while !standby_slot_reached(slot_name, target_lsn).await {
             assert!(
                 started_at.elapsed() <= MULTIGRES_OPERATION_TIMEOUT,

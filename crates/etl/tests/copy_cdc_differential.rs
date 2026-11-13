@@ -145,6 +145,7 @@ fn row_strategy(columns: &[Column]) -> Vec<BoxedStrategy<ColumnValue>> {
         .iter()
         .map(|column| {
             let literal = (column.literal)();
+
             if column.array {
                 option::of(proptest::collection::vec(option::of(literal), 0..=4))
                     .prop_map(ColumnValue::Array)
@@ -242,6 +243,7 @@ impl Fixture {
             .unwrap();
 
         let mut column_schemas = vec![ColumnSchema::new("ord".to_owned(), Type::INT4, -1, 1, true)];
+
         for (index, column) in columns.iter().enumerate() {
             let ordinal_position = i32::try_from(index + 2).unwrap();
             column_schemas.push(ColumnSchema::new(
@@ -265,12 +267,14 @@ impl Fixture {
     ) -> Result<(Vec<Vec<u8>>, Vec<Vec<u8>>), tokio_postgres::Error> {
         client.batch_execute("truncate test.copy_cdc").await?;
         client.batch_execute("begin").await?;
+
         for (ord, row) in rows.iter().enumerate() {
             let ord = i32::try_from(ord).unwrap();
             let mut params: Vec<&(dyn ToSql + Sync)> = vec![&ord];
             params.extend(row.iter().map(ColumnValue::as_param));
             client.execute(&self.insert, &params).await?;
         }
+
         client.batch_execute("commit").await?;
 
         // Postgres sends one COPY data message per row.
@@ -278,6 +282,7 @@ impl Fixture {
             client.copy_out("copy (select * from test.copy_cdc order by ord) to stdout").await?;
         futures::pin_mut!(stream);
         let mut copy_rows = Vec::new();
+
         while let Some(chunk) = stream.next().await {
             copy_rows.push(chunk?.to_vec());
         }
@@ -321,6 +326,7 @@ fn decode_both_ways(
         .collect::<Result<Vec<_>, _>>()?;
 
     let mut cdc_decoded = Vec::new();
+
     for message in messages {
         let message = LogicalReplicationMessage::parse(&Bytes::from(message))
             .map_err(|err| TestCaseError::fail(format!("pgoutput parse failed: {err}")))?;

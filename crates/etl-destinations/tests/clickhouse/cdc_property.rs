@@ -184,6 +184,7 @@ impl<'a> HistoryBuilder<'a> {
         if self.open_ordinal.is_some() {
             return;
         }
+
         self.lsn += lsn_gap;
         self.tx_starts.push(self.events.len());
         self.tx_truncates.push(false);
@@ -233,6 +234,7 @@ impl<'a> HistoryBuilder<'a> {
         let present = self.present();
         let absent = self.absent();
         let gap = step.ordinal_gap;
+
         match &step.op {
             OpChoice::Insert { slot, row } => {
                 if absent.is_empty() {
@@ -247,10 +249,12 @@ impl<'a> HistoryBuilder<'a> {
                     self.insert(absent[slot % absent.len()], row.clone(), gap);
                 } else {
                     let key = present[slot % present.len()];
+
                     let new_key = match new_slot {
                         Some(new_slot) if !absent.is_empty() => absent[new_slot % absent.len()],
                         _ => key,
                     };
+
                     self.update(key, new_key, row.clone(), gap);
                 }
             }
@@ -286,6 +290,7 @@ impl<'a> HistoryBuilder<'a> {
                 self.log.push_str(" truncate;");
             }
         }
+
         if step.commit_after {
             self.commit();
         }
@@ -308,11 +313,13 @@ impl<'a> HistoryBuilder<'a> {
     fn update(&mut self, key: Key, new_key: Key, row: RowValues, gap: u64) {
         let tx_ordinal = self.next_ordinal(gap);
         let old = self.model.remove(&key).unwrap();
+
         let old_table_row = match self.identity {
             Identity::Full => Some(OldTableRow::Full(full_row(key, &old))),
             Identity::PrimaryKey if key != new_key => Some(OldTableRow::Key(key_row(key))),
             Identity::PrimaryKey => None,
         };
+
         self.events.push(Event::Update(UpdateEvent {
             commit_lsn: PgLsn::from(self.lsn),
             tx_ordinal,
@@ -328,10 +335,12 @@ impl<'a> HistoryBuilder<'a> {
     fn delete(&mut self, key: Key, gap: u64) {
         let tx_ordinal = self.next_ordinal(gap);
         let old = self.model.remove(&key).unwrap();
+
         let old_table_row = match self.identity {
             Identity::Full => OldTableRow::Full(full_row(key, &old)),
             Identity::PrimaryKey => OldTableRow::Key(key_row(key)),
         };
+
         self.events.push(Event::Delete(DeleteEvent {
             commit_lsn: PgLsn::from(self.lsn),
             tx_ordinal,
@@ -393,6 +402,7 @@ fn cdc_schema(table_id: u32, table: &str, identity: Identity) -> ReplicatedTable
             ColumnSchema::new("amount".to_owned(), Type::INT8, -1, 4, false),
         ],
     ));
+
     match identity {
         Identity::PrimaryKey => ReplicatedTableSchema::all(table_schema),
         Identity::Full => {
@@ -519,6 +529,7 @@ impl CdcHarness {
                  tenant, id"
             ),
         };
+
         self.database.query::<CurrentRow>(&sql).await
     }
 
@@ -541,9 +552,11 @@ impl CdcHarness {
             copy_rows.iter().cloned().collect(),
             case.lsn_base,
         );
+
         for step in &case.steps {
             builder.apply(step);
         }
+
         let history = builder.finish();
         let events = &history.events;
 
@@ -584,6 +597,7 @@ impl CdcHarness {
             copy_rows.iter().map(|(key, row)| full_row(*key, row)).collect();
         let split = case.copy_split % (copy_table_rows.len() + 1);
         let first = self.destination(case.max_bytes_per_insert).await;
+
         for batch in
             [&copy_table_rows[..split], &copy_table_rows[split..], &copy_table_rows[..split]]
         {
@@ -636,9 +650,11 @@ async fn write_batches(
         destination.write_events(events[start..cut].to_vec()).await?;
         start = cut;
     }
+
     if start < range.end {
         destination.write_events(events[start..range.end].to_vec()).await?;
     }
+
     Ok(())
 }
 
@@ -726,6 +742,7 @@ fn pg_identifier() -> impl Strategy<Value = String> {
             while name.len() > 63 {
                 name.pop();
             }
+
             name
         })
         .prop_filter("postgres identifiers are non-empty", |name| !name.is_empty())
@@ -792,6 +809,7 @@ async fn quoted_names_and_defaults_roundtrip(engine: ClickHouseEngine) {
                     ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false)
                         .with_primary_key(1),
                 ];
+
                 for (index, (name, default)) in columns.iter().enumerate() {
                     column_schemas.push(
                         ColumnSchema::new(
@@ -804,6 +822,7 @@ async fn quoted_names_and_defaults_roundtrip(engine: ClickHouseEngine) {
                         .with_default_expression(postgres_text_default(default)),
                     );
                 }
+
                 let table_schema = store
                     .store_table_schema(TableSchema::new(
                         TableId::new(table_id),
@@ -843,6 +862,7 @@ async fn quoted_names_and_defaults_roundtrip(engine: ClickHouseEngine) {
                         (view, "")
                     }
                 };
+
                 let rows = database
                     .query::<QuotedRow>(&format!(
                         "select id, array(* except (id{etl_columns})) as quoted_values from \
@@ -853,6 +873,7 @@ async fn quoted_names_and_defaults_roundtrip(engine: ClickHouseEngine) {
                 prop_assert_eq!(rows[0].id, 1);
                 prop_assert_eq!(&rows[0].quoted_values, &written);
                 prop_assert_eq!(rows[1].id, 2);
+
                 for ((name, default), stored) in columns.iter().zip(&rows[1].quoted_values) {
                     if stored != default {
                         return Err(TestCaseError::fail(format!(
@@ -860,6 +881,7 @@ async fn quoted_names_and_defaults_roundtrip(engine: ClickHouseEngine) {
                         )));
                     }
                 }
+
                 Ok(())
             })
         },

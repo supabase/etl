@@ -189,6 +189,7 @@ mod tests {
         for kind in [io::ErrorKind::ConnectionReset, io::ErrorKind::TimedOut] {
             assert_eq!(io::Error::from(kind).retryability(), Retryability::Retryable, "{kind}");
         }
+
         for kind in [io::ErrorKind::PermissionDenied, io::ErrorKind::InvalidInput] {
             assert_eq!(io::Error::from(kind).retryability(), Retryability::Permanent, "{kind}");
         }

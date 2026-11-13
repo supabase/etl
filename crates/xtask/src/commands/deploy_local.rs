@@ -110,19 +110,23 @@ impl DeployLocalArgs {
 
         validate_local_context(&config)?;
         require_command("kubectl", &["version", "--client"], "Kubectl is required")?;
+
         if !config.skip_build {
             require_command("docker", &["--version"], "Docker is required")?;
             require_command("rsync", &["--version"], "Rsync is required")?;
         }
+
         require_kubernetes_context(&config.context)?;
 
         let files = DeployFiles::prepare(&config)?;
+
         if !config.skip_build {
             build_image(&config, &files)?;
         }
 
         apply_configmaps(&config, &files)?;
         apply_workload(&config)?;
+
         if !config.skip_wait {
             wait_for_rollout(&config)?;
         }

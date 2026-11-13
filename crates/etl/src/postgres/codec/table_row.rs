@@ -103,6 +103,7 @@ fn parse_table_row_from_postgres_copy_str(
 
                 break;
             };
+
             let special_pos = pos + offset;
 
             // Escapes packed only a byte or two apart (or consecutive
@@ -118,6 +119,7 @@ fn parse_table_row_from_postgres_copy_str(
                 b'\t' => {
                     field_end = special_pos;
                     pos = special_pos + 1;
+
                     break;
                 }
                 // Row terminator - end current field and mark row complete.
@@ -125,6 +127,7 @@ fn parse_table_row_from_postgres_copy_str(
                     field_end = special_pos;
                     pos = special_pos + 1;
                     row_terminated = true;
+
                     break;
                 }
                 // Escape character - decode the following character and keep scanning this same
@@ -153,6 +156,7 @@ fn parse_table_row_from_postgres_copy_str(
                                 // Any other byte strips the backslash and keeps the byte.
                                 other => field_buffer.push(other as char),
                             }
+
                             pos += 1;
                         }
                         // A non-ASCII byte following a backslash. Postgres never actually emits
@@ -196,6 +200,7 @@ fn parse_table_row_from_postgres_copy_str(
                 )
             );
         };
+
         column_index += 1;
 
         let raw_field_value = &row_str[field_start..field_end];
@@ -478,11 +483,14 @@ mod tests {
 
         for i in 0i32..50 {
             column_schemas.push(test_column(&format!("col{i}"), Type::INT4, i + 1, false, false));
+
             if i > 0 {
                 expected_row.push('\t');
             }
+
             expected_row.push_str(&i.to_string());
         }
+
         expected_row.push('\n');
 
         let result =
@@ -490,6 +498,7 @@ mod tests {
                 .unwrap();
 
         assert_eq!(result.values().len(), 50);
+
         for i in 0..50 {
             assert_eq!(result.values()[i], Cell::I32(i as i32));
         }

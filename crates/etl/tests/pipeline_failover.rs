@@ -61,6 +61,7 @@ async fn synchronized_failover_slot_is_ready(
     let Ok((client, _)) = try_connect_to_pg_database(replica_config).await else {
         return Ok(false);
     };
+
     let row = client
         .query_opt(
             "select failover, synced, temporary, invalidation_reason from pg_replication_slots \

@@ -147,6 +147,7 @@ const NAME_BANDWIDTH: &str = "bandwidth";
 impl Scenario {
     fn name(&self, labels: &Labels) -> String {
         let prefix = app_name_from_labels(labels);
+
         match self {
             Self::PacketLoss { .. } => format!("{prefix}-{NAME_PACKET_LOSS}"),
             Self::Partition => format!("{prefix}-{NAME_PARTITION}"),
@@ -165,14 +166,17 @@ impl Scenario {
         direction: &str,
     ) -> Result<()> {
         let chaos_name = self.name(&labels);
+
         match self {
             Self::PacketLoss { loss, target_url, target_port, target_pod, target_svc } => {
                 let loss = loss
                     .ok_or_else(|| anyhow::anyhow!("<loss> is required when not using --delete"))?;
+
                 let effective_url = match target_svc {
                     Some(svc) => Some(client.resolve_svc_clusterip(svc).await?),
                     None => target_url.clone(),
                 };
+
                 let target = resolve_target(effective_url, *target_port, target_pod.clone())?;
                 packet_loss(client, labels, &chaos_name, loss, target, direction).await?;
             }
@@ -183,10 +187,12 @@ impl Scenario {
                 let latency_ms = latency_ms.ok_or_else(|| {
                     anyhow::anyhow!("<latency_ms> is required when not using --delete")
                 })?;
+
                 let effective_url = match target_svc {
                     Some(svc) => Some(client.resolve_svc_clusterip(svc).await?),
                     None => target_url.clone(),
                 };
+
                 let target = resolve_target(effective_url, *target_port, target_pod.clone())?;
                 latency(client, labels, &chaos_name, target, latency_ms, direction).await?;
             }
@@ -211,10 +217,12 @@ impl Scenario {
                 let rate = rate.as_deref().ok_or_else(|| {
                     anyhow::anyhow!("<rate> is required when not using --delete (e.g. \"1mbps\")")
                 })?;
+
                 let effective_url = match target_svc {
                     Some(svc) => Some(client.resolve_svc_clusterip(svc).await?),
                     None => target_url.clone(),
                 };
+
                 let target = resolve_target(effective_url, *target_port, target_pod.clone())?;
                 bandwidth(client, labels, &chaos_name, target, rate, direction).await?;
             }
@@ -222,17 +230,20 @@ impl Scenario {
                 unreachable!("install is handled before Scenario::run")
             }
         }
+
         Ok(())
     }
 
     pub(crate) async fn delete(&self, client: &ChaosClient, labels: &Labels) -> Result<()> {
         let name = self.name(labels);
+
         match self {
             // Flapping creates one resource per cycle — clean them all up.
             Self::ConnectionFlapping { flaps, .. } => {
                 for i in 0..*flaps {
                     let _ = client.delete(&format!("{name}-{i}")).await;
                 }
+
                 Ok(())
             }
             Self::Install { .. } => {
@@ -257,6 +268,7 @@ fn check_netem_direction(direction: &str, target: &Target) -> Result<()> {
     if direction != "from" && direction != "both" {
         return Ok(());
     }
+
     match target {
         Target::Pods(_) => Ok(()),
         Target::Url(_) | Target::Port(_) => anyhow::bail!(
@@ -325,6 +337,7 @@ pub(crate) async fn connection_flapping(
     recovery_secs: u64,
 ) -> Result<()> {
     let last = flaps.saturating_sub(1);
+
     for i in 0..flaps {
         let flap_name = format!("{chaos_name}-{i}");
         let chaos = client.drop_to(&flap_name, labels.clone(), Target::All, 100, "to");
@@ -335,6 +348,7 @@ pub(crate) async fn connection_flapping(
         println!("Flap {i}/{last}: recovered, waiting {recovery_secs}s...");
         tokio::time::sleep(Duration::from_secs(recovery_secs)).await;
     }
+
     Ok(())
 }
 

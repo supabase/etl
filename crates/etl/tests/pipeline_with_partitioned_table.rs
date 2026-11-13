@@ -57,6 +57,7 @@ fn assert_table_row_counts(
     expected_counts: &[(TableId, usize)],
 ) {
     assert_eq!(table_rows.len(), expected_counts.len());
+
     for (table_id, expected_count) in expected_counts {
         assert_eq!(table_rows.get(table_id).map_or(0, Vec::len), *expected_count);
     }
@@ -121,6 +122,7 @@ async fn assert_selective_partition_initial_copy_case(
     );
 
     let mut sync_complete_notifies = Vec::new();
+
     for (table_id, _) in &expected_copy_counts {
         sync_complete_notifies.push(state_store.notify_on_table_sync_complete(*table_id).await);
     }
@@ -153,6 +155,7 @@ async fn assert_selective_partition_initial_copy_case(
 
     let table_states = state_store.get_table_states().await;
     assert_eq!(table_states.len(), expected_copy_counts.len());
+
     for (table_id, _) in &expected_copy_counts {
         assert!(table_states.contains_key(table_id));
     }
@@ -162,6 +165,7 @@ async fn assert_selective_partition_initial_copy_case(
 
     let events = destination.get_events().await;
     let grouped_events = group_events_by_type_and_table_id(&events);
+
     for (table_id, expected_count) in expected_cdc_counts {
         let inserts =
             grouped_events.get(&(EventType::Insert, table_id)).cloned().unwrap_or_default();
@@ -196,6 +200,7 @@ async fn assert_nested_partition_pipeline_case(
         PublishedPartitionTarget::Middle => hierarchy.p_2026_table_name.clone(),
         PublishedPartitionTarget::Leaf => partition_table_name(&hierarchy.p_2026_table_name, "01"),
     };
+
     let publication_name = format!("pub_{test_name}");
     database
         .create_publication_with_config(
@@ -220,6 +225,7 @@ async fn assert_nested_partition_pipeline_case(
         }
         (PublishedPartitionTarget::Leaf, _) => vec![(hierarchy.p_2026_01_table_id, 1)],
     };
+
     let expected_cdc_counts = expected_copy_counts.clone();
 
     let state_store = NotifyingStore::new();
@@ -235,6 +241,7 @@ async fn assert_nested_partition_pipeline_case(
     );
 
     let mut sync_complete_notifies = Vec::new();
+
     for (table_id, _) in &expected_copy_counts {
         sync_complete_notifies.push(state_store.notify_on_table_sync_complete(*table_id).await);
     }
@@ -247,6 +254,7 @@ async fn assert_nested_partition_pipeline_case(
 
     let table_states = state_store.get_table_states().await;
     assert_eq!(table_states.len(), expected_copy_counts.len());
+
     for (table_id, _) in &expected_copy_counts {
         assert!(table_states.contains_key(table_id));
     }
@@ -273,6 +281,7 @@ async fn assert_nested_partition_pipeline_case(
         PublishedPartitionTarget::Middle => "('new_2026_01', 2026, 1), ('new_2026_02', 2026, 2)",
         PublishedPartitionTarget::Leaf => "('new_2026_01', 2026, 1)",
     };
+
     database
         .run_sql(&format!(
             "insert into {} (data, partition_year, partition_month) values {cdc_insert_values}",
@@ -287,6 +296,7 @@ async fn assert_nested_partition_pipeline_case(
 
     let events = destination.get_events().await;
     let grouped = group_events_by_type_and_table_id(&events);
+
     for (table_id, expected_count) in expected_cdc_counts {
         let inserts = grouped.get(&(EventType::Insert, table_id)).cloned().unwrap_or_default();
         assert_eq!(inserts.len(), expected_count);
@@ -336,6 +346,7 @@ async fn assert_nested_partition_pipeline_row_filter_case(
             vec![(hierarchy.p_2026_01_table_id, 1)],
         ),
     };
+
     let publication_name = format!("pub_{test_name}");
     database
         .run_sql(&format!(
@@ -362,11 +373,13 @@ async fn assert_nested_partition_pipeline_row_filter_case(
     .build();
 
     let mut sync_complete_notifies = Vec::new();
+
     for (table_id, _) in &expected_copy_counts {
         sync_complete_notifies.push(state_store.notify_on_table_sync_complete(*table_id).await);
     }
 
     pipeline.start().await.unwrap();
+
     for notify in &sync_complete_notifies {
         notify.notified().await;
     }
@@ -383,6 +396,7 @@ async fn assert_partition_identity_row_filter(publish_via_partition_root: bool) 
 
     let database = spawn_source_database().await;
     let client = database.client.as_ref().unwrap();
+
     if below_version!(database.server_version(), POSTGRES_15) {
         return;
     }
