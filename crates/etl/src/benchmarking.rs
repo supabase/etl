@@ -5,7 +5,6 @@
 //! allocations without a Postgres connection.
 
 use bytes::Bytes;
-use metrics::counter;
 use postgres_replication::protocol::LogicalReplicationMessage;
 use tokio_postgres::types::{PgLsn, Type};
 
@@ -14,14 +13,12 @@ use crate::{
     data::{Cell, TableRow},
     error::{ErrorKind, EtlResult},
     event::Event,
-    observability::{
-        CDC_REPLICATION_PATH, ETL_EVENTS_RECEIVED_TOTAL, ETL_REPLICATION_MESSAGES_TOTAL,
-        REPLICATION_PATH_LABEL, WORKER_TYPE_LABEL,
-    },
     postgres::codec,
-    replication::WorkerType,
+    replication::{CdcIngestionMetrics, WorkerType},
     schema::{ColumnSchema, ReplicatedTableSchema},
-    source_payload_metadata::{StreamingPayloadMetadata, TableCopyPayloadMetadata},
+    source_payload_metadata::{
+        StreamingPayloadMetadata, TableCopyIngestionMetrics, TableCopyPayloadMetadata,
+    },
 };
 
 /// Parses one Postgres text value as `typ`.
@@ -50,9 +47,14 @@ pub fn parse_copy_rows<'a>(
     Ok(())
 }
 
-/// Records the row-size observation the copy path emits for one COPY row.
-pub fn record_copy_row_received(copy_bytes: u64) {
-    TableCopyPayloadMetadata::new(copy_bytes).record_row_size();
+/// Records the row-size observation the copy path emits for each COPY row.
+///
+/// Like one table-copy stream, the rows share one set of metric handles.
+pub fn record_copy_rows_received(copy_row_bytes: &[u64]) {
+    let mut ingestion_metrics = TableCopyIngestionMetrics::new();
+    for copy_bytes in copy_row_bytes {
+        ingestion_metrics.record_row_size(TableCopyPayloadMetadata::new(*copy_bytes));
+    }
 }
 
 /// Parses one pgoutput insert, update, or delete message and decodes it into
@@ -93,24 +95,18 @@ pub fn decode_row_change(
     }
 }
 
-/// Records the source metrics the apply loop emits for one pgoutput insert
-/// message carrying `insert_bytes` of tuple data.
+/// Records the source metrics the apply loop emits for each pgoutput insert
+/// message, given the tuple-data bytes each message carries.
 ///
 /// This mirrors the per-message recording in the apply loop: the replication
 /// message counter, the received event counter, and the payload byte and
-/// row-size observations.
-pub fn record_cdc_insert_received(insert_bytes: u64) {
-    let worker_type = WorkerType::Apply.as_str();
-
-    counter!(ETL_REPLICATION_MESSAGES_TOTAL, WORKER_TYPE_LABEL => worker_type).increment(1);
-    counter!(
-        ETL_EVENTS_RECEIVED_TOTAL,
-        WORKER_TYPE_LABEL => worker_type,
-        REPLICATION_PATH_LABEL => CDC_REPLICATION_PATH,
-    )
-    .increment(1);
-
-    let streaming_payload_metadata = StreamingPayloadMetadata::insert(insert_bytes);
-    streaming_payload_metadata.record_received();
-    streaming_payload_metadata.record_row_size();
+/// row-size observations. Like one apply loop, the messages share one set of
+/// metric handles.
+pub fn record_cdc_inserts_received(insert_message_bytes: &[u64]) {
+    let mut ingestion_metrics = CdcIngestionMetrics::new(WorkerType::Apply);
+    for insert_bytes in insert_message_bytes {
+        ingestion_metrics.record_replication_message();
+        ingestion_metrics.record_event_received();
+        ingestion_metrics.record_row_event(StreamingPayloadMetadata::insert(*insert_bytes));
+    }
 }

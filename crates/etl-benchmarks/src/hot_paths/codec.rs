@@ -8,7 +8,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use etl::{
     benchmarking::{
-        decode_row_change, parse_copy_rows, record_cdc_insert_received, record_copy_row_received,
+        decode_row_change, parse_copy_rows, record_cdc_inserts_received, record_copy_rows_received,
     },
     data::TableRow,
     event::Event,
@@ -177,8 +177,9 @@ impl Workload for RowChangeWorkload {
 struct SourceMetricsWorkload {
     /// Payload bytes of each row.
     payload_bytes: Vec<u64>,
-    /// Records the metrics for one row.
-    record: fn(u64),
+    /// Records the metrics for every row with one set of metric handles, as one
+    /// copy stream or one apply loop does.
+    record: fn(&[u64]),
     /// Growth of the series the recording must reach.
     growth: SeriesGrowth,
 }
@@ -189,9 +190,7 @@ impl Workload for SourceMetricsWorkload {
     }
 
     fn run(&mut self) {
-        for payload_bytes in &self.payload_bytes {
-            (self.record)(*payload_bytes);
-        }
+        (self.record)(&self.payload_bytes);
     }
 
     fn checksum(&mut self) -> u64 {
@@ -359,7 +358,7 @@ fn prepare_copy_row_metrics(mut rng: Rng, units: usize) -> Box<dyn Workload> {
 
     Box::new(SourceMetricsWorkload {
         payload_bytes,
-        record: record_copy_row_received,
+        record: record_copy_rows_received,
         growth: SeriesGrowth::new(COPY_ROW_PROBES),
     })
 }
@@ -385,7 +384,7 @@ fn prepare_cdc_insert_metrics(mut rng: Rng, units: usize) -> Box<dyn Workload> {
 
     Box::new(SourceMetricsWorkload {
         payload_bytes,
-        record: record_cdc_insert_received,
+        record: record_cdc_inserts_received,
         growth: SeriesGrowth::new(CDC_INSERT_PROBES),
     })
 }

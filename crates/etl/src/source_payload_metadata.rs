@@ -10,7 +10,7 @@
 //! zero-byte row event remains an observation instead of being treated as
 //! absent.
 
-use metrics::{counter, histogram};
+use metrics::{Counter, Histogram, counter, histogram};
 
 use crate::observability::{
     ETL_BYTES_PROCESSED_TOTAL, ETL_BYTES_RECEIVED_TOTAL, ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL,
@@ -22,6 +22,60 @@ use crate::observability::{
 // Prometheus metrics use the current vocabulary.
 const LEGACY_EGRESS_COPY_PROCESSING_TYPE: &str = "table_copy";
 const LEGACY_EGRESS_CDC_PROCESSING_TYPE: &str = "streaming";
+
+/// Event-type label value for initial-copy rows.
+const COPY_EVENT_TYPE: &str = "copy";
+/// Event-type label value for streamed inserts.
+const INSERT_EVENT_TYPE: &str = "insert";
+/// Event-type label value for streamed updates.
+const UPDATE_EVENT_TYPE: &str = "update";
+/// Event-type label value for streamed deletes.
+const DELETE_EVENT_TYPE: &str = "delete";
+
+/// Ingestion series for one source event type, registered on first use.
+///
+/// Resolving a labeled series costs an allocation, a key hash, and a registry
+/// lookup: about 1,000 instructions, which was a third of the CPU spent on
+/// each streamed insert. These handles resolve each series once.
+///
+/// A handle is registered on its first observation, so a series is exported
+/// only once it has data. Handles live in their owner and not in a static, so
+/// they bind to the recorder that is current when the owner first records,
+/// which keeps tests with a local recorder isolated.
+#[derive(Debug)]
+struct EventTypeIngestionMetrics {
+    /// Event-type label value of both series.
+    event_type: &'static str,
+    /// Source bytes received.
+    received_bytes: Option<Counter>,
+    /// Size distribution of individual rows.
+    row_size: Option<Histogram>,
+}
+
+impl EventTypeIngestionMetrics {
+    /// Creates unregistered handles for `event_type`.
+    fn new(event_type: &'static str) -> Self {
+        Self { event_type, received_bytes: None, row_size: None }
+    }
+
+    /// Counts source bytes received from PostgreSQL.
+    fn record_received(&mut self, bytes: u64) {
+        self.received_bytes
+            .get_or_insert_with(
+                || counter!(ETL_BYTES_RECEIVED_TOTAL, EVENT_TYPE_LABEL => self.event_type),
+            )
+            .increment(bytes);
+    }
+
+    /// Observes the size of one row.
+    fn record_row_size(&mut self, bytes: u64) {
+        self.row_size
+            .get_or_insert_with(
+                || histogram!(ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL => self.event_type),
+            )
+            .record(bytes as f64);
+    }
+}
 
 /// Metadata for PostgreSQL COPY row-body bytes.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -38,21 +92,14 @@ impl TableCopyPayloadMetadata {
 
     /// Records these source bytes as received from PostgreSQL.
     pub(crate) fn record_received(self) {
-        record_received_bytes([("copy", self.copy_bytes)]);
-    }
-
-    /// Records the row-size distribution for an individual COPY row.
-    ///
-    /// This method must only be called before merging, when this metadata
-    /// represents one individual COPY row.
-    pub(crate) fn record_row_size(self) {
-        record_row_size_metrics([("copy", self.copy_bytes)]);
+        counter!(ETL_BYTES_RECEIVED_TOTAL, EVENT_TYPE_LABEL => COPY_EVENT_TYPE)
+            .increment(self.copy_bytes);
     }
 
     /// Records these source bytes after a successful destination write result.
     pub(crate) fn record_processed(self, destination_type: &'static str) {
         record_processed_metrics(
-            [("copy", self.copy_bytes)],
+            [(COPY_EVENT_TYPE, self.copy_bytes)],
             destination_type,
             LEGACY_EGRESS_COPY_PROCESSING_TYPE,
             self.copy_bytes,
@@ -62,6 +109,28 @@ impl TableCopyPayloadMetadata {
     /// Merges compatible source payload metadata into this metadata.
     pub(crate) fn merge(&mut self, other: Self) {
         self.copy_bytes = self.copy_bytes.saturating_add(other.copy_bytes);
+    }
+}
+
+/// Row-size series for one table-copy stream, registered on first use.
+#[derive(Debug)]
+pub(crate) struct TableCopyIngestionMetrics {
+    /// Series labeled as initial-copy rows.
+    copy: EventTypeIngestionMetrics,
+}
+
+impl TableCopyIngestionMetrics {
+    /// Creates unregistered handles.
+    pub(crate) fn new() -> Self {
+        Self { copy: EventTypeIngestionMetrics::new(COPY_EVENT_TYPE) }
+    }
+
+    /// Records the row-size distribution for an individual COPY row.
+    ///
+    /// This method must only be called before merging, when `metadata`
+    /// represents one individual COPY row.
+    pub(crate) fn record_row_size(&mut self, metadata: TableCopyPayloadMetadata) {
+        self.copy.record_row_size(metadata.copy_bytes);
     }
 }
 
@@ -98,9 +167,9 @@ impl StreamingPayloadMetadata {
     /// Returns represented operation labels and byte counts.
     fn by_event_type(self) -> impl Iterator<Item = (&'static str, u64)> {
         [
-            ("insert", self.insert_bytes),
-            ("update", self.update_bytes),
-            ("delete", self.delete_bytes),
+            (INSERT_EVENT_TYPE, self.insert_bytes),
+            (UPDATE_EVENT_TYPE, self.update_bytes),
+            (DELETE_EVENT_TYPE, self.delete_bytes),
         ]
         .into_iter()
         .filter_map(|(event_type, bytes)| bytes.map(|bytes| (event_type, bytes)))
@@ -109,19 +178,6 @@ impl StreamingPayloadMetadata {
     /// Returns the total bytes represented by this metadata.
     fn total_bytes(self) -> u64 {
         self.by_event_type().fold(0, |total, (_, bytes)| total.saturating_add(bytes))
-    }
-
-    /// Records represented source bytes as received from PostgreSQL.
-    pub(crate) fn record_received(self) {
-        record_received_bytes(self.by_event_type());
-    }
-
-    /// Records the row-size distribution for an individual streaming event.
-    ///
-    /// This method must only be called before merging, when this metadata
-    /// represents one individual logical-replication row event.
-    pub(crate) fn record_row_size(self) {
-        record_row_size_metrics(self.by_event_type());
     }
 
     /// Records represented source bytes after a successful destination write.
@@ -142,6 +198,59 @@ impl StreamingPayloadMetadata {
     }
 }
 
+/// Ingestion series for one apply loop's row events, registered on first use.
+#[derive(Debug)]
+pub(crate) struct StreamingIngestionMetrics {
+    /// Series labeled as inserts.
+    insert: EventTypeIngestionMetrics,
+    /// Series labeled as updates.
+    update: EventTypeIngestionMetrics,
+    /// Series labeled as deletes.
+    delete: EventTypeIngestionMetrics,
+}
+
+impl StreamingIngestionMetrics {
+    /// Creates unregistered handles.
+    pub(crate) fn new() -> Self {
+        Self {
+            insert: EventTypeIngestionMetrics::new(INSERT_EVENT_TYPE),
+            update: EventTypeIngestionMetrics::new(UPDATE_EVENT_TYPE),
+            delete: EventTypeIngestionMetrics::new(DELETE_EVENT_TYPE),
+        }
+    }
+
+    /// Records represented source bytes as received from PostgreSQL.
+    pub(crate) fn record_received(&mut self, metadata: StreamingPayloadMetadata) {
+        for (metrics, bytes) in self.represented(metadata) {
+            metrics.record_received(bytes);
+        }
+    }
+
+    /// Records the row-size distribution for an individual streaming event.
+    ///
+    /// This method must only be called before merging, when `metadata`
+    /// represents one individual logical-replication row event.
+    pub(crate) fn record_row_size(&mut self, metadata: StreamingPayloadMetadata) {
+        for (metrics, bytes) in self.represented(metadata) {
+            metrics.record_row_size(bytes);
+        }
+    }
+
+    /// Returns the handles and byte count of each represented operation.
+    fn represented(
+        &mut self,
+        metadata: StreamingPayloadMetadata,
+    ) -> impl Iterator<Item = (&mut EventTypeIngestionMetrics, u64)> {
+        [
+            (&mut self.insert, metadata.insert_bytes),
+            (&mut self.update, metadata.update_bytes),
+            (&mut self.delete, metadata.delete_bytes),
+        ]
+        .into_iter()
+        .filter_map(|(metrics, bytes)| bytes.map(|bytes| (metrics, bytes)))
+    }
+}
+
 /// Merges an optional byte count while preserving whether it is represented.
 fn merge_optional_bytes(current: &mut Option<u64>, other: Option<u64>) {
     let Some(other) = other else {
@@ -151,20 +260,6 @@ fn merge_optional_bytes(current: &mut Option<u64>, other: Option<u64>) {
     match current {
         Some(current) => *current = current.saturating_add(other),
         None => *current = Some(other),
-    }
-}
-
-/// Records individual row-size observations at ingestion.
-fn record_row_size_metrics(event_bytes: impl IntoIterator<Item = (&'static str, u64)>) {
-    for (event_type, bytes) in event_bytes {
-        histogram!(ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL => event_type).record(bytes as f64);
-    }
-}
-
-/// Records represented source-payload byte counters at ingestion.
-fn record_received_bytes(event_bytes: impl IntoIterator<Item = (&'static str, u64)>) {
-    for (event_type, bytes) in event_bytes {
-        counter!(ETL_BYTES_RECEIVED_TOTAL, EVENT_TYPE_LABEL => event_type).increment(bytes);
     }
 }
 
@@ -351,8 +446,9 @@ mod tests {
         with_local_recorder(&recorder, || {
             let first_metadata = TableCopyPayloadMetadata::new(3);
             let second_metadata = TableCopyPayloadMetadata::new(5);
-            first_metadata.record_row_size();
-            second_metadata.record_row_size();
+            let mut ingestion_metrics = TableCopyIngestionMetrics::new();
+            ingestion_metrics.record_row_size(first_metadata);
+            ingestion_metrics.record_row_size(second_metadata);
 
             let mut table_copy_batch_metadata = TableCopyPayloadMetadata::default();
             table_copy_batch_metadata.merge(first_metadata);
@@ -398,10 +494,11 @@ mod tests {
         let recorder = CapturingRecorder::default();
 
         with_local_recorder(&recorder, || {
+            let mut ingestion_metrics = StreamingIngestionMetrics::new();
             let insert_metadata = StreamingPayloadMetadata::insert(3);
-            insert_metadata.record_received();
+            ingestion_metrics.record_received(insert_metadata);
             let update_metadata = StreamingPayloadMetadata::update(5);
-            update_metadata.record_received();
+            ingestion_metrics.record_received(update_metadata);
 
             let mut streaming_payload_metadata = insert_metadata;
             streaming_payload_metadata.merge(update_metadata);
@@ -440,9 +537,9 @@ mod tests {
         let recorder = CapturingRecorder::default();
 
         with_local_recorder(&recorder, || {
-            let streaming_metadata = StreamingPayloadMetadata::insert(0);
-            streaming_metadata.record_row_size();
-            StreamingPayloadMetadata::default().record_row_size();
+            let mut ingestion_metrics = StreamingIngestionMetrics::new();
+            ingestion_metrics.record_row_size(StreamingPayloadMetadata::insert(0));
+            ingestion_metrics.record_row_size(StreamingPayloadMetadata::default());
         });
 
         assert_eq!(

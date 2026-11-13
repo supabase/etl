@@ -11,6 +11,8 @@ pub(crate) mod state;
 mod table_sync;
 mod worker_type;
 
+#[cfg(feature = "benchmarking")]
+pub(crate) use apply::CdcIngestionMetrics;
 pub(crate) use apply::{
     ApplyLoop, ApplyLoopResult, ApplyWorkerContext, TableSyncWorkerContext, WorkerContext,
 };
