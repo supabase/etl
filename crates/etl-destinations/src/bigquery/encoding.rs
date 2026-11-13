@@ -1,4 +1,7 @@
-use std::fmt::{Display, Write};
+use std::{
+    cell::RefCell,
+    fmt::{Display, Write},
+};
 
 use etl::{
     data::{ArrayCell, Cell, TableRow, Timestamp, format_date, format_timestamp},
@@ -9,57 +12,52 @@ use prost::bytes;
 
 use crate::retry::classified_error_with_detail;
 
-/// Estimated encoded bytes of a field key plus a varint or length prefix.
-const FIELD_OVERHEAD_ESTIMATE: usize = 4;
-/// Estimated encoded bytes of a scalar that is a varint or fixed-width value.
-const SCALAR_FIELD_ESTIMATE: usize = 12;
-/// Estimated encoded bytes of a cell formatted as short text, such as a
-/// numeric, a civil time, or a UUID.
-const FORMATTED_FIELD_ESTIMATE: usize = 40;
-/// Estimated encoded bytes of a cell whose size is unknown before formatting,
-/// such as JSON or an array.
-const UNSIZED_FIELD_ESTIMATE: usize = 64;
-/// Initial capacity of the text buffer that a row's formatted cells share.
-const FORMATTED_TEXT_CAPACITY: usize = 64;
-
-/// Returns a cheap estimate of a cell's encoded size.
+/// Largest scratch buffer a thread keeps between rows.
 ///
-/// The estimate only sizes the row buffer up front. Growing that buffer from
-/// empty cost five to six reallocations per row and left up to twice the
-/// encoded size allocated in every buffered row; a low estimate costs at most
-/// one more doubling.
-fn encoded_len_estimate(cell: &Cell) -> usize {
-    match cell {
-        Cell::Null => 0,
-        Cell::Bool(_)
-        | Cell::I16(_)
-        | Cell::I32(_)
-        | Cell::U32(_)
-        | Cell::I64(_)
-        | Cell::F32(_)
-        | Cell::F64(_)
-        | Cell::TimestampTz(_) => SCALAR_FIELD_ESTIMATE,
-        Cell::String(value) => FIELD_OVERHEAD_ESTIMATE + value.len(),
-        Cell::Bytes(value) => FIELD_OVERHEAD_ESTIMATE + value.len(),
-        Cell::Numeric(_)
-        | Cell::Date(_)
-        | Cell::Time(_)
-        | Cell::TimeTz(_)
-        | Cell::Timestamp(_)
-        | Cell::Uuid(_) => FORMATTED_FIELD_ESTIMATE,
-        Cell::Json(_) | Cell::Array(_) => UNSIZED_FIELD_ESTIMATE,
+/// A row or text value above this size is rare enough to allocate again, which
+/// bounds what each runtime thread retains.
+const MAX_RETAINED_SCRATCH_BYTES: usize = 1024 * 1024;
+
+/// Buffers that every row encoded on a thread reuses.
+///
+/// Encoding a row into an empty `Vec` cost five to six reallocations, plus a
+/// `String` per formatted cell, and left up to twice the encoded size
+/// allocated in every buffered row. Encoding into these buffers and copying
+/// the result out costs one allocation of exactly the encoded size.
+struct EncodeScratch {
+    /// Encoding of the row in progress.
+    row: Vec<u8>,
+    /// Display text of the formatted cell in progress.
+    text: String,
+}
+
+impl EncodeScratch {
+    /// Drops buffers that one oversized row grew past the retention limit.
+    fn trim(&mut self) {
+        if self.row.capacity() > MAX_RETAINED_SCRATCH_BYTES {
+            self.row = Vec::new();
+        }
+        if self.text.capacity() > MAX_RETAINED_SCRATCH_BYTES {
+            self.text = String::new();
+        }
     }
+}
+
+thread_local! {
+    /// Scratch buffers of the current thread.
+    ///
+    /// Rows are encoded synchronously, so a borrow never spans an await or
+    /// another row.
+    static ENCODE_SCRATCH: RefCell<EncodeScratch> =
+        const { RefCell::new(EncodeScratch { row: Vec::new(), text: String::new() }) };
 }
 
 /// Encodes a value's display text as a string field.
 ///
-/// The value is formatted into `text`, which one row's cells share, instead
-/// of a new `String` per cell.
+/// The value is formatted into `text`, which is reused, instead of a new
+/// `String` per cell.
 fn encode_display(value: impl Display, tag: u32, text: &mut String, buf: &mut impl bytes::BufMut) {
     text.clear();
-    if text.capacity() == 0 {
-        text.reserve(FORMATTED_TEXT_CAPACITY);
-    }
     write!(text, "{value}").expect("formatting into a String cannot fail");
 
     prost::encoding::string::encode(tag, text, buf);
@@ -94,23 +92,26 @@ pub(super) struct BigQueryTableRow(Vec<u8>);
 impl BigQueryTableRow {
     /// Encodes tagged cells into a row, preserving sparse field positions.
     pub(super) fn try_from_tagged_cells(
-        tagged_cells: Vec<(usize, Cell)>,
+        tagged_cells: impl IntoIterator<Item = (usize, Cell)>,
     ) -> Result<Self, EtlError> {
-        let capacity = tagged_cells.iter().map(|(_, cell)| encoded_len_estimate(cell)).sum();
+        ENCODE_SCRATCH.with_borrow_mut(|scratch| {
+            let encoded = Self::encode(tagged_cells, scratch);
+            scratch.trim();
 
-        Self::encode(capacity, tagged_cells.into_iter())
+            encoded
+        })
     }
 
-    /// Encodes tagged cells into a buffer that starts with `capacity` bytes.
+    /// Encodes tagged cells into `scratch` and copies out the exact bytes.
     fn encode(
-        capacity: usize,
-        tagged_cells: impl Iterator<Item = (usize, Cell)>,
+        tagged_cells: impl IntoIterator<Item = (usize, Cell)>,
+        scratch: &mut EncodeScratch,
     ) -> Result<Self, EtlError> {
-        let mut buf = Vec::with_capacity(capacity);
-        let mut text = String::new();
+        let EncodeScratch { row, text } = scratch;
+        row.clear();
 
         for (index, cell) in tagged_cells {
-            cell_encode_prost(&cell, index as u32, &mut text, &mut buf).map_err(|err| {
+            cell_encode_prost(&cell, index as u32, text, row).map_err(|err| {
                 classified_error_with_detail(
                     err.kind(),
                     "Cell encoding failed for BigQuery",
@@ -120,7 +121,7 @@ impl BigQueryTableRow {
             })?;
         }
 
-        Ok(BigQueryTableRow(buf))
+        Ok(BigQueryTableRow(row.as_slice().to_vec()))
     }
 }
 
@@ -132,10 +133,7 @@ impl TryFrom<TableRow> for BigQueryTableRow {
     /// Returns an error only when the Protocol Buffer row cannot represent a
     /// source value, such as an array containing a NULL element.
     fn try_from(value: TableRow) -> Result<Self, Self::Error> {
-        let capacity = value.values().iter().map(encoded_len_estimate).sum();
-
-        BigQueryTableRow::encode(
-            capacity,
+        BigQueryTableRow::try_from_tagged_cells(
             value.into_values().into_iter().enumerate().map(|(index, cell)| (index + 1, cell)),
         )
     }
