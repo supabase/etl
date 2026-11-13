@@ -19,8 +19,8 @@ use crate::common::{
     BenchDestination, DEFAULT_STREAMING_PIPELINE_ID, DestinationArgs, DestinationStatsSnapshot,
     DestinationType, LogTarget, PgConnectionArgs, PipelineTuningArgs, bytes_to_mib,
     cleanup_destination, cleanup_replication_slots, duration_millis, finish_run, format_decimal,
-    format_duration_ms, format_integer, mib_per_second, per_second, pipeline_config,
-    run_etl_migrations, write_report,
+    format_duration_ms, format_integer, mib_per_second, micros_per_unit, per_second,
+    pipeline_config, process_cpu_time, process_cpu_time_since, run_etl_migrations, write_report,
 };
 
 /// Command-line arguments for the table-streaming benchmark.
@@ -126,6 +126,12 @@ struct TableStreamingReport {
     end_to_end_estimated_mib_per_second: f64,
     end_to_end_with_shutdown_estimated_mib_per_second: f64,
     drain_estimated_mib_per_second: f64,
+    /// CPU time of this process from workload start until drain finished.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end_to_end_cpu_ms: Option<u128>,
+    /// That CPU time per CDC event, in microseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end_to_end_cpu_micros_per_event: Option<f64>,
     max_table_sync_workers: u16,
     max_copy_connections_per_table: u16,
     batch_max_fill_ms: u64,
@@ -146,6 +152,8 @@ struct StreamingPhaseTimings {
     drain_duration: Duration,
     /// Workload start until drain finished.
     end_to_end_duration: Duration,
+    /// CPU time of this process from workload start until drain finished.
+    end_to_end_cpu: Option<Duration>,
     /// Time to shut down the pipeline.
     shutdown_duration: Duration,
     /// Workload start until shutdown finished.
@@ -201,39 +209,43 @@ async fn run(args: RunArgs) -> Result<()> {
         // Shut down even when start or a phase fails, so the apply worker
         // releases its slot and the destination stops writing before cleanup
         // drops them.
-        let phase_result: Result<(u128, Duration, Duration, Duration, Instant)> = async {
-            start_result?;
+        let phase_result: Result<(u128, Duration, Duration, Duration, Instant, Option<Duration>)> =
+            async {
+                start_result?;
 
-            let ready_started = Instant::now();
-            wait_for_table_sync(notifications).await?;
-            let ready_wait_ms = duration_millis(ready_started.elapsed());
+                let ready_started = Instant::now();
+                wait_for_table_sync(notifications).await?;
+                let ready_wait_ms = duration_millis(ready_started.elapsed());
 
-            destination.reset_cdc_stats();
+                destination.reset_cdc_stats();
 
-            let end_to_end_started = Instant::now();
-            let producer_started = Instant::now();
-            run_tpcc_workload(&args).await?;
-            let producer_duration = producer_started.elapsed();
+                let cpu_started = process_cpu_time();
+                let end_to_end_started = Instant::now();
+                let producer_started = Instant::now();
+                run_tpcc_workload(&args).await?;
+                let producer_duration = producer_started.elapsed();
 
-            let drain_started = Instant::now();
-            wait_for_cdc_quiescence(
-                &destination,
-                Duration::from_millis(args.drain_quiet_ms),
-                Duration::from_millis(args.drain_poll_ms),
-            )
+                let drain_started = Instant::now();
+                wait_for_cdc_quiescence(
+                    &destination,
+                    Duration::from_millis(args.drain_quiet_ms),
+                    Duration::from_millis(args.drain_poll_ms),
+                )
+                .await;
+                let drain_duration = drain_started.elapsed();
+                let end_to_end_duration = end_to_end_started.elapsed();
+                let end_to_end_cpu = process_cpu_time_since(cpu_started);
+
+                Ok((
+                    ready_wait_ms,
+                    producer_duration,
+                    drain_duration,
+                    end_to_end_duration,
+                    end_to_end_started,
+                    end_to_end_cpu,
+                ))
+            }
             .await;
-            let drain_duration = drain_started.elapsed();
-            let end_to_end_duration = end_to_end_started.elapsed();
-
-            Ok((
-                ready_wait_ms,
-                producer_duration,
-                drain_duration,
-                end_to_end_duration,
-                end_to_end_started,
-            ))
-        }
-        .await;
 
         let shutdown_started = Instant::now();
         let shutdown_result =
@@ -246,6 +258,7 @@ async fn run(args: RunArgs) -> Result<()> {
             drain_duration,
             end_to_end_duration,
             end_to_end_started,
+            end_to_end_cpu,
         ) = finish_run(phase_result, [shutdown_result])?;
         let end_to_end_with_shutdown_duration = end_to_end_started.elapsed();
 
@@ -255,6 +268,7 @@ async fn run(args: RunArgs) -> Result<()> {
             producer_duration,
             drain_duration,
             end_to_end_duration,
+            end_to_end_cpu,
             shutdown_duration,
             end_to_end_with_shutdown_duration,
         })
@@ -270,6 +284,7 @@ async fn run(args: RunArgs) -> Result<()> {
         producer_duration,
         drain_duration,
         end_to_end_duration,
+        end_to_end_cpu,
         shutdown_duration,
         end_to_end_with_shutdown_duration,
     } = finish_run(run_result, [cleanup_result, destination_cleanup_result])?;
@@ -333,6 +348,9 @@ async fn run(args: RunArgs) -> Result<()> {
             destination_stats.cdc_data_event_bytes,
             drain_duration,
         ),
+        end_to_end_cpu_ms: end_to_end_cpu.map(duration_millis),
+        end_to_end_cpu_micros_per_event: end_to_end_cpu
+            .map(|cpu| micros_per_unit(cpu, throughput_events)),
         max_table_sync_workers: args.tuning.max_table_sync_workers,
         max_copy_connections_per_table: args.tuning.max_copy_connections_per_table,
         batch_max_fill_ms: args.tuning.batch_max_fill_ms,
@@ -386,6 +404,9 @@ fn print_summary(report: &TableStreamingReport) {
         "    Est. decoded MiB/s   {}",
         format_decimal(report.end_to_end_with_shutdown_estimated_mib_per_second, 2)
     );
+    if let Some(cpu_micros_per_event) = report.end_to_end_cpu_micros_per_event {
+        println!("    CPU µs/event         {}", format_decimal(cpu_micros_per_event, 3));
+    }
     println!("    Elapsed              {}", format_duration_ms(report.end_to_end_with_shutdown_ms));
     println!();
     println!("  Batches");
