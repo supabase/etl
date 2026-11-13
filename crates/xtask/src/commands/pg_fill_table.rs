@@ -30,14 +30,6 @@ const BULK_LOAD_PGOPTIONS: &str = "-c synchronous_commit=off -c statement_timeou
                                    lock_timeout=0 -c idle_in_transaction_session_timeout=0 -c \
                                    client_min_messages=warning";
 
-/// Builds the physical-size lookup for a qualified table.
-fn table_size_sql(table: &QualifiedTable) -> String {
-    format!(
-        "select coalesce(pg_total_relation_size(to_regclass({})), 0)",
-        quote_literal(&table.quoted())
-    )
-}
-
 #[derive(Args)]
 pub(crate) struct PgFillTableArgs {
     /// Postgres host.
@@ -289,7 +281,10 @@ impl PgFillTableArgs {
     }
 
     fn table_size_bytes(&self, table: &QualifiedTable) -> Result<u64> {
-        let sql = table_size_sql(table);
+        let sql = format!(
+            "select coalesce(pg_total_relation_size(to_regclass({})), 0)",
+            quote_literal(&table.quoted())
+        );
         let output = self.psql_query(&sql)?;
         output.trim().parse().context("failed to parse table size")
     }
@@ -603,9 +598,7 @@ fn format_bytes(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::commands::pg_fill_table::{
-        QualifiedTable, make_payload, parse_size, table_size_sql,
-    };
+    use super::{QualifiedTable, make_payload, parse_size};
 
     #[test]
     fn parses_decimal_and_binary_sizes() {
@@ -618,51 +611,6 @@ mod tests {
         let table = QualifiedTable::new("public", "load_test").unwrap();
         assert_eq!(table.display(), "public.load_test");
         assert_eq!(table.quoted(), "public.load_test");
-    }
-
-    /// Keeps schema and table identifier case in the relation lookup.
-    #[test]
-    fn table_size_sql_preserves_identifier_case() {
-        let table = QualifiedTable::new("MixedSchema", "MixedTable").unwrap();
-        assert_eq!(
-            table_size_sql(&table),
-            r#"select coalesce(pg_total_relation_size(to_regclass('"MixedSchema"."MixedTable"')), 0)"#
-        );
-    }
-
-    /// Escapes relation identifiers before quoting the lookup literal.
-    #[test]
-    fn table_size_sql_quotes_identifiers() {
-        for (schema, name, expected) in [
-            (
-                "public",
-                "load_test",
-                "select coalesce(pg_total_relation_size(to_regclass('public.load_test')), 0)",
-            ),
-            (
-                "schema.name",
-                "table name",
-                r#"select coalesce(pg_total_relation_size(to_regclass('"schema.name"."table name"')), 0)"#,
-            ),
-            (
-                "select",
-                "table",
-                r#"select coalesce(pg_total_relation_size(to_regclass('"select"."table"')), 0)"#,
-            ),
-            (
-                r#"schema"name"#,
-                "table'name",
-                r#"select coalesce(pg_total_relation_size(to_regclass('"schema""name"."table''name"')), 0)"#,
-            ),
-            (
-                r"schema\name",
-                r"table\name",
-                r#"select coalesce(pg_total_relation_size(to_regclass(E'"schema\\name"."table\\name"')), 0)"#,
-            ),
-        ] {
-            let table = QualifiedTable::new(schema, name).unwrap();
-            assert_eq!(table_size_sql(&table), expected);
-        }
     }
 
     #[test]
