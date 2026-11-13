@@ -117,7 +117,7 @@ Stop the replicator with Ctrl+C.
 `cargo x` is the task runner. `cargo x --help` lists every command.
 
 ```bash
-cargo x fmt              # nightly rustfmt (pinned)
+cargo x fmt              # nightly rustfmt (pinned), then blank-line rules
 cargo x fmt --check
 cargo x check            # fmt, sort, clippy
 cargo x fix
