@@ -31,6 +31,7 @@ class RoutingTests(unittest.TestCase):
         other["merge_commit_sha"] = "b" * 40
         other["labels"] = [{"name": "release"}]
         api.return_value = json.dumps([[other], [PR]])
+
         self.assertEqual(resolve_merged_pr(REPOSITORY, SHA), PR)
         self.assertIn("--paginate", api.call_args.args[0])
 
@@ -39,6 +40,7 @@ class RoutingTests(unittest.TestCase):
     def test_waits_for_the_merge_to_be_visible(self, api, sleep):
         unmerged = dict(PR, merged_at=None)
         api.side_effect = [json.dumps([[unmerged]]), json.dumps([[PR]])]
+
         self.assertEqual(resolve_merged_pr(REPOSITORY, SHA), PR)
         sleep.assert_called_once_with(5)
 
@@ -50,8 +52,10 @@ class RoutingTests(unittest.TestCase):
         wrong_repo = copy.deepcopy(PR)
         wrong_repo["base"]["repo"]["full_name"] = "other/etl"
         api.return_value = json.dumps([[wrong_branch, wrong_repo]])
+
         with self.assertRaisesRegex(RuntimeError, "No merged PR"):
             resolve_merged_pr(REPOSITORY, SHA)
+
         self.assertEqual(api.call_count, 6)
         self.assertEqual(sleep.call_count, 5)
 
@@ -68,14 +72,17 @@ class RoutingTests(unittest.TestCase):
                 if release:
                     pr["labels"] = [{"name": "release"}]
                     pr["head"]["ref"] = "release/v1.2.3"
+
                 api.return_value = json.dumps([[pr]])
                 output = Path(directory) / "output"
+
                 with patch.dict(os.environ, {
                     "GITHUB_EVENT_NAME": "push", "GITHUB_REF": "refs/heads/main",
                     "GITHUB_REPOSITORY": REPOSITORY, "GITHUB_SHA": SHA,
                     "GITHUB_OUTPUT": str(output),
                 }):
                     main()
+
                 self.assertEqual(output.read_text(),
                                  f"release={str(release).lower()}\nhead-ref={pr['head']['ref']}\n")
 
@@ -84,6 +91,7 @@ class RoutingTests(unittest.TestCase):
         pr = copy.deepcopy(PR)
         pr["head"]["ref"] = "fix/example\nrelease=true"
         resolve.return_value = pr
+
         with patch.dict(os.environ, {
             "GITHUB_EVENT_NAME": "push", "GITHUB_REF": "refs/heads/main",
             "GITHUB_REPOSITORY": REPOSITORY, "GITHUB_SHA": SHA,
@@ -101,6 +109,7 @@ class RoutingTests(unittest.TestCase):
             }):
                 with self.assertRaisesRegex(RuntimeError, "push to main"):
                     main()
+
         resolve.assert_not_called()
 
 
