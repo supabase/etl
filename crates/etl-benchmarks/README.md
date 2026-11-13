@@ -419,16 +419,17 @@ run both on the same machine in one invocation:
 
 ```bash
 git worktree add ../etl-baseline <baseline-commit>
-cargo x benchmark --samples 5 --warmup-samples 1 --baseline-dir ../etl-baseline
+cargo x benchmark --samples 6 --warmup-samples 1 --baseline-dir ../etl-baseline
 cargo x benchmark-compare \
   --previous-dir target/bench-results/baseline \
   --current-dir target/bench-results
 ```
 
 Each sample runs the baseline checkout and the current checkout back to back,
-alternating which goes first, against the same database. Baseline reports are
-written to `<output-dir>/baseline`. In each report, `sample_summary.<metric>.values`
-lists the samples in run order, so the two sides can be paired sample by sample.
+alternating which goes first, against the same database. `--samples` must be
+even, so each side runs first equally often. Baseline reports are written to
+`<output-dir>/baseline`. In each report, `sample_summary.<metric>.values` lists
+the samples in run order, so the two sides can be paired sample by sample.
 
 The baseline checkout must accept the same `table_copy` and `table_streaming`
 arguments as the current one. Streaming samples add rows to the TPC-C tables,

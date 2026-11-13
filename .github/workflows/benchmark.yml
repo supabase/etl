@@ -167,6 +167,10 @@ jobs:
             echo '::error::Samples must be a positive integer'
             exit 1
           fi
+          if [[ -n "$BASELINE_COMMIT" ]] && (( BENCHMARK_SAMPLES % 2 != 0 )); then
+            echo '::error::Samples must be even with a baseline commit, so each side runs first equally often'
+            exit 1
+          fi
 
           if [[ -n "$COMMIT" ]]; then
             trigger=backfill
@@ -674,7 +678,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: benchmark-failed-${{ matrix.destination }}
-          path: target/bench-results/*.json
+          path: |
+            target/bench-results/*.json
+            target/bench-results/baseline/*.json
           if-no-files-found: warn
 
       - name: Remove BigQuery credentials

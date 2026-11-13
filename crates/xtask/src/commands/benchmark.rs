@@ -309,6 +309,13 @@ impl BenchmarkArgs {
             bail!("--samples must be greater than 0");
         }
 
+        if self.baseline_dir.is_some() && !self.samples.is_multiple_of(2) {
+            bail!(
+                "--samples must be even with --baseline-dir, so each checkout runs first equally \
+                 often"
+            );
+        }
+
         if let Some(baseline_dir) = &self.baseline_dir
             && !baseline_dir.join("Cargo.toml").is_file()
         {
@@ -757,11 +764,16 @@ impl BenchmarkArgs {
     /// Returns the checkouts one sample runs, in order.
     ///
     /// With a baseline, the order alternates between samples so that neither
-    /// checkout always runs first on warmer caches or larger tables.
+    /// checkout always runs first on warmer caches or larger tables. Measured
+    /// samples alternate from their own start, so with an even sample count
+    /// each checkout runs first equally often whatever the warmup count.
     fn sample_checkouts(&self, sample_idx: usize) -> &'static [Checkout] {
+        let warmups = usize::from(self.warmup_samples);
+        let position = sample_idx.checked_sub(warmups).unwrap_or(sample_idx);
+
         if self.baseline_dir.is_none() {
             &[Checkout::Candidate]
-        } else if sample_idx.is_multiple_of(2) {
+        } else if position.is_multiple_of(2) {
             &[Checkout::Baseline, Checkout::Candidate]
         } else {
             &[Checkout::Candidate, Checkout::Baseline]
@@ -1548,9 +1560,62 @@ fn format_integer(value: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use clap::Parser;
     use serde_json::json;
 
-    use crate::commands::benchmark::aggregate_reports;
+    use crate::commands::benchmark::{BenchmarkArgs, Checkout, aggregate_reports};
+
+    /// Parses benchmark arguments as the task runner would.
+    #[derive(Parser)]
+    struct TestCli {
+        #[command(flatten)]
+        args: BenchmarkArgs,
+    }
+
+    #[test]
+    fn baseline_comparison_gives_each_checkout_the_first_slot_equally_often() {
+        for warmups in 0..4_usize {
+            for samples in [2_usize, 4, 6] {
+                let cli = TestCli::parse_from([
+                    "benchmark",
+                    "--baseline-dir",
+                    "baseline",
+                    "--samples",
+                    &samples.to_string(),
+                    "--warmup-samples",
+                    &warmups.to_string(),
+                ]);
+
+                let baseline_first = (warmups..warmups + samples)
+                    .filter(|sample_idx| {
+                        cli.args.sample_checkouts(*sample_idx).first() == Some(&Checkout::Baseline)
+                    })
+                    .count();
+
+                assert_eq!(baseline_first * 2, samples, "warmups {warmups}, samples {samples}");
+            }
+        }
+    }
+
+    #[test]
+    fn baseline_comparison_requires_an_even_sample_count() {
+        // This crate's directory has a `Cargo.toml`, so it passes as a checkout
+        // and only the sample count differs between the two cases.
+        let validate = |samples: &str| {
+            TestCli::parse_from([
+                "benchmark",
+                "--baseline-dir",
+                env!("CARGO_MANIFEST_DIR"),
+                "--samples",
+                samples,
+            ])
+            .args
+            .validate()
+        };
+
+        validate("4").unwrap();
+        validate("3").unwrap_err();
+    }
 
     #[test]
     fn aggregate_reports_uses_medians_and_records_spread() {
