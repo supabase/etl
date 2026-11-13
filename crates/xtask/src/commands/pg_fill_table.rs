@@ -12,7 +12,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
-use pg_escape::quote_identifier;
+use pg_escape::{quote_identifier, quote_literal};
 
 const DEFAULT_DB_HOST: &str = "localhost";
 const DEFAULT_DB_PORT: u16 = 5432;
@@ -29,6 +29,14 @@ const DEFAULT_STALL_SECONDS: u64 = 180;
 const BULK_LOAD_PGOPTIONS: &str = "-c synchronous_commit=off -c statement_timeout=0 -c \
                                    lock_timeout=0 -c idle_in_transaction_session_timeout=0 -c \
                                    client_min_messages=warning";
+
+/// Builds the physical-size lookup for a qualified table.
+fn table_size_sql(table: &QualifiedTable) -> String {
+    format!(
+        "select coalesce(pg_total_relation_size(to_regclass({})), 0)",
+        quote_literal(&table.quoted())
+    )
+}
 
 #[derive(Args)]
 pub(crate) struct PgFillTableArgs {
@@ -281,10 +289,7 @@ impl PgFillTableArgs {
     }
 
     fn table_size_bytes(&self, table: &QualifiedTable) -> Result<u64> {
-        let sql = format!(
-            "select coalesce(pg_total_relation_size(to_regclass({})), 0)",
-            quote_literal(&table.display())
-        );
+        let sql = table_size_sql(table);
         let output = self.psql_query(&sql)?;
         output.trim().parse().context("failed to parse table size")
     }
@@ -539,10 +544,6 @@ fn validate_identifier(identifier: &str, label: &str) -> Result<()> {
     Ok(())
 }
 
-fn quote_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
-}
-
 fn apply_psql_conn_params(command: &mut Command, conn_params: &str) {
     for part in conn_params.split_whitespace() {
         let Some((key, value)) = part.split_once('=') else {
@@ -602,7 +603,9 @@ fn format_bytes(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{QualifiedTable, make_payload, parse_size};
+    use crate::commands::pg_fill_table::{
+        QualifiedTable, make_payload, parse_size, table_size_sql,
+    };
 
     #[test]
     fn parses_decimal_and_binary_sizes() {
@@ -615,6 +618,51 @@ mod tests {
         let table = QualifiedTable::new("public", "load_test").unwrap();
         assert_eq!(table.display(), "public.load_test");
         assert_eq!(table.quoted(), "public.load_test");
+    }
+
+    /// Keeps schema and table identifier case in the relation lookup.
+    #[test]
+    fn table_size_sql_preserves_identifier_case() {
+        let table = QualifiedTable::new("MixedSchema", "MixedTable").unwrap();
+        assert_eq!(
+            table_size_sql(&table),
+            r#"select coalesce(pg_total_relation_size(to_regclass('"MixedSchema"."MixedTable"')), 0)"#
+        );
+    }
+
+    /// Escapes relation identifiers before quoting the lookup literal.
+    #[test]
+    fn table_size_sql_quotes_identifiers() {
+        for (schema, name, expected) in [
+            (
+                "public",
+                "load_test",
+                "select coalesce(pg_total_relation_size(to_regclass('public.load_test')), 0)",
+            ),
+            (
+                "schema.name",
+                "table name",
+                r#"select coalesce(pg_total_relation_size(to_regclass('"schema.name"."table name"')), 0)"#,
+            ),
+            (
+                "select",
+                "table",
+                r#"select coalesce(pg_total_relation_size(to_regclass('"select"."table"')), 0)"#,
+            ),
+            (
+                r#"schema"name"#,
+                "table'name",
+                r#"select coalesce(pg_total_relation_size(to_regclass('"schema""name"."table''name"')), 0)"#,
+            ),
+            (
+                r"schema\name",
+                r"table\name",
+                r#"select coalesce(pg_total_relation_size(to_regclass(E'"schema\\name"."table\\name"')), 0)"#,
+            ),
+        ] {
+            let table = QualifiedTable::new(schema, name).unwrap();
+            assert_eq!(table_size_sql(&table), expected);
+        }
     }
 
     #[test]
