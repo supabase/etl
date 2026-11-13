@@ -35,8 +35,9 @@ const DELETE_EVENT_TYPE: &str = "delete";
 /// Ingestion series for one source event type, registered on first use.
 ///
 /// Resolving a labeled series costs an allocation, a key hash, and a registry
-/// lookup: about 1,000 instructions, which was a third of the CPU spent on
-/// each streamed insert. These handles resolve each series once.
+/// lookup: about 1,000 instructions. The four lookups per streamed insert cost
+/// 3,834 instructions against 6,830 to decode the insert. These handles
+/// resolve each series once, which leaves 409.
 ///
 /// A handle is registered on its first observation, so a series is exported
 /// only once it has data. Handles live in their owner and not in a static, so
