@@ -34,6 +34,7 @@ fn json_nesting_exceeds(bytes: &[u8], limit: usize) -> bool {
     let mut depth = 0usize;
     let mut in_string = false;
     let mut escaped = false;
+
     for &byte in bytes {
         if in_string {
             match byte {
@@ -42,6 +43,7 @@ fn json_nesting_exceeds(bytes: &[u8], limit: usize) -> bool {
                 b'"' => in_string = false,
                 _ => {}
             }
+
             continue;
         }
 
@@ -923,6 +925,7 @@ mod tests {
     #[test]
     fn json_at_nesting_limit_decodes() {
         let json_str = nested_json_array(MAX_JSON_NESTING_DEPTH);
+
         for typ in [Type::JSON, Type::JSONB] {
             let cell = parse_cell_from_postgres_text(&typ, &json_str).unwrap();
             assert!(matches!(cell, Cell::Json(_)));
