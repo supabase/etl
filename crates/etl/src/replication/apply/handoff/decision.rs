@@ -1,14 +1,14 @@
-//! Table-sync handoff decisions for the apply worker.
+//! Pure table-sync handoff decisions.
 //!
-//! The apply worker evaluates every syncing table after a COMMIT, after a
-//! durable flush, and while quiescent. Each function here decides what to do
-//! from one observation of a table; the apply worker then executes that
-//! decision.
+//! Each function maps one observation of a syncing table to an action. None
+//! of them takes a lock, reads a store, or does I/O.
+//! [`crate::replication::apply::handoff`] documents the transition table they
+//! implement and executes their answers.
 //!
-//! The action types encode what each trigger may do. Only a table without a
-//! running worker can spawn one. The flush decision for a running worker has no
-//! catchup variants, because the flush path cannot block or report a shutdown
-//! exit. Promotion to `Ready` carries a [`ReadyProof`], which only
+//! The return types limit what a trigger can ask for. Only a table without a
+//! running worker can spawn one. The flush decision for a running worker
+//! returns an optional [`ReadyProof`] and nothing else, so it cannot ask for
+//! catchup. Promotion to `Ready` carries a [`ReadyProof`], which only
 //! [`ReadinessInputs::ready_proof`] constructs, so the COMMIT decisions, which
 //! receive no readiness inputs, cannot promote.
 
@@ -148,24 +148,6 @@ pub(super) enum ActiveAction {
     Keep,
 }
 
-/// Action after a durable flush for a table whose sync worker is running.
-#[derive(Debug)]
-pub(super) enum ActiveFlushAction {
-    /// Store `Ready` under the worker's state lock.
-    PromoteToReady(ReadyProof),
-    /// Leave the table to its worker.
-    Keep,
-}
-
-impl From<ActiveFlushAction> for ActiveAction {
-    fn from(action: ActiveFlushAction) -> Self {
-        match action {
-            ActiveFlushAction::PromoteToReady(proof) => Self::PromoteToReady(proof),
-            ActiveFlushAction::Keep => Self::Keep,
-        }
-    }
-}
-
 /// Action for a syncing table without a running sync worker.
 #[derive(Debug)]
 pub(super) enum IdleAction {
@@ -189,21 +171,32 @@ pub(super) fn active_after_commit(state: &TableState, current_lsn: PgLsn) -> Act
             catchup_lsn: (*lsn).max(current_lsn),
         },
         TableState::Catchup { lsn } => ActiveAction::AwaitCatchup { catchup_lsn: *lsn },
-        _ => ActiveAction::Keep,
+        TableState::Init
+        | TableState::DataSync
+        | TableState::FinishedCopy
+        | TableState::SyncDone { .. }
+        | TableState::Ready
+        | TableState::Errored { .. } => ActiveAction::Keep,
     }
 }
 
-/// Decides the action after a durable flush for a table whose worker is
-/// running.
+/// Decides whether a durable flush promotes a table whose worker is running.
+///
+/// Returns the proof for storing `Ready`, or `None` to leave the table to its
+/// worker.
 pub(super) fn active_after_flush(
     state: &TableState,
     readiness: &ReadinessInputs,
-) -> ActiveFlushAction {
+) -> Option<ReadyProof> {
     match state {
-        TableState::SyncDone { lsn, .. } => readiness
-            .ready_proof(*lsn)
-            .map_or(ActiveFlushAction::Keep, ActiveFlushAction::PromoteToReady),
-        _ => ActiveFlushAction::Keep,
+        TableState::SyncDone { lsn, .. } => readiness.ready_proof(*lsn),
+        TableState::Init
+        | TableState::DataSync
+        | TableState::FinishedCopy
+        | TableState::SyncWait { .. }
+        | TableState::Catchup { .. }
+        | TableState::Ready
+        | TableState::Errored { .. } => None,
     }
 }
 
@@ -216,30 +209,49 @@ pub(super) fn active_when_quiescent(
     readiness: &ReadinessInputs,
 ) -> ActiveAction {
     match active_after_commit(state, readiness.current_lsn) {
-        ActiveAction::Keep => active_after_flush(state, readiness).into(),
-        action => action,
+        ActiveAction::Keep => active_after_flush(state, readiness)
+            .map_or(ActiveAction::Keep, ActiveAction::PromoteToReady),
+        action @ (ActiveAction::StartCatchup { .. }
+        | ActiveAction::AwaitCatchup { .. }
+        | ActiveAction::PromoteToReady(_)) => action,
     }
 }
 
 /// Decides the action after a COMMIT for a table without a running worker.
 ///
 /// `SyncDone` waits for a readiness evaluation; every other syncing state needs
-/// a worker.
+/// a worker. `Ready` and `Errored` are not syncing states, so the apply worker
+/// never passes them for a table without a worker.
 pub(super) fn idle_after_commit(state: &TableState) -> IdleAction {
     match state {
         TableState::SyncDone { .. } => IdleAction::Keep,
-        _ => IdleAction::SpawnWorker,
+        TableState::Init
+        | TableState::DataSync
+        | TableState::FinishedCopy
+        | TableState::SyncWait { .. }
+        | TableState::Catchup { .. }
+        | TableState::Ready
+        | TableState::Errored { .. } => IdleAction::SpawnWorker,
     }
 }
 
 /// Decides the action after a durable flush, or while quiescent, for a table
 /// without a running worker.
+///
+/// `Ready` and `Errored` are not syncing states, so the apply worker never
+/// passes them for a table without a worker.
 pub(super) fn idle_after_flush(state: &TableState, readiness: &ReadinessInputs) -> IdleAction {
     match state {
         TableState::SyncDone { lsn, .. } => {
             readiness.ready_proof(*lsn).map_or(IdleAction::Keep, IdleAction::PromoteToReady)
         }
-        _ => IdleAction::SpawnWorker,
+        TableState::Init
+        | TableState::DataSync
+        | TableState::FinishedCopy
+        | TableState::SyncWait { .. }
+        | TableState::Catchup { .. }
+        | TableState::Ready
+        | TableState::Errored { .. } => IdleAction::SpawnWorker,
     }
 }
 
@@ -252,8 +264,11 @@ mod tests {
         etl_error,
         replication::{
             apply::handoff::{
-                ActiveAction, ActiveFlushAction, IdleAction, ReadinessInputs, active_after_commit,
-                active_after_flush, active_when_quiescent, idle_after_commit, idle_after_flush,
+                Trigger,
+                decision::{
+                    ActiveAction, IdleAction, ReadinessInputs, active_after_commit,
+                    active_after_flush, active_when_quiescent, idle_after_commit, idle_after_flush,
+                },
             },
             state::{TableRetryPolicy, TableState},
         },
@@ -262,14 +277,6 @@ mod tests {
     /// LSNs whose pairwise orders cover every comparison the handoff makes,
     /// including the maximum value.
     const LSNS: [u64; 4] = [0, 1, 2, u64::MAX];
-
-    /// Point at which the apply worker evaluates syncing tables.
-    #[derive(Debug, Clone, Copy)]
-    enum Trigger {
-        AfterCommit,
-        AfterFlush,
-        Quiescent,
-    }
 
     /// Effect of one handoff decision, independent of the action types.
     #[derive(Debug, PartialEq, Eq)]
@@ -289,12 +296,6 @@ mod tests {
                 ActiveAction::PromoteToReady(proof) => Self::PromoteToReady(proof.sync_done_lsn()),
                 ActiveAction::Keep => Self::Keep,
             }
-        }
-    }
-
-    impl From<ActiveFlushAction> for Effect {
-        fn from(action: ActiveFlushAction) -> Self {
-            ActiveAction::from(action).into()
         }
     }
 
@@ -343,7 +344,8 @@ mod tests {
         match (trigger, has_active_worker) {
             (Trigger::AfterCommit, true) => active_after_commit(state, current_lsn).into(),
             (Trigger::AfterCommit, false) => idle_after_commit(state).into(),
-            (Trigger::AfterFlush, true) => active_after_flush(state, readiness).into(),
+            (Trigger::AfterFlush, true) => active_after_flush(state, readiness)
+                .map_or(Effect::Keep, |proof| Effect::PromoteToReady(proof.sync_done_lsn())),
             (Trigger::Quiescent, true) => active_when_quiescent(state, readiness).into(),
             (Trigger::AfterFlush | Trigger::Quiescent, false) => {
                 idle_after_flush(state, readiness).into()
