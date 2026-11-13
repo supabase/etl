@@ -20,6 +20,13 @@ use crate::{
 /// slower than scanning byte by byte throughout.
 const MEMCHR_MIN_LEN: usize = 32;
 
+/// Largest unescape buffer kept between rows.
+///
+/// Reusing the buffer saves two allocations for every row with a `bytea`
+/// value or another escaped field. A field above this size is rare enough to
+/// allocate again, which bounds what each copy stream retains.
+const MAX_RETAINED_FIELD_BUFFER_BYTES: usize = 1024 * 1024;
+
 /// Returns the offset of the next tab, newline, or backslash in `haystack`,
 /// using a vectorized search for longer haystacks and a plain scan for short
 /// ones where that search's setup cost would dominate.
@@ -38,6 +45,10 @@ fn find_next_special(haystack: &[u8]) -> Option<usize> {
 /// provided column schemas. It handles Postgres's specific escaping rules and
 /// type formats.
 ///
+/// `field_buffer` is scratch space for unescaping fields. Its contents on
+/// entry are discarded. Pass the same buffer for every row of a copy so
+/// escaped fields stop allocating once it has grown.
+///
 /// # Errors
 ///
 /// Returns an error if the row data is not valid UTF-8, the column count
@@ -47,9 +58,10 @@ fn find_next_special(haystack: &[u8]) -> Option<usize> {
 pub(crate) fn parse_table_row_from_postgres_copy_bytes(
     row: &[u8],
     column_schemas: &[ColumnSchema],
+    field_buffer: &mut String,
 ) -> EtlResult<TableRow> {
     let row_str = simdutf8::basic::from_utf8(row)?;
-    parse_table_row_from_postgres_copy_str(row_str, column_schemas)
+    parse_table_row_from_postgres_copy_str(row_str, column_schemas, field_buffer)
 }
 
 /// Parses a Postgres COPY row whose UTF-8 validity has already been
@@ -57,14 +69,17 @@ pub(crate) fn parse_table_row_from_postgres_copy_bytes(
 fn parse_table_row_from_postgres_copy_str(
     row_str: &str,
     column_schemas: &[ColumnSchema],
+    field_buffer: &mut String,
 ) -> EtlResult<TableRow> {
     let expected_column_count = column_schemas.len();
     let bytes = row_str.as_bytes();
 
     // Parsed cells in schema order.
     let mut values = Vec::with_capacity(expected_column_count);
-    // Scratch value for escaped fields; unescaped fields borrow from `row_str`.
-    let mut field_buffer = String::new();
+    // Escaped fields are unescaped into `field_buffer`; unescaped fields borrow
+    // from `row_str`. A previous row that failed mid-field leaves its partial
+    // value behind, so start empty.
+    field_buffer.clear();
 
     // Row-level cursor and termination state.
     let mut pos = 0;
@@ -254,6 +269,11 @@ fn parse_table_row_from_postgres_copy_str(
         );
     }
 
+    // One oversized field must not pin its capacity for the rest of the copy.
+    if field_buffer.capacity() > MAX_RETAINED_FIELD_BUFFER_BYTES {
+        *field_buffer = String::new();
+    }
+
     Ok(TableRow::new(values))
 }
 
@@ -262,7 +282,9 @@ mod tests {
     use tokio_postgres::types::Type;
 
     use super::*;
-    use crate::{error::ErrorKind, schema::ColumnSchema};
+    use crate::{
+        error::ErrorKind, schema::ColumnSchema, test_utils::replication_stream::parse_copy_row,
+    };
 
     /// Creates a test column schema with sensible defaults.
     fn test_column(
@@ -293,7 +315,7 @@ mod tests {
         let column_schemas = create_test_column_schemas();
         let row_data = b"123\tJohn Doe\tt\n";
 
-        let result = parse_table_row_from_postgres_copy_bytes(row_data, &column_schemas).unwrap();
+        let result = parse_copy_row(row_data, &column_schemas).unwrap();
 
         assert_eq!(result.values().len(), 3);
         assert_eq!(result.values()[0], Cell::I32(123));
@@ -306,7 +328,7 @@ mod tests {
         let column_schemas = create_test_column_schemas();
         let row_data = b"456\t\\N\tf\n";
 
-        let result = parse_table_row_from_postgres_copy_bytes(row_data, &column_schemas).unwrap();
+        let result = parse_copy_row(row_data, &column_schemas).unwrap();
 
         assert_eq!(result.values().len(), 3);
         assert_eq!(result.values()[0], Cell::I32(456));
@@ -319,7 +341,7 @@ mod tests {
         let column_schemas = create_test_column_schemas();
         let row_data = b"0\t\tf\n";
 
-        let result = parse_table_row_from_postgres_copy_bytes(row_data, &column_schemas).unwrap();
+        let result = parse_copy_row(row_data, &column_schemas).unwrap();
 
         assert_eq!(result.values().len(), 3);
         assert_eq!(result.values()[0], Cell::I32(0));
@@ -332,7 +354,7 @@ mod tests {
         let column_schemas = create_single_column_schema("value", Type::INT4);
         let row_data = b"42\n";
 
-        let result = parse_table_row_from_postgres_copy_bytes(row_data, &column_schemas).unwrap();
+        let result = parse_copy_row(row_data, &column_schemas).unwrap();
 
         assert_eq!(result.values().len(), 1);
         assert_eq!(result.values()[0], Cell::I32(42));
@@ -349,7 +371,7 @@ mod tests {
 
         let row_data = b"123\t3.15\tHello World\tt\n";
 
-        let result = parse_table_row_from_postgres_copy_bytes(row_data, &column_schemas).unwrap();
+        let result = parse_copy_row(row_data, &column_schemas).unwrap();
 
         assert_eq!(result.values().len(), 4);
         assert_eq!(result.values()[0], Cell::I32(123));
@@ -363,7 +385,7 @@ mod tests {
         let column_schemas = create_single_column_schema("value", Type::INT4);
         let row_data = b"42"; // Missing newline
 
-        let result = parse_table_row_from_postgres_copy_bytes(row_data, &column_schemas);
+        let result = parse_copy_row(row_data, &column_schemas);
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -376,7 +398,7 @@ mod tests {
         let column_schemas = create_single_column_schema("value", Type::TEXT);
         let row_data = b"text\\"; // Dangling escape byte, no following character at all
 
-        let result = parse_table_row_from_postgres_copy_bytes(row_data, &column_schemas);
+        let result = parse_copy_row(row_data, &column_schemas);
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -389,7 +411,7 @@ mod tests {
         let column_schemas = create_test_column_schemas();
         let row_data = b"123\tJohn\n";
 
-        let result_empty = parse_table_row_from_postgres_copy_bytes(row_data, &column_schemas);
+        let result_empty = parse_copy_row(row_data, &column_schemas);
         assert!(result_empty.is_err());
         let err = result_empty.unwrap_err();
         assert_eq!(
@@ -410,7 +432,7 @@ mod tests {
         let column_schemas = create_test_column_schemas();
         let row_data = b"123\tJohn\tt\textra\n";
 
-        let result = parse_table_row_from_postgres_copy_bytes(row_data, &column_schemas);
+        let result = parse_copy_row(row_data, &column_schemas);
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -432,7 +454,7 @@ mod tests {
         let column_schemas = create_single_column_schema("value", Type::TEXT);
         let row_data = &[0xFF, 0xFE, 0xFD, b'\n']; // Invalid UTF-8
 
-        let result = parse_table_row_from_postgres_copy_bytes(row_data, &column_schemas);
+        let result = parse_copy_row(row_data, &column_schemas);
 
         assert!(result.is_err());
     }
@@ -442,7 +464,7 @@ mod tests {
         let column_schemas = create_single_column_schema("number", Type::INT4);
         let row_data = b"not_a_number\n";
 
-        let result = parse_table_row_from_postgres_copy_bytes(row_data, &column_schemas);
+        let result = parse_copy_row(row_data, &column_schemas);
 
         assert!(result.is_err());
     }
@@ -452,7 +474,7 @@ mod tests {
         let column_schemas = create_single_column_schema("data", Type::TEXT);
 
         let row_data = b"Text\\\\\n";
-        let result = parse_table_row_from_postgres_copy_bytes(row_data, &column_schemas).unwrap();
+        let result = parse_copy_row(row_data, &column_schemas).unwrap();
 
         assert_eq!(result.values().len(), 1);
         assert_eq!(result.values()[0], Cell::String("Text\\".to_owned()));
@@ -463,7 +485,7 @@ mod tests {
         let column_schemas = create_test_column_schemas();
 
         let row_data = b"123\t John Doe \tt\n";
-        let result = parse_table_row_from_postgres_copy_bytes(row_data, &column_schemas).unwrap();
+        let result = parse_copy_row(row_data, &column_schemas).unwrap();
 
         assert_eq!(result.values().len(), 3);
         assert_eq!(result.values()[0], Cell::I32(123));
@@ -485,9 +507,7 @@ mod tests {
         }
         expected_row.push('\n');
 
-        let result =
-            parse_table_row_from_postgres_copy_bytes(expected_row.as_bytes(), &column_schemas)
-                .unwrap();
+        let result = parse_copy_row(expected_row.as_bytes(), &column_schemas).unwrap();
 
         assert_eq!(result.values().len(), 50);
         for i in 0..50 {
@@ -500,7 +520,7 @@ mod tests {
         let column_schemas = create_test_column_schemas();
         let row_data = b"\t\t\n"; // Empty values but correct number of tabs
 
-        let result = parse_table_row_from_postgres_copy_bytes(row_data, &column_schemas);
+        let result = parse_copy_row(row_data, &column_schemas);
 
         assert!(result.is_err());
     }
@@ -514,7 +534,7 @@ mod tests {
 
         // Postgres escapes tab characters in data with \\t
         let row_data = b"value\\twith\\ttabs\tnormal\\tvalue\n";
-        let result = parse_table_row_from_postgres_copy_bytes(row_data, &column_schemas).unwrap();
+        let result = parse_copy_row(row_data, &column_schemas).unwrap();
 
         assert_eq!(result.values()[0], Cell::String("value\twith\ttabs".to_owned()));
         assert_eq!(result.values()[1], Cell::String("normal\tvalue".to_owned()));
@@ -530,7 +550,7 @@ mod tests {
 
         // Escapes at the beginning, middle, and end of fields
         let row_data = b"\\tstart\tmiddle\\nvalue\tend\\r\n";
-        let result = parse_table_row_from_postgres_copy_bytes(row_data, &column_schemas).unwrap();
+        let result = parse_copy_row(row_data, &column_schemas).unwrap();
 
         assert_eq!(result.values()[0], Cell::String("\tstart".to_owned()));
         assert_eq!(result.values()[1], Cell::String("middle\nvalue".to_owned()));
@@ -547,8 +567,7 @@ mod tests {
         let mut row_with_newline = row_data.to_vec();
         row_with_newline.push(b'\n');
 
-        let result =
-            parse_table_row_from_postgres_copy_bytes(&row_with_newline, &column_schemas).unwrap();
+        let result = parse_copy_row(&row_with_newline, &column_schemas).unwrap();
 
         assert_eq!(result.values()[0], Cell::String("Hello\t🌍\nWorld\r测试".to_owned()));
     }
@@ -587,7 +606,7 @@ mod tests {
         ];
 
         for (input, expected) in test_cases {
-            let result = parse_table_row_from_postgres_copy_bytes(input, &column_schemas).unwrap();
+            let result = parse_copy_row(input, &column_schemas).unwrap();
             assert_eq!(
                 result.values()[0],
                 Cell::String(expected.to_owned()),
@@ -609,7 +628,7 @@ mod tests {
         ];
 
         for (input, expected) in test_cases {
-            let result = parse_table_row_from_postgres_copy_bytes(input, &column_schemas).unwrap();
+            let result = parse_copy_row(input, &column_schemas).unwrap();
             assert_eq!(
                 result.values()[0],
                 expected,
@@ -617,5 +636,30 @@ mod tests {
                 str::from_utf8(input).unwrap_or("<invalid UTF-8>")
             );
         }
+    }
+
+    #[test]
+    fn reused_unescape_buffer_does_not_leak_between_rows() {
+        let column_schemas = vec![
+            test_column("id", Type::INT4, 1, false, true),
+            test_column("data", Type::TEXT, 2, false, false),
+        ];
+        let mut field_buffer = String::new();
+        let mut parse = |row: &[u8]| {
+            parse_table_row_from_postgres_copy_bytes(row, &column_schemas, &mut field_buffer)
+        };
+
+        let long = parse(b"1\tfirst\\tvalue with a long tail\n").unwrap();
+        assert_eq!(long.values()[1], Cell::String("first\tvalue with a long tail".to_owned()));
+
+        // A shorter escaped value must not keep the previous row's tail.
+        let short = parse(b"2\ta\\nb\n").unwrap();
+        assert_eq!(short.values()[1], Cell::String("a\nb".to_owned()));
+
+        // This row fails after its escaped integer field filled the buffer.
+        parse(b"1\\t2\tignored\n").unwrap_err();
+
+        let after_failure = parse(b"3\t\\\\x\n").unwrap();
+        assert_eq!(after_failure.values()[1], Cell::String("\\x".to_owned()));
     }
 }

@@ -13,9 +13,10 @@ use crate::{
     schema::ColumnSchema,
 };
 
-/// Parses a raw Postgres COPY row with the production conversion path.
+/// Parses a raw Postgres COPY row with the production conversion path, using
+/// a fresh unescape buffer.
 pub fn parse_copy_row(row: &[u8], column_schemas: &[ColumnSchema]) -> EtlResult<TableRow> {
-    parse_table_row_from_postgres_copy_bytes(row, column_schemas)
+    parse_table_row_from_postgres_copy_bytes(row, column_schemas, &mut String::new())
 }
 
 /// Parses a logical replication tuple with the production conversion path.

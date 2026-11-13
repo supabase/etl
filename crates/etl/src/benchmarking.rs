@@ -31,13 +31,20 @@ pub fn parse_text_cell(typ: &Type, value: &str) -> EtlResult<Cell> {
 
 /// Parses COPY text rows as the table-copy stream does, appending each decoded
 /// row to `table_rows`.
+///
+/// Like the stream, one unescape buffer serves every row.
 pub fn parse_copy_rows<'a>(
     rows: impl IntoIterator<Item = &'a [u8]>,
     column_schemas: &[ColumnSchema],
     table_rows: &mut Vec<TableRow>,
 ) -> EtlResult<()> {
+    let mut field_buffer = String::new();
     for row in rows {
-        table_rows.push(codec::parse_table_row_from_postgres_copy_bytes(row, column_schemas)?);
+        table_rows.push(codec::parse_table_row_from_postgres_copy_bytes(
+            row,
+            column_schemas,
+            &mut field_buffer,
+        )?);
     }
 
     Ok(())
