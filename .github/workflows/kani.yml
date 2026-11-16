@@ -52,12 +52,12 @@ jobs:
           cargo install --locked kani-verifier --version 0.68.0
           cargo kani setup
       # Proofs stub functions Kani cannot model: core's word-at-a-time memchr
-      # in the UTC offset proofs, and backtrace capture in the ClickHouse UUID
-      # proof, which can build an EtlError.
+      # in the UTC offset proofs, and backtrace capture in proofs that can
+      # build an EtlError.
       - name: Prove etl-postgres
         run: cargo kani -p etl-postgres -Z stubbing --output-format terse
       - name: Prove etl
-        run: cargo kani -p etl --output-format terse
+        run: cargo kani -p etl -Z stubbing --output-format terse
       - name: Prove etl-destinations
         run: |
           cargo kani -p etl-destinations --no-default-features \
