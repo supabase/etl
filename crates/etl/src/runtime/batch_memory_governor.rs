@@ -9,9 +9,12 @@
 //! Emergency source pausing remains in [`MemoryMonitor`] as the final safety
 //! boundary.
 
-use std::sync::{
-    Arc, Mutex, PoisonError, TryLockError,
-    atomic::{AtomicU64, AtomicUsize, Ordering},
+use std::{
+    num::NonZeroUsize,
+    sync::{
+        Arc, Mutex, PoisonError, TryLockError,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    },
 };
 
 use metrics::gauge;
@@ -48,13 +51,13 @@ fn calculate_batch_memory_target(total_memory_bytes: u64, memory_budget_ratio: f
 fn calculate_per_slot_batch_size_target(
     snapshot_batch_target_bytes: u64,
     registered_batch_slots: usize,
-    max_batch_bytes: usize,
+    max_batch_bytes: NonZeroUsize,
 ) -> usize {
     let registered_batch_slots = registered_batch_slots.max(1);
     let per_slot_batch_size_bytes =
         (bytes_to_usize(snapshot_batch_target_bytes) / registered_batch_slots).max(1);
 
-    per_slot_batch_size_bytes.min(max_batch_bytes.max(1))
+    per_slot_batch_size_bytes.min(max_batch_bytes.get())
 }
 
 /// Capacity-derived values changed under one short update lock.
@@ -76,7 +79,7 @@ struct BatchMemoryState {
     /// Current advisory target for one registered batch slot.
     batch_size_target_bytes: AtomicUsize,
     /// Preferred ceiling for one batch.
-    max_batch_bytes: usize,
+    max_batch_bytes: NonZeroUsize,
 }
 
 impl BatchMemoryState {
@@ -84,9 +87,8 @@ impl BatchMemoryState {
     fn new(
         memory_capacity_revision: u64,
         snapshot_batch_target_bytes: u64,
-        max_batch_bytes: usize,
+        max_batch_bytes: NonZeroUsize,
     ) -> Self {
-        let max_batch_bytes = max_batch_bytes.max(1);
         let batch_size_target_bytes =
             calculate_per_slot_batch_size_target(snapshot_batch_target_bytes, 1, max_batch_bytes);
 
@@ -155,7 +157,7 @@ impl BatchMemoryGovernor {
         pipeline_id: PipelineId,
         memory_monitor: MemoryMonitor,
         memory_budget_ratio: f32,
-        max_batch_bytes: usize,
+        max_batch_bytes: NonZeroUsize,
     ) -> Self {
         let memory = memory_monitor.capacity_snapshot();
         let initial_batch_target_bytes = calculate_batch_memory_target(
@@ -264,6 +266,8 @@ impl Drop for BatchSlotsGuard {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroUsize;
+
     use super::*;
     use crate::runtime::MemoryMonitor;
 
@@ -271,7 +275,12 @@ mod tests {
     fn batch_size_target_divides_global_target_by_registered_batch_slots() {
         let memory_monitor = MemoryMonitor::new_for_test();
         memory_monitor.set_total_memory_bytes_for_test(10_000);
-        let governor = BatchMemoryGovernor::new("1".into(), memory_monitor, 0.2, 10_000);
+        let governor = BatchMemoryGovernor::new(
+            "1".into(),
+            memory_monitor,
+            0.2,
+            NonZeroUsize::new(10_000).unwrap(),
+        );
         let _guard = governor.register_batch_slots(4);
 
         assert_eq!(governor.batch_size_target_bytes(), 500);
@@ -281,7 +290,12 @@ mod tests {
     fn batch_size_target_is_stable_across_used_memory_changes() {
         let memory_monitor = MemoryMonitor::new_for_test();
         memory_monitor.set_memory_snapshot_for_test(2_000, 10_000);
-        let governor = BatchMemoryGovernor::new("1".into(), memory_monitor.clone(), 0.2, 10_000);
+        let governor = BatchMemoryGovernor::new(
+            "1".into(),
+            memory_monitor.clone(),
+            0.2,
+            NonZeroUsize::new(10_000).unwrap(),
+        );
         let revision = memory_monitor.capacity_revision();
 
         assert_eq!(governor.batch_size_target_bytes(), 2_000);
@@ -295,7 +309,12 @@ mod tests {
     fn batch_size_target_tracks_vertical_memory_limit_changes() {
         let memory_monitor = MemoryMonitor::new_for_test();
         memory_monitor.set_memory_snapshot_for_test(4_000, 10_000);
-        let governor = BatchMemoryGovernor::new("1".into(), memory_monitor.clone(), 0.2, 10_000);
+        let governor = BatchMemoryGovernor::new(
+            "1".into(),
+            memory_monitor.clone(),
+            0.2,
+            NonZeroUsize::new(10_000).unwrap(),
+        );
         let _guard = governor.register_batch_slots(2);
 
         assert_eq!(governor.batch_size_target_bytes(), 1_000);
@@ -314,7 +333,12 @@ mod tests {
     fn shared_target_refreshes_when_batch_slot_count_changes() {
         let memory_monitor = MemoryMonitor::new_for_test();
         memory_monitor.set_memory_snapshot_for_test(0, 10_000);
-        let governor = BatchMemoryGovernor::new("1".into(), memory_monitor, 0.2, 10_000);
+        let governor = BatchMemoryGovernor::new(
+            "1".into(),
+            memory_monitor,
+            0.2,
+            NonZeroUsize::new(10_000).unwrap(),
+        );
         let _first_slot = governor.register_batch_slots(1);
         assert_eq!(governor.batch_size_target_bytes(), 2_000);
 
@@ -330,7 +354,12 @@ mod tests {
         let memory_monitor = MemoryMonitor::new_for_test();
         memory_monitor.set_memory_snapshot_for_test(0, 10_000);
         memory_monitor.set_capacity_revision_for_test(u64::MAX);
-        let governor = BatchMemoryGovernor::new("1".into(), memory_monitor.clone(), 0.2, 10_000);
+        let governor = BatchMemoryGovernor::new(
+            "1".into(),
+            memory_monitor.clone(),
+            0.2,
+            NonZeroUsize::new(10_000).unwrap(),
+        );
 
         assert_eq!(governor.batch_size_target_bytes(), 2_000);
 
@@ -344,7 +373,12 @@ mod tests {
     fn target_read_does_not_wait_for_an_update_in_progress() {
         let memory_monitor = MemoryMonitor::new_for_test();
         memory_monitor.set_memory_snapshot_for_test(0, 10_000);
-        let governor = BatchMemoryGovernor::new("1".into(), memory_monitor.clone(), 0.2, 10_000);
+        let governor = BatchMemoryGovernor::new(
+            "1".into(),
+            memory_monitor.clone(),
+            0.2,
+            NonZeroUsize::new(10_000).unwrap(),
+        );
 
         let update_guard =
             governor.state.update_state.lock().unwrap_or_else(PoisonError::into_inner);
@@ -362,7 +396,12 @@ mod tests {
     fn batch_size_target_is_capped_by_configured_max_bytes() {
         let memory_monitor = MemoryMonitor::new_for_test();
         memory_monitor.set_total_memory_bytes_for_test(10 * 1024 * 1024 * 1024);
-        let governor = BatchMemoryGovernor::new("1".into(), memory_monitor, 0.2, 8 * 1024 * 1024);
+        let governor = BatchMemoryGovernor::new(
+            "1".into(),
+            memory_monitor,
+            0.2,
+            NonZeroUsize::new(8 * 1024 * 1024).unwrap(),
+        );
 
         assert_eq!(governor.batch_size_target_bytes(), 8 * 1024 * 1024);
     }
@@ -371,7 +410,12 @@ mod tests {
     fn batch_size_target_uses_global_target_when_lower_than_configured_max_bytes() {
         let memory_monitor = MemoryMonitor::new_for_test();
         memory_monitor.set_total_memory_bytes_for_test(10_000);
-        let governor = BatchMemoryGovernor::new("1".into(), memory_monitor, 0.2, 10_000);
+        let governor = BatchMemoryGovernor::new(
+            "1".into(),
+            memory_monitor,
+            0.2,
+            NonZeroUsize::new(10_000).unwrap(),
+        );
 
         assert_eq!(governor.batch_size_target_bytes(), 2_000);
     }

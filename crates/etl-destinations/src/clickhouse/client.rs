@@ -1,10 +1,14 @@
 use std::{
     future::Future,
+    iter::Peekable,
+    mem,
     sync::Arc,
     time::{Duration, Instant},
+    vec,
 };
 
-use clickhouse::Client;
+use bytes::Bytes;
+use clickhouse::{Client, insert_formatted::InsertFormatted};
 use etl::{
     destination::TableCopyBatchId,
     error::{ErrorKind, EtlError, EtlResult, Retryability},
@@ -299,12 +303,45 @@ impl From<EtlError> for InsertRowsError {
     }
 }
 
-/// Capacity of the internal write buffer used per INSERT statement.
+/// Size at which the body of an INSERT statement is sent as one chunk.
 ///
-/// When this many bytes have been written to the buffer it is flushed to the
-/// network (but the INSERT statement itself is not closed — that only happens
-/// when `end()` is called or the `max_bytes_per_insert` limit is reached).
-const BUFFERED_CAPACITY: usize = 256 * 1024;
+/// Chunks are sent while later rows are still being encoded, so a statement
+/// holds about this much encoded data in memory, not `max_bytes_per_insert`.
+/// With LZ4 enabled, each chunk is compressed on its own.
+const INSERT_CHUNK_CAPACITY: usize = 256 * 1024;
+
+/// Rows and row bytes written by one INSERT statement.
+struct InsertStatementSummary {
+    /// Rows encoded into the statement.
+    rows: u64,
+    /// Encoded row bytes, excluding the layout header.
+    bytes: u64,
+}
+
+/// Sends one chunk of an INSERT body.
+///
+/// A failed send only reports that the request closed, so the statement is
+/// ended to read ClickHouse's own error, such as a rejected layout.
+async fn send_insert_chunk(
+    mut insert: InsertFormatted,
+    chunk: Vec<u8>,
+) -> Result<InsertFormatted, clickhouse::error::Error> {
+    match insert.send(Bytes::from(chunk)).await {
+        Ok(()) => Ok(insert),
+        Err(send_error) => Err(insert.end().await.err().unwrap_or(send_error)),
+    }
+}
+
+/// Sends the last chunk of an INSERT body, if any, and waits for ClickHouse
+/// to commit the statement.
+async fn end_insert(
+    insert: InsertFormatted,
+    chunk: Vec<u8>,
+) -> Result<(), clickhouse::error::Error> {
+    let insert = if chunk.is_empty() { insert } else { send_insert_chunk(insert, chunk).await? };
+
+    insert.end().await
+}
 
 /// A ClickHouse table column returned from `system.columns`.
 #[derive(Debug, Clone, PartialEq, Eq, clickhouse::Row, serde::Deserialize)]
@@ -837,8 +874,10 @@ impl ClickHouseClient {
     ///
     /// When the accumulated uncompressed byte count reaches
     /// `max_bytes_per_insert` the current INSERT statement is committed and a
-    /// new one is opened, keeping peak memory usage bounded for large initial
-    /// copies.
+    /// new one is opened. Within a statement, rows are sent in chunks of
+    /// [`INSERT_CHUNK_CAPACITY`] as they are encoded. If a row fails to encode
+    /// or a chunk fails to send, the statement is aborted and ClickHouse
+    /// commits none of its rows; earlier statements stay committed.
     ///
     /// With `copy_batch_id`, statement `n` sends
     /// `insert_deduplication_token = "<batch id>-<n>"`. Without a token,
@@ -863,7 +902,6 @@ impl ClickHouseClient {
     ) -> Result<(), InsertRowsError> {
         let sql = build_insert_rows_sql(table_name, layout);
         let mut rows = rows.into_iter().peekable();
-        let mut row_buf = Vec::new();
         // Formatted text of the current cell, reused for every row.
         let mut scratch = String::new();
         let mut statements = 0u64;
@@ -882,68 +920,35 @@ impl ClickHouseClient {
                 insert = insert
                     .with_option("insert_deduplication_token", format!("{batch_id}-{statements}"));
             }
-            let mut insert = insert.buffered_with_capacity(BUFFERED_CAPACITY);
-            insert.write_buffered(&layout.header);
-            // Only row bytes count toward the budget, so every statement
-            // carries at least one row even when the budget is tiny.
-            let mut bytes = 0u64;
-            let mut rows_in_statement = 0u64;
             let insert_start = Instant::now();
 
-            while bytes < max_bytes_per_insert {
-                let Some(row) = rows.next() else { break };
-                row_buf.clear();
-                encode_row(&row, &layout.column_encodings, &mut scratch, &mut row_buf)
-                    .inspect_err(|_| {
-                        metrics::counter!(
-                            ETL_CLICKHOUSE_INSERT_ENCODING_ERRORS_TOTAL,
-                            REPLICATION_PATH_LABEL => replication_path,
-                        )
-                        .increment(1);
-                    })?;
-                insert.write_buffered(&row_buf);
-                bytes += row_buf.len() as u64;
-                rows_in_statement += 1;
-            }
+            let summary = self
+                .write_insert_statement(
+                    insert,
+                    &mut rows,
+                    layout,
+                    max_bytes_per_insert,
+                    &mut scratch,
+                    table_name,
+                    replication_path,
+                )
+                .await?;
 
-            let mut layout_rejected = false;
-            let result = timeout_call(
-                ClickHouseOperationKind::Insert,
-                &self.config,
-                Some(&format!("table: {table_name}")),
-                insert.end().inspect_err(|error| {
-                    layout_rejected = is_insert_layout_rejection(error);
-                }),
+            metrics::histogram!(
+                ETL_CLICKHOUSE_INSERT_DURATION_SECONDS,
+                REPLICATION_PATH_LABEL => replication_path,
             )
-            .await;
-            match result.as_ref() {
-                Ok(_) => {
-                    metrics::histogram!(
-                        ETL_CLICKHOUSE_INSERT_DURATION_SECONDS,
-                        REPLICATION_PATH_LABEL => replication_path,
-                    )
-                    .record(insert_start.elapsed().as_secs_f64());
-                    metrics::histogram!(
-                        ETL_CLICKHOUSE_INSERT_ROWS,
-                        REPLICATION_PATH_LABEL => replication_path,
-                    )
-                    .record(rows_in_statement as f64);
-                    metrics::histogram!(
-                        ETL_CLICKHOUSE_INSERT_BYTES,
-                        REPLICATION_PATH_LABEL => replication_path,
-                    )
-                    .record(bytes as f64);
-                }
-                Err(err) => {
-                    metrics::counter!(
-                        ETL_CLICKHOUSE_INSERT_ERRORS_TOTAL,
-                        REPLICATION_PATH_LABEL => replication_path,
-                        "outcome" => outcome_label(err),
-                    )
-                    .increment(1);
-                }
-            }
-            result.map_err(|error| InsertRowsError { error, layout_rejected })?;
+            .record(insert_start.elapsed().as_secs_f64());
+            metrics::histogram!(
+                ETL_CLICKHOUSE_INSERT_ROWS,
+                REPLICATION_PATH_LABEL => replication_path,
+            )
+            .record(summary.rows as f64);
+            metrics::histogram!(
+                ETL_CLICKHOUSE_INSERT_BYTES,
+                REPLICATION_PATH_LABEL => replication_path,
+            )
+            .record(summary.bytes as f64);
             statements += 1;
         }
 
@@ -956,6 +961,89 @@ impl ClickHouseClient {
         }
 
         Ok(())
+    }
+
+    /// Encodes rows into one INSERT statement until its byte budget is spent,
+    /// sending each full chunk as it fills, then commits the statement.
+    ///
+    /// Only row bytes count toward the budget, so every statement carries at
+    /// least one row even when the budget is tiny.
+    #[expect(clippy::too_many_arguments, reason = "one statement of insert_rows")]
+    async fn write_insert_statement(
+        &self,
+        mut insert: InsertFormatted,
+        rows: &mut Peekable<vec::IntoIter<ClickHouseRow>>,
+        layout: &RowBinaryLayout,
+        max_bytes_per_insert: u64,
+        scratch: &mut String,
+        table_name: &str,
+        replication_path: &'static str,
+    ) -> Result<InsertStatementSummary, InsertRowsError> {
+        let mut chunk = Vec::with_capacity(INSERT_CHUNK_CAPACITY);
+        chunk.extend_from_slice(&layout.header);
+        let mut summary = InsertStatementSummary { rows: 0, bytes: 0 };
+
+        while summary.bytes < max_bytes_per_insert {
+            let Some(row) = rows.next() else { break };
+            let row_start = chunk.len();
+            encode_row(&row, &layout.column_encodings, scratch, &mut chunk).inspect_err(|_| {
+                metrics::counter!(
+                    ETL_CLICKHOUSE_INSERT_ENCODING_ERRORS_TOTAL,
+                    REPLICATION_PATH_LABEL => replication_path,
+                )
+                .increment(1);
+            })?;
+            summary.bytes += (chunk.len() - row_start) as u64;
+            summary.rows += 1;
+
+            if chunk.len() >= INSERT_CHUNK_CAPACITY {
+                let full = mem::replace(&mut chunk, Vec::with_capacity(INSERT_CHUNK_CAPACITY));
+                insert = self
+                    .insert_network_step(
+                        table_name,
+                        replication_path,
+                        send_insert_chunk(insert, full),
+                    )
+                    .await?;
+            }
+        }
+
+        self.insert_network_step(table_name, replication_path, end_insert(insert, chunk)).await?;
+
+        Ok(summary)
+    }
+
+    /// Runs one network step of an INSERT statement under the insert timeout.
+    ///
+    /// A failure increments the insert error counter and records whether
+    /// ClickHouse rejected the statement's layout.
+    async fn insert_network_step<T>(
+        &self,
+        table_name: &str,
+        replication_path: &'static str,
+        step: impl Future<Output = Result<T, clickhouse::error::Error>>,
+    ) -> Result<T, InsertRowsError> {
+        let mut layout_rejected = false;
+        let result = timeout_call(
+            ClickHouseOperationKind::Insert,
+            &self.config,
+            Some(&format!("table: {table_name}")),
+            step.inspect_err(|error| {
+                layout_rejected = is_insert_layout_rejection(error);
+            }),
+        )
+        .await;
+
+        result.map_err(|error| {
+            metrics::counter!(
+                ETL_CLICKHOUSE_INSERT_ERRORS_TOTAL,
+                REPLICATION_PATH_LABEL => replication_path,
+                "outcome" => outcome_label(&error),
+            )
+            .increment(1);
+
+            InsertRowsError { error, layout_rejected }
+        })
     }
 }
 

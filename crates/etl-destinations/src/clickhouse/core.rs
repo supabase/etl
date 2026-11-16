@@ -693,9 +693,9 @@ pub struct ClickHouseClientConfig {
     pub schema_query_timeout: Duration,
     /// Server-side budget for DDL (CREATE / ALTER / DROP / RENAME / TRUNCATE).
     pub ddl_timeout: Duration,
-    /// Server-side budget per INSERT statement. Wraps `insert.end().await`,
-    /// which is the only awaited network step inside `insert_rows`; each
-    /// flushed chunk therefore gets its own deadline.
+    /// Server-side budget for each network step of an INSERT statement:
+    /// sending one chunk of the body, or sending the last chunk and waiting
+    /// for ClickHouse to commit the statement.
     pub insert_timeout: Duration,
     /// Slack added to the server-side budget to derive the client-side
     /// `tokio::time::timeout`.

@@ -1,5 +1,6 @@
 use std::{
     fs,
+    num::{NonZeroU16, NonZeroU64},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -118,8 +119,8 @@ struct TableCopyReport {
     /// That CPU time per copied row, in microseconds.
     #[serde(skip_serializing_if = "Option::is_none")]
     copy_cpu_micros_per_row: Option<f64>,
-    max_table_sync_workers: u16,
-    max_copy_connections_per_table: u16,
+    max_table_sync_workers: NonZeroU16,
+    max_copy_connections_per_table: NonZeroU16,
     batch_max_fill_ms: u64,
     memory_budget_ratio: f32,
     memory_backpressure_enabled: bool,
@@ -134,7 +135,7 @@ struct TableCopyReport {
 #[derive(Debug, Serialize)]
 struct DuckLakeCopyBufferReport {
     enabled: bool,
-    target_bytes: u64,
+    target_bytes: NonZeroU64,
     max_total_bytes: u64,
     peak_staged_bytes: u64,
 }
@@ -321,7 +322,7 @@ fn print_summary(report: &TableCopyReport) {
         println!("  Copy buffer   {}", if copy_buffer.enabled { "enabled" } else { "disabled" });
         println!(
             "    Target      {} MiB",
-            format_decimal(bytes_to_mib(copy_buffer.target_bytes), 2)
+            format_decimal(bytes_to_mib(copy_buffer.target_bytes.get()), 2)
         );
         println!(
             "    Max total   {} MiB",
@@ -543,7 +544,7 @@ async fn run_ducklake_compaction(args: &RunArgs) -> Result<Option<DuckLakeCompac
 
         let writer_config = DuckLakeWriterConfig::default();
         let target_file_size = writer_config.target_file_size().to_owned();
-        let max_tables_per_run = u32::try_from(args.table_ids.len()).unwrap_or(u32::MAX).max(1);
+        let max_tables_per_run = u16::try_from(args.table_ids.len()).unwrap_or(u16::MAX).max(1);
         let maintenance_config = DuckLakeMaintenanceConfig {
             catalog_url,
             catalog_pooler_url: None,

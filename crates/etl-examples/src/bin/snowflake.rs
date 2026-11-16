@@ -17,7 +17,11 @@
 ///         --db-username postgres \
 ///         --db-password postgres \
 ///         --publication seed_pub
-use std::{error::Error, sync::Arc, sync::Once};
+use std::num::NonZeroU16;
+use std::{
+    error::Error,
+    sync::{Arc, Once},
+};
 
 use clap::{Args, Parser};
 use etl::{
@@ -91,7 +95,7 @@ struct SnowflakeArgs {
     /// Maximum number of concurrent table sync workers (higher values = faster
     /// initial sync, more resource usage)
     #[arg(long, default_value = "4")]
-    max_table_sync_workers: u16,
+    max_table_sync_workers: NonZeroU16,
 }
 
 /// Entry point — handles error reporting and process exit.
@@ -169,13 +173,14 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         batch: BatchConfig {
             max_fill_ms: args.sf_args.max_batch_fill_duration_ms,
             memory_budget_ratio: 0.2,
-            max_bytes: 32 * 1024 * 1024,
+            max_bytes: BatchConfig::DEFAULT_MAX_BYTES,
         },
         table_error_retry_delay_ms: 10_000,
-        table_error_retry_max_attempts: 5,
+        table_error_retry_max_attempts: PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS,
         max_table_sync_workers: args.sf_args.max_table_sync_workers,
-        memory_refresh_interval_ms: 100,
-        table_sync_monitor_refresh_interval_ms: 10_000,
+        memory_refresh_interval_ms: PipelineConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS,
+        table_sync_monitor_refresh_interval_ms:
+            PipelineConfig::DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS,
         replication_lag_refresh_interval_ms:
             PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS,
         settle_durable_interval_ms: None,
@@ -185,7 +190,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         run_source_migrations: true,
         drain_on_shutdown: true,
         shutdown_drain_timeout_ms: PipelineConfig::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS,
-        max_copy_connections_per_table: 2,
+        max_copy_connections_per_table: NonZeroU16::new(2).unwrap(),
     };
 
     let sf_config = Config::require_tests_env()?;

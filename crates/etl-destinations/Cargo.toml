@@ -59,6 +59,7 @@ bigquery = [
 ]
 clickhouse = [
     "dep:thiserror",
+    "dep:bytes",
     "dep:clickhouse",
     "dep:metrics",
     "dep:hyper-rustls",
