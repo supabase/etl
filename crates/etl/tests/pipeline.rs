@@ -1,4 +1,4 @@
-use std::{error::Error, sync::Arc, time::Duration};
+use std::{error::Error, num::NonZeroU64, sync::Arc, time::Duration};
 
 use etl::{
     activity::{self, ActivityKind},
@@ -1340,7 +1340,7 @@ async fn table_copy_replicates_many_rows_with_parallel_connections() {
     .with_batch_config(BatchConfig {
         max_fill_ms: 1000,
         memory_budget_ratio: 0.2,
-        max_bytes: 8 * 1024 * 1024,
+        max_bytes: NonZeroU64::new(8 * 1024 * 1024).unwrap(),
     })
     .build();
 
@@ -1385,7 +1385,11 @@ async fn table_copy_waits_for_durable_terminal_barrier_after_accepted_write() {
         destination.clone(),
     )
     .with_max_copy_connections_per_table(1)
-    .with_batch_config(BatchConfig { max_fill_ms: 1000, memory_budget_ratio: 0.2, max_bytes: 1 })
+    .with_batch_config(BatchConfig {
+        max_fill_ms: 1000,
+        memory_budget_ratio: 0.2,
+        max_bytes: NonZeroU64::MIN,
+    })
     .build();
 
     // Arm notifications before starting because they only observe future

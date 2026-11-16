@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    num::NonZeroU16,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -601,7 +602,7 @@ pub struct DuckLakeDestination<S> {
     /// Atomically replaceable streaming and initial-copy connection pools.
     pools: Arc<DuckLakePoolHandle>,
     /// Number of warm connections created in each DuckDB pool.
-    pool_size: u32,
+    pool_size: NonZeroU16,
     blocking_slots: Arc<Semaphore>,
     /// Global gate that excludes external maintenance from foreground and
     /// table-scoped mutations after pinned copy sessions have drained.
@@ -676,7 +677,7 @@ pub struct DuckLakeDestinationBuilder<S> {
     /// Parquet data path.
     data_path: Url,
     /// Number of warm DuckDB connections per pool.
-    pool_size: u32,
+    pool_size: NonZeroU16,
     /// Optional S3 credentials and endpoint configuration.
     s3: Option<S3Config>,
     /// Optional schema that stores DuckLake metadata.
@@ -706,7 +707,7 @@ pub struct DuckLakeDestinationBuilder<S> {
 impl<S> DuckLakeDestinationBuilder<S> {
     /// Creates a builder with every optional runtime policy disabled or
     /// defaulted.
-    fn new(catalog_url: Url, data_path: Url, pool_size: u32, store: S) -> Self {
+    fn new(catalog_url: Url, data_path: Url, pool_size: NonZeroU16, store: S) -> Self {
         Self {
             catalog_url,
             catalog_pooler_url: None,
@@ -1817,7 +1818,7 @@ where
     pub fn builder(
         catalog_url: Url,
         data_path: Url,
-        pool_size: u32,
+        pool_size: NonZeroU16,
         store: S,
     ) -> DuckLakeDestinationBuilder<S> {
         DuckLakeDestinationBuilder::new(catalog_url, data_path, pool_size, store)
@@ -1855,7 +1856,7 @@ where
     pub async fn new(
         catalog_url: Url,
         data_path: Url,
-        pool_size: u32,
+        pool_size: NonZeroU16,
         s3: Option<S3Config>,
         metadata_schema: Option<String>,
         maintenance_target_file_size: Option<String>,
@@ -1876,7 +1877,7 @@ where
     pub async fn new_with_writer_config(
         catalog_url: Url,
         data_path: Url,
-        pool_size: u32,
+        pool_size: NonZeroU16,
         s3: Option<S3Config>,
         metadata_schema: Option<String>,
         writer_config: DuckLakeWriterConfig,
@@ -1908,7 +1909,7 @@ where
     pub async fn new_with_external_maintenance(
         catalog_url: Url,
         data_path: Url,
-        pool_size: u32,
+        pool_size: NonZeroU16,
         s3: Option<S3Config>,
         metadata_schema: Option<String>,
         maintenance_target_file_size: Option<String>,
@@ -1932,7 +1933,7 @@ where
     pub async fn new_with_table_sorting_and_external_maintenance(
         catalog_url: Url,
         data_path: Url,
-        pool_size: u32,
+        pool_size: NonZeroU16,
         s3: Option<S3Config>,
         metadata_schema: Option<String>,
         maintenance_target_file_size: Option<String>,
@@ -1958,7 +1959,7 @@ where
         catalog_url: Url,
         catalog_pooler_url: Option<Url>,
         data_path: Url,
-        pool_size: u32,
+        pool_size: NonZeroU16,
         s3: Option<S3Config>,
         metadata_schema: Option<String>,
         table_namespace: Option<String>,
@@ -1983,13 +1984,6 @@ where
             ));
         }
 
-        if pool_size == 0 {
-            return Err(etl_error!(
-                ErrorKind::ConfigError,
-                "DuckLake pool size must be greater than zero",
-                "Pool size must be at least 1"
-            ));
-        }
         copy_buffer_config.validate().map_err(|error| {
             classified_error(
                 ErrorKind::ConfigError,
@@ -2067,7 +2061,8 @@ where
         let pool = Arc::new(
             build_warm_ducklake_pool(manager.as_ref().clone(), pool_size, "write", ()).await?,
         );
-        let blocking_slots = Arc::new(Semaphore::new(pool_size as usize));
+        let pool_permits = usize::from(pool_size.get());
+        let blocking_slots = Arc::new(Semaphore::new(pool_permits));
 
         if table_namespace.is_some() {
             run_duckdb_blocking(Arc::clone(&pool), Arc::clone(&blocking_slots), |conn| {
@@ -2172,13 +2167,6 @@ where
                     error,
                 )
             })?;
-        let copy_session_permits = usize::try_from(pool_size).map_err(|error| {
-            classified_error(
-                ErrorKind::ConfigError,
-                "DuckLake pool size does not fit this platform",
-                error,
-            )
-        })?;
 
         // Persist helper-table inlining options before warming COPY
         // connections. Actively copied user tables temporarily override the
@@ -2233,8 +2221,8 @@ where
             copy_buffer_capacity: Arc::new(Semaphore::new(copy_buffer_max_permits)),
             copy_buffer_max_permits,
             copy_buffer_peak_staged_bytes: Arc::new(AtomicU64::new(0)),
-            copy_session_slots: Arc::new(Semaphore::new(copy_session_permits)),
-            copy_buffers: Arc::new(Mutex::new(HashMap::with_capacity(copy_session_permits))),
+            copy_session_slots: Arc::new(Semaphore::new(pool_permits)),
+            copy_buffers: Arc::new(Mutex::new(HashMap::with_capacity(pool_permits))),
             failed_copy_buffers: Arc::default(),
             copy_direct_to_parquet_tables: Arc::default(),
             store,
@@ -2242,7 +2230,7 @@ where
             applied_batches_table_created,
             streaming_progress_table_created,
         };
-        gauge!(ETL_DUCKLAKE_POOL_SIZE).set(f64::from(pool_size));
+        gauge!(ETL_DUCKLAKE_POOL_SIZE).set(f64::from(pool_size.get()));
         destination.metrics_sampler = Arc::new(
             spawn_ducklake_metrics_sampler(
                 metadata_schema.to_string(),
@@ -2689,7 +2677,7 @@ where
         handle.reservations.lock().push(reservation);
         let blocking_handle = Arc::clone(&handle);
         let connection = handle.connection.clone();
-        let target_bytes = self.copy_buffer_config.target_bytes;
+        let target_bytes = self.copy_buffer_config.target_bytes.get();
         let table_write_permit = Arc::clone(&table_write_permit);
         let append_result = run_duckdb_dedicated_blocking_with_context(
             connection,
@@ -5302,7 +5290,7 @@ mod tests {
         let error = DuckLakeDestination::new_with_table_sorting_and_external_maintenance(
             Url::parse("postgres://localhost/ducklake").unwrap(),
             Url::parse("file:///tmp/ducklake").unwrap(),
-            1,
+            NonZeroU16::MIN,
             None,
             None,
             None,
@@ -6238,12 +6226,13 @@ mod tests {
             let replicated = ReplicatedTableSchema::all(Arc::new(schema.clone()));
             let table = table_name_to_ducklake_table_name(&schema.name).unwrap();
             store.store_table_schema(schema).await.unwrap();
-            let destination = DuckLakeDestination::builder(catalog.clone(), data.clone(), 1, store)
-                .catalog_pooler_url(Some(pooler.clone()))
-                .copy_buffer(DuckLakeCopyBufferConfig { enabled: false, ..Default::default() })
-                .build()
-                .await
-                .unwrap();
+            let destination =
+                DuckLakeDestination::builder(catalog.clone(), data.clone(), NonZeroU16::MIN, store)
+                    .catalog_pooler_url(Some(pooler.clone()))
+                    .copy_buffer(DuckLakeCopyBufferConfig { enabled: false, ..Default::default() })
+                    .build()
+                    .await
+                    .unwrap();
             assert!(
                 metrics
                     .render()
@@ -6405,10 +6394,18 @@ mod tests {
             let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
             store.store_table_schema(schema).await.expect("failed to seed schema");
-            let destination =
-                DuckLakeDestination::new(catalog, data, 1, None, None, None, None, store)
-                    .await
-                    .expect("failed to create destination");
+            let destination = DuckLakeDestination::new(
+                catalog,
+                data,
+                NonZeroU16::MIN,
+                None,
+                None,
+                None,
+                None,
+                store,
+            )
+            .await
+            .expect("failed to create destination");
             destination
                 .write_table_rows(
                     &replicated_table_schema,
@@ -6483,7 +6480,7 @@ mod tests {
             let destination = DuckLakeDestination::new(
                 catalog.clone(),
                 data.clone(),
-                1,
+                NonZeroU16::MIN,
                 None,
                 None,
                 None,
@@ -6557,7 +6554,7 @@ mod tests {
             let destination = DuckLakeDestination::new(
                 catalog.clone(),
                 data.clone(),
-                1,
+                NonZeroU16::MIN,
                 None,
                 None,
                 None,
@@ -6628,7 +6625,7 @@ mod tests {
             let destination = DuckLakeDestination::new(
                 catalog.clone(),
                 data.clone(),
-                1,
+                NonZeroU16::MIN,
                 None,
                 None,
                 None,

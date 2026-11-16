@@ -11,7 +11,7 @@ use std::{
 };
 
 use etl_config::shared::{
-    Validate, validate_copy_concurrency, validate_refresh_intervals, validate_source_tls_config,
+    Validate, validate_copy_concurrency, validate_source_tls_config,
     validate_table_error_retry_delay_ms,
 };
 use etl_postgres::slots::EtlReplicationSlot;
@@ -152,7 +152,7 @@ where
     /// the apply worker for processing replication stream events.
     ///
     /// An invalid pipeline ID, invalid copy concurrency, an unsupported retry
-    /// delay, a zero monitor interval, invalid slot options, or a blank trust
+    /// delay, invalid slot options, or a blank trust
     /// bundle with source TLS enabled returns [`ErrorKind::ConfigError`]
     /// before any startup work.
     /// After this method succeeds, subsequent calls return
@@ -182,15 +182,6 @@ where
         self.config.replication_slot.validate().map_err(|err| {
             etl_error!(ErrorKind::ConfigError, "Invalid replication slot configuration", source: err)
         })?;
-
-        validate_refresh_intervals(
-            self.config.memory_refresh_interval_ms,
-            self.config.table_sync_monitor_refresh_interval_ms,
-            self.config.replication_lag_refresh_interval_ms,
-        )
-        .map_err(
-            |err| etl_error!(ErrorKind::ConfigError, "Invalid refresh interval", source: err),
-        )?;
 
         info!(
             publication_name = %self.config.publication_name,
@@ -233,14 +224,14 @@ where
         // We create the permits semaphore which is used to control how many
         // table sync workers can be running at the same time.
         let table_sync_worker_permits =
-            Arc::new(Semaphore::new(self.config.max_table_sync_workers as usize));
+            Arc::new(Semaphore::new(usize::from(self.config.max_table_sync_workers.get())));
 
         // Share one lazy source SQL pool and one sampler across all copy and
         // CDC workers without using their replication connections.
         let replication_lag_monitor = ReplicationLagMonitor::new(
             self.pipeline_id.clone(),
             &self.config.pg_connection,
-            Duration::from_millis(self.config.replication_lag_refresh_interval_ms),
+            Duration::from_millis(self.config.replication_lag_refresh_interval_ms.get()),
         );
 
         let replication_lag_sampler_task =
