@@ -6,15 +6,13 @@ use xshell::{Cmd, Shell, cmd};
 
 use crate::utils::{
     CargoFeatureSelection, DEFAULT_BASE_PORT, DefaultFeatureBehavior, DestinationPreset,
-    maybe_with_sccache,
+    PROPERTY_TEST_BUDGET_ENV, maybe_with_sccache,
 };
 
 const GREEN: &str = "\x1b[32m";
 const YELLOW: &str = "\x1b[33m";
 const RESET: &str = "\x1b[0m";
 const SNOWFLAKE_CONNECTION_ENV: &str = "TESTS_SNOWFLAKE_CONNECTION";
-/// Wall-clock budget variable read by the shared property runner.
-const PROPERTY_TEST_BUDGET_ENV: &str = "PROPERTY_TEST_BUDGET_SECS";
 /// Default budget for the credentialed run, whose only property is the
 /// crash-replay suite. A Snowflake case can take minutes to settle, so the
 /// runner's short default would allow about one case.

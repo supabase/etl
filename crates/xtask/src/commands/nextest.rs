@@ -361,6 +361,7 @@ fn junit_path(profile: &str) -> PathBuf {
 /// [`TestManifest`].
 fn write_test_manifest(mode: Mode, profiles: &[&str], path: &Path) -> Result<()> {
     let job = TestJob::from_env()?;
+    let property_budget_secs = test_manifest::property_budget_from_env()?;
     let mut tests = Vec::new();
     for profile in profiles {
         let junit = junit_path(profile);
@@ -383,7 +384,8 @@ fn write_test_manifest(mode: Mode, profiles: &[&str], path: &Path) -> Result<()>
     }
 
     let count = tests.len();
-    let manifest = TestManifest::new(matches!(mode, Mode::LlvmCov), job, tests);
+    let manifest =
+        TestManifest::new(matches!(mode, Mode::LlvmCov), property_budget_secs, job, tests);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create {}", parent.display()))?;
