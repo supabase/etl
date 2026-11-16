@@ -283,6 +283,9 @@ pub(crate) fn encode_to_row_binary(
     Ok(())
 }
 
+#[cfg(kani)]
+mod verification;
+
 #[cfg(test)]
 mod tests {
     use chrono::NaiveDate;
