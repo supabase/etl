@@ -262,6 +262,8 @@ pub(super) fn yaml_string(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use tempfile::TempDir;
+
     use super::*;
 
     #[test]
@@ -279,13 +281,11 @@ mod tests {
 
     #[test]
     fn ensure_config_dir_creates_missing_directory() {
-        let directory = std::env::temp_dir()
-            .join(format!("etl-xtask-config-{}", std::process::id()))
-            .join("configuration");
-        let _ = fs::remove_dir_all(directory.parent().unwrap());
+        let temp_dir = TempDir::new().unwrap();
+        let directory = temp_dir.path().join("configuration");
         assert!(!directory.exists());
         ensure_config_dir(&directory).unwrap();
         assert!(directory.is_dir());
-        fs::remove_dir_all(directory.parent().unwrap()).unwrap();
+        temp_dir.close().unwrap();
     }
 }

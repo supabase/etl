@@ -12,7 +12,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
-use pg_escape::quote_identifier;
+use pg_escape::{quote_identifier, quote_literal};
 
 const DEFAULT_DB_HOST: &str = "localhost";
 const DEFAULT_DB_PORT: u16 = 5432;
@@ -283,7 +283,7 @@ impl PgFillTableArgs {
     fn table_size_bytes(&self, table: &QualifiedTable) -> Result<u64> {
         let sql = format!(
             "select coalesce(pg_total_relation_size(to_regclass({})), 0)",
-            quote_literal(&table.display())
+            quote_literal(&table.quoted())
         );
         let output = self.psql_query(&sql)?;
         output.trim().parse().context("failed to parse table size")
@@ -537,10 +537,6 @@ fn validate_identifier(identifier: &str, label: &str) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn quote_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
 }
 
 fn apply_psql_conn_params(command: &mut Command, conn_params: &str) {

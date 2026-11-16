@@ -18,6 +18,7 @@
 use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, NaiveDateTime, Utc};
 use etl::{
     data::{ArrayCell, Cell, Date, PgTime, Timestamp},
+    error::ErrorKind,
     schema::ColumnSchema,
     test_utils::{
         database::spawn_source_database,
@@ -742,8 +743,9 @@ async fn json_and_jsonb_values_decode_to_their_jsonb_meaning() {
     let statements = JsonRenderStatements::prepare(client).await;
 
     // Nesting stops at serde_json's recursion limit. Deeper documents, which
-    // Postgres accepts, are a known defect covered by
-    // `json_nested_past_serde_recursion_limit_decodes` and
+    // Postgres accepts, fail with a typed error covered by
+    // `json_nested_past_serde_recursion_limit_is_an_unsupported_source_value`.
+    // Decoding them is covered by
     // `deep_json_values_decode_to_their_jsonb_meaning`.
     let strategy = json_document(true, 0..=SERDE_JSON_MAX_DEPTH - JSON_TREE_MAX_DEPTH);
     run_property("json/jsonb decode", &strategy, |(document, whitespace)| {
@@ -752,7 +754,8 @@ async fn json_and_jsonb_values_decode_to_their_jsonb_meaning() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "known defect: serde_json's recursion limit rejects json nested deeper than 127 levels"]
+#[ignore = "known limitation: json nested deeper than 127 levels fails with UnsupportedSourceValue \
+            instead of decoding"]
 async fn deep_json_values_decode_to_their_jsonb_meaning() {
     init_test_tracing();
 
@@ -766,16 +769,15 @@ async fn deep_json_values_decode_to_their_jsonb_meaning() {
     });
 }
 
+/// Postgres accepts this document as both json and jsonb, so the codec must
+/// name the limit instead of failing as if the value were malformed.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "known defect: serde_json's recursion limit rejects json nested deeper than 127 levels"]
-async fn json_nested_past_serde_recursion_limit_decodes() {
+async fn json_nested_past_serde_recursion_limit_is_an_unsupported_source_value() {
     init_test_tracing();
 
     let database = spawn_source_database().await;
     let client = database.client.as_ref().unwrap();
 
-    // Postgres accepts this document as both json and jsonb, so a row holding
-    // it halts replication and table copy on every retry.
     let depth = SERDE_JSON_MAX_DEPTH + 1;
     let document = format!("{}{}", "[".repeat(depth), "]".repeat(depth));
     for typ in [Type::JSON, Type::JSONB] {
@@ -785,8 +787,8 @@ async fn json_nested_past_serde_recursion_limit_decodes() {
             .unwrap()
             .get(0);
 
-        let cell = parse_text_cell(&typ, &rendered).unwrap();
-        assert!(matches!(cell, Cell::Json(_)));
+        let error = parse_text_cell(&typ, &rendered).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::UnsupportedSourceValue, "{typ}");
     }
 }
 

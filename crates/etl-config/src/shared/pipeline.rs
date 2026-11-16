@@ -1366,31 +1366,9 @@ mod tests {
 
     #[test]
     fn pipeline_config_store_pg_connection_defaults_to_pg_connection() {
-        let pg_connection = pg_connection("replica.local", 5432);
-        let config = PipelineConfig {
-            id: "1".into(),
-            publication_name: "publication".to_owned(),
-            pg_connection,
-            store_pg_connection: None,
-            replication_slot: ReplicationSlotConfig::default(),
-            batch: BatchConfig::default(),
-            table_error_retry_delay_ms: PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_DELAY_MS,
-            table_error_retry_max_attempts: PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS,
-            max_table_sync_workers: PipelineConfig::DEFAULT_MAX_TABLE_SYNC_WORKERS,
-            max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
-            memory_refresh_interval_ms: PipelineConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS,
-            table_sync_monitor_refresh_interval_ms:
-                PipelineConfig::DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS,
-            replication_lag_refresh_interval_ms:
-                PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS,
-            settle_durable_interval_ms: None,
-            memory_backpressure: Some(MemoryBackpressureConfig::default()),
-            table_sync_copy: TableSyncCopyConfig::default(),
-            invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
-            run_source_migrations: true,
-            drain_on_shutdown: true,
-            shutdown_drain_timeout_ms: PipelineConfig::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS,
-        };
+        let mut config: PipelineConfig = serde_json::from_value(pipeline_config_json()).unwrap();
+        config.pg_connection = pg_connection("replica.local", 5432);
+        config.store_pg_connection = None;
 
         assert_eq!(config.store_pg_connection().host, "replica.local");
         assert_eq!(config.store_pg_connection().port, 5432);
@@ -1398,30 +1376,9 @@ mod tests {
 
     #[test]
     fn pipeline_config_store_pg_connection_uses_override() {
-        let config = PipelineConfig {
-            id: "1".into(),
-            publication_name: "publication".to_owned(),
-            pg_connection: pg_connection("replica.local", 5432),
-            store_pg_connection: Some(pg_connection("primary.local", 6432)),
-            replication_slot: ReplicationSlotConfig::default(),
-            batch: BatchConfig::default(),
-            table_error_retry_delay_ms: PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_DELAY_MS,
-            table_error_retry_max_attempts: PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS,
-            max_table_sync_workers: PipelineConfig::DEFAULT_MAX_TABLE_SYNC_WORKERS,
-            max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
-            memory_refresh_interval_ms: PipelineConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS,
-            table_sync_monitor_refresh_interval_ms:
-                PipelineConfig::DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS,
-            replication_lag_refresh_interval_ms:
-                PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS,
-            settle_durable_interval_ms: None,
-            memory_backpressure: Some(MemoryBackpressureConfig::default()),
-            table_sync_copy: TableSyncCopyConfig::default(),
-            invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
-            run_source_migrations: true,
-            drain_on_shutdown: true,
-            shutdown_drain_timeout_ms: PipelineConfig::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS,
-        };
+        let mut config: PipelineConfig = serde_json::from_value(pipeline_config_json()).unwrap();
+        config.pg_connection = pg_connection("replica.local", 5432);
+        config.store_pg_connection = Some(pg_connection("primary.local", 6432));
 
         assert_eq!(config.store_pg_connection().host, "primary.local");
         assert_eq!(config.store_pg_connection().port, 6432);

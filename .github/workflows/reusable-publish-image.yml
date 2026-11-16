@@ -28,7 +28,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: image-build-${{ inputs.commit || github.event.pull_request.merge_commit_sha || github.sha }}
+  group: image-build-${{ inputs.commit || github.sha }}
   cancel-in-progress: false
   queue: max
 
@@ -56,7 +56,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
           # Resolve source once; both native builds use prepare.outputs.sha.
-          ref: ${{ inputs.commit || github.event.pull_request.merge_commit_sha || github.sha }}
+          ref: ${{ inputs.commit || github.sha }}
       - name: Validate build worker size
         env:
           BUILD_VCPUS: ${{ inputs.build-vcpus }}
@@ -68,7 +68,7 @@ jobs:
       - name: Validate image tags
         id: tags
         env:
-          STABLE: ${{ github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main' }}
+          STABLE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           COMMIT: ${{ inputs.commit }}
           VERSION: ${{ inputs.version }}
         run: |
@@ -95,7 +95,7 @@ jobs:
             fi
           else
             if [[ -n "$VERSION" ]]; then
-              echo '::error::Release image tags require a merged main PR'
+              echo '::error::Release image tags require a push to main'
               exit 1
             fi
             tags="$sha-experimental"

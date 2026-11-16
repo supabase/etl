@@ -2029,8 +2029,18 @@ mod tests {
                     }
                 });
 
+                // Wait for the watchdog itself to observe the deadline. A fixed
+                // sleep can expire in the same driver turn as the deadline, and
+                // the watchdog then sees `done` first and correctly skips the
+                // timeout.
                 if signal_after_deadline {
-                    tokio::time::sleep(WATCHDOG_DEADLINE * 2).await;
+                    tokio::time::timeout(WATCHDOG_JOIN_TIMEOUT, async {
+                        while !watchdog.timed_out() {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .expect("watchdog should observe its deadline");
                 }
 
                 barrier.wait().await;
