@@ -95,6 +95,8 @@ snowflake = [
 ]
 # Additional dependencies for destination test helpers.
 test-utils = ["dep:async-trait", "dep:uuid", "etl/test-utils"]
+# Benchmark-only entrypoints for internal hot paths.
+benchmarking = []
 
 [dependencies]
 

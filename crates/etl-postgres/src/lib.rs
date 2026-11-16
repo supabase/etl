@@ -15,6 +15,7 @@ compile_error!(
 );
 
 pub mod application_name;
+mod ascii;
 pub mod default_expression;
 pub mod lag;
 pub mod numeric;

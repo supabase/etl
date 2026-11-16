@@ -218,6 +218,9 @@ compile_error!(
 );
 
 pub mod activity;
+#[doc(hidden)]
+#[cfg(feature = "benchmarking")]
+pub mod benchmarking;
 pub mod config;
 mod constants;
 pub mod data;

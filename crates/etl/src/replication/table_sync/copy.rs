@@ -52,7 +52,7 @@ use crate::{
         },
     },
     schema::{ReplicatedTableSchema, TableId},
-    source_payload_metadata::TableCopyPayloadMetadata,
+    source_payload_metadata::{TableCopyIngestionMetrics, TableCopyPayloadMetadata},
     task::TaskGroup,
 };
 
@@ -622,6 +622,7 @@ where
     S: Stream<Item = EtlResult<Vec<TableCopyRow>>>,
 {
     let mut progress = TableCopyProgress::default();
+    let mut ingestion_metrics = TableCopyIngestionMetrics::new();
 
     loop {
         tokio::select! {
@@ -666,7 +667,7 @@ where
                     .into_iter()
                     .map(|table_copy_row| {
                         let (row, metadata) = table_copy_row.into_parts();
-                        metadata.record_row_size();
+                        ingestion_metrics.record_row_size(metadata);
                         table_copy_batch_metadata.merge(metadata);
                         row
                     })

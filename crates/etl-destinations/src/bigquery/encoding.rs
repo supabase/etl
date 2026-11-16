@@ -1,3 +1,8 @@
+use std::{
+    cell::RefCell,
+    fmt::{Display, Write},
+};
+
 use etl::{
     data::{ArrayCell, Cell, TableRow, Timestamp, format_date, format_timestamp},
     error::{ErrorKind, EtlError, EtlResult},
@@ -6,6 +11,57 @@ use etl::{
 use prost::bytes;
 
 use crate::retry::classified_error_with_detail;
+
+/// Largest scratch buffer a thread keeps between rows.
+///
+/// A row or text value above this size is rare enough to allocate again, which
+/// bounds what each runtime thread retains.
+const MAX_RETAINED_SCRATCH_BYTES: usize = 1024 * 1024;
+
+/// Buffers that every row encoded on a thread reuses.
+///
+/// Encoding a row into an empty `Vec` cost five to six reallocations, plus a
+/// `String` per formatted cell, and left up to twice the encoded size
+/// allocated in every buffered row. Encoding into these buffers and copying
+/// the result out costs one allocation of exactly the encoded size.
+struct EncodeScratch {
+    /// Encoding of the row in progress.
+    row: Vec<u8>,
+    /// Display text of the formatted cell in progress.
+    text: String,
+}
+
+impl EncodeScratch {
+    /// Drops buffers that one oversized row grew past the retention limit.
+    fn trim(&mut self) {
+        if self.row.capacity() > MAX_RETAINED_SCRATCH_BYTES {
+            self.row = Vec::new();
+        }
+        if self.text.capacity() > MAX_RETAINED_SCRATCH_BYTES {
+            self.text = String::new();
+        }
+    }
+}
+
+thread_local! {
+    /// Scratch buffers of the current thread.
+    ///
+    /// Rows are encoded synchronously, so a borrow never spans an await or
+    /// another row.
+    static ENCODE_SCRATCH: RefCell<EncodeScratch> =
+        const { RefCell::new(EncodeScratch { row: Vec::new(), text: String::new() }) };
+}
+
+/// Encodes a value's display text as a string field.
+///
+/// The value is formatted into `text`, which is reused, instead of a new
+/// `String` per cell.
+fn encode_display(value: impl Display, tag: u32, text: &mut String, buf: &mut impl bytes::BufMut) {
+    text.clear();
+    write!(text, "{value}").expect("formatting into a String cannot fail");
+
+    prost::encoding::string::encode(tag, text, buf);
+}
 
 /// Encodes a finite timestamp in BigQuery's integer wire representation.
 fn timestamp_micros(value: &Timestamp<chrono::DateTime<chrono::Utc>>) -> EtlResult<i64> {
@@ -38,10 +94,24 @@ impl BigQueryTableRow {
     pub(super) fn try_from_tagged_cells(
         tagged_cells: impl IntoIterator<Item = (usize, Cell)>,
     ) -> Result<Self, EtlError> {
-        let mut buf = Vec::new();
+        ENCODE_SCRATCH.with_borrow_mut(|scratch| {
+            let encoded = Self::encode(tagged_cells, scratch);
+            scratch.trim();
+
+            encoded
+        })
+    }
+
+    /// Encodes tagged cells into `scratch` and copies out the exact bytes.
+    fn encode(
+        tagged_cells: impl IntoIterator<Item = (usize, Cell)>,
+        scratch: &mut EncodeScratch,
+    ) -> Result<Self, EtlError> {
+        let EncodeScratch { row, text } = scratch;
+        row.clear();
 
         for (index, cell) in tagged_cells {
-            cell_encode_prost(&cell, index as u32, &mut buf).map_err(|err| {
+            cell_encode_prost(&cell, index as u32, text, row).map_err(|err| {
                 classified_error_with_detail(
                     err.kind(),
                     "Cell encoding failed for BigQuery",
@@ -51,7 +121,7 @@ impl BigQueryTableRow {
             })?;
         }
 
-        Ok(BigQueryTableRow(buf))
+        Ok(BigQueryTableRow(row.as_slice().to_vec()))
     }
 }
 
@@ -117,7 +187,12 @@ impl prost::Message for BigQueryTableRow {
 ///
 /// Returns an error if encoding the value would change its meaning, such as
 /// omitting a NULL element from a repeated field.
-fn cell_encode_prost(cell: &Cell, tag: u32, buf: &mut impl bytes::BufMut) -> Result<(), EtlError> {
+fn cell_encode_prost(
+    cell: &Cell,
+    tag: u32,
+    text: &mut String,
+    buf: &mut impl bytes::BufMut,
+) -> Result<(), EtlError> {
     match cell {
         Cell::Null => {}
         Cell::Bool(b) => {
@@ -142,38 +217,17 @@ fn cell_encode_prost(cell: &Cell, tag: u32, buf: &mut impl bytes::BufMut) -> Res
         Cell::F64(i) => {
             prost::encoding::double::encode(tag, i, buf);
         }
-        Cell::Numeric(n) => {
-            let s = n.to_string();
-            prost::encoding::string::encode(tag, &s, buf);
-        }
-        Cell::Date(t) => {
-            let s = format_date(t).to_string();
-            prost::encoding::string::encode(tag, &s, buf);
-        }
-        Cell::Time(t) => {
-            let s = t.to_string();
-            prost::encoding::string::encode(tag, &s, buf);
-        }
-        Cell::TimeTz(t) => {
-            let s = t.to_string();
-            prost::encoding::string::encode(tag, &s, buf);
-        }
-        Cell::Timestamp(t) => {
-            let s = format_timestamp(t).to_string();
-            prost::encoding::string::encode(tag, &s, buf);
-        }
+        Cell::Numeric(n) => encode_display(n, tag, text, buf),
+        Cell::Date(t) => encode_display(format_date(t), tag, text, buf),
+        Cell::Time(t) => encode_display(t, tag, text, buf),
+        Cell::TimeTz(t) => encode_display(t, tag, text, buf),
+        Cell::Timestamp(t) => encode_display(format_timestamp(t), tag, text, buf),
         Cell::TimestampTz(t) => {
             let micros = timestamp_micros(t)?;
             prost::encoding::int64::encode(tag, &micros, buf);
         }
-        Cell::Uuid(u) => {
-            let s = u.to_string();
-            prost::encoding::string::encode(tag, &s, buf);
-        }
-        Cell::Json(j) => {
-            let s = j.to_string();
-            prost::encoding::string::encode(tag, &s, buf);
-        }
+        Cell::Uuid(u) => encode_display(u, tag, text, buf),
+        Cell::Json(j) => encode_display(j, tag, text, buf),
         Cell::U32(i) => {
             prost::encoding::uint32::encode(tag, i, buf);
         }
@@ -181,7 +235,7 @@ fn cell_encode_prost(cell: &Cell, tag: u32, buf: &mut impl bytes::BufMut) -> Res
             prost::encoding::bytes::encode(tag, b, buf);
         }
         Cell::Array(a) => {
-            array_cell_encode_prost(a, tag, buf)?;
+            array_cell_encode_prost(a, tag, text, buf)?;
         }
     }
 
@@ -203,6 +257,7 @@ fn cell_encode_prost(cell: &Cell, tag: u32, buf: &mut impl bytes::BufMut) -> Res
 fn array_cell_encode_prost(
     array_cell: &ArrayCell,
     tag: u32,
+    text: &mut String,
     buf: &mut impl bytes::BufMut,
 ) -> Result<(), EtlError> {
     /// Returns an array element or an encoding error for a NULL element.
@@ -280,32 +335,27 @@ fn array_cell_encode_prost(
         }
         ArrayCell::Numeric(vec) => {
             for (index, value) in vec.iter().enumerate() {
-                let s = element(value, index)?.to_string();
-                prost::encoding::string::encode(tag, &s, buf);
+                encode_display(element(value, index)?, tag, text, buf);
             }
         }
         ArrayCell::Date(vec) => {
             for (index, value) in vec.iter().enumerate() {
-                let s = format_date(element(value, index)?).to_string();
-                prost::encoding::string::encode(tag, &s, buf);
+                encode_display(format_date(element(value, index)?), tag, text, buf);
             }
         }
         ArrayCell::Time(vec) => {
             for (index, value) in vec.iter().enumerate() {
-                let s = element(value, index)?.to_string();
-                prost::encoding::string::encode(tag, &s, buf);
+                encode_display(element(value, index)?, tag, text, buf);
             }
         }
         ArrayCell::TimeTz(vec) => {
             for (index, value) in vec.iter().enumerate() {
-                let s = element(value, index)?.to_string();
-                prost::encoding::string::encode(tag, &s, buf);
+                encode_display(element(value, index)?, tag, text, buf);
             }
         }
         ArrayCell::Timestamp(vec) => {
             for (index, value) in vec.iter().enumerate() {
-                let s = format_timestamp(element(value, index)?).to_string();
-                prost::encoding::string::encode(tag, &s, buf);
+                encode_display(format_timestamp(element(value, index)?), tag, text, buf);
             }
         }
         ArrayCell::TimestampTz(vec) => {
@@ -318,14 +368,12 @@ fn array_cell_encode_prost(
         }
         ArrayCell::Uuid(vec) => {
             for (index, value) in vec.iter().enumerate() {
-                let s = element(value, index)?.to_string();
-                prost::encoding::string::encode(tag, &s, buf);
+                encode_display(element(value, index)?, tag, text, buf);
             }
         }
         ArrayCell::Json(vec) => {
             for (index, value) in vec.iter().enumerate() {
-                let s = element(value, index)?.to_string();
-                prost::encoding::string::encode(tag, &s, buf);
+                encode_display(element(value, index)?, tag, text, buf);
             }
         }
         ArrayCell::Bytes(vec) => {

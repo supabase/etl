@@ -33,8 +33,9 @@ use crate::common::{
     BenchDestination, DEFAULT_COPY_PIPELINE_ID, DestinationArgs, DestinationStatsSnapshot,
     DestinationType, LogTarget, PgConnectionArgs, PipelineTuningArgs, bytes_to_mib,
     cleanup_destination, cleanup_replication_slots, duration_millis, finish_run, format_decimal,
-    format_duration_ms, format_integer, init_benchmark_tracing, mib_per_second, per_second,
-    pipeline_config, run_etl_migrations, write_report,
+    format_duration_ms, format_integer, init_benchmark_tracing, mib_per_second, micros_per_unit,
+    per_second, pipeline_config, process_cpu_time, process_cpu_time_since, run_etl_migrations,
+    write_report,
 };
 
 /// Command-line arguments for the table-copy benchmark.
@@ -111,6 +112,12 @@ struct TableCopyReport {
     total_ms: u128,
     rows_per_second: f64,
     estimated_mib_per_second: f64,
+    /// CPU time of this process from pipeline start until the copy finished.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    copy_cpu_ms: Option<u128>,
+    /// That CPU time per copied row, in microseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    copy_cpu_micros_per_row: Option<f64>,
     max_table_sync_workers: u16,
     max_copy_connections_per_table: u16,
     batch_max_fill_ms: u64,
@@ -182,7 +189,7 @@ async fn run(args: RunArgs) -> Result<()> {
     }
     // Everything after destination setup runs in one block so slot and
     // destination cleanup happen whether it succeeds or fails.
-    let run_result: Result<(u128, Duration, u128)> = async {
+    let run_result: Result<(u128, Duration, u128, Option<Duration>)> = async {
         let config = pipeline_config(
             &args.pipeline_id,
             args.publication_name.clone(),
@@ -198,6 +205,7 @@ async fn run(args: RunArgs) -> Result<()> {
 
         let mut pipeline = Pipeline::new(config, store, destination.clone());
 
+        let cpu_started = process_cpu_time();
         let start_started = Instant::now();
         let start_result = pipeline.start().await.context("Failed to start pipeline");
         let pipeline_start_ms = duration_millis(start_started.elapsed());
@@ -217,6 +225,7 @@ async fn run(args: RunArgs) -> Result<()> {
             Err(error) => Err(error),
         };
         let copy_wait_duration = copy_started.elapsed();
+        let copy_cpu = process_cpu_time_since(cpu_started);
 
         let shutdown_started = Instant::now();
         let shutdown_result =
@@ -225,7 +234,7 @@ async fn run(args: RunArgs) -> Result<()> {
 
         finish_run(copy_result, [shutdown_result])?;
 
-        Ok((pipeline_start_ms, copy_wait_duration, shutdown_ms))
+        Ok((pipeline_start_ms, copy_wait_duration, shutdown_ms, copy_cpu))
     }
     .await;
 
@@ -233,7 +242,7 @@ async fn run(args: RunArgs) -> Result<()> {
         cleanup_replication_slots(&args.pg, &args.pipeline_id, &args.table_ids).await;
     let destination_cleanup_result =
         cleanup_destination(&args.destination, &args.pipeline_id).await;
-    let (pipeline_start_ms, copy_wait_duration, shutdown_ms) =
+    let (pipeline_start_ms, copy_wait_duration, shutdown_ms, copy_cpu) =
         finish_run(run_result, [cleanup_result, destination_cleanup_result])?;
 
     let destination_stats = destination.stats();
@@ -277,6 +286,8 @@ async fn run(args: RunArgs) -> Result<()> {
         total_ms,
         rows_per_second: per_second(copied_rows, copy_wait_duration),
         estimated_mib_per_second: mib_per_second(copied_bytes, copy_wait_duration),
+        copy_cpu_ms: copy_cpu.map(duration_millis),
+        copy_cpu_micros_per_row: copy_cpu.map(|cpu| micros_per_unit(cpu, copied_rows)),
         max_table_sync_workers: args.tuning.max_table_sync_workers,
         max_copy_connections_per_table: args.tuning.max_copy_connections_per_table,
         batch_max_fill_ms: args.tuning.batch_max_fill_ms,
@@ -362,6 +373,9 @@ fn print_summary(report: &TableCopyReport) {
     println!("  Throughput");
     println!("    Rows/s            {}", format_decimal(report.rows_per_second, 2));
     println!("    Est. decoded MiB/s {}", format_decimal(report.estimated_mib_per_second, 2));
+    if let Some(cpu_micros_per_row) = report.copy_cpu_micros_per_row {
+        println!("    CPU µs/row         {}", format_decimal(cpu_micros_per_row, 3));
+    }
     println!();
     println!("  Timing");
     println!("    Pipeline start  {}", format_duration_ms(report.pipeline_start_ms));

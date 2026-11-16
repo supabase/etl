@@ -1,3 +1,6 @@
+#[doc(hidden)]
+#[cfg(feature = "benchmarking")]
+pub mod benchmarking;
 mod client;
 mod core;
 mod encoding;

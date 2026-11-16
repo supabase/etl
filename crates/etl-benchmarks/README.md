@@ -17,8 +17,11 @@ Use the direct benchmark binaries only when developing the benchmark code itself
 
 - `table_copy`: initial table-copy throughput for selected TPC-C tables.
 - `table_streaming`: CDC throughput for a TPC-C transaction workload.
+- `hot_paths`: instructions and allocations per row or cell for decoding,
+  formatting, and metric hot paths, without Postgres or a destination. See
+  [Hot-Path Instruction Benchmark](#hot-path-instruction-benchmark).
 
-Both benchmarks support:
+`table_copy` and `table_streaming` support:
 
 - `null`: acknowledges and discards writes. Use this to measure source extraction,
   decoding, batching, and pipeline overhead without destination write cost.
@@ -358,6 +361,84 @@ Optional:
 
 - `BENCH_CLICKHOUSE_PASSWORD`: ClickHouse password. Omit if the user has none.
 
+## Hot-Path Instruction Benchmark
+
+`hot_paths` counts the instructions and allocations of code that runs once per
+row or once per cell. Use it to compare two builds of nearly identical code:
+instruction counts vary by about 0.1% between runs, where wall time varies by
+several percent.
+
+```bash
+cargo run --locked --release -p etl-benchmarks --bin hot_paths -- --repeat 9
+```
+
+Each scenario builds its fixtures, runs one discarded warm-up pass, then measures
+whole passes and reports the median pass:
+
+| Column | Meaning |
+| --- | --- |
+| `instr/unit` | Instructions retired per row or cell. |
+| `spread` | Range of instruction counts across passes, as a percentage of the median. A difference between builds smaller than this is noise. |
+| `allocs/unit`, `bytes/unit` | Allocator calls (`alloc`, `alloc_zeroed`, `realloc`) and bytes requested. These are exact. |
+| `ns/unit` | Wall time, as a cross-check only. |
+| `checksum` | Hash of the output. It must match between the builds being compared; otherwise they did different work. |
+
+To compare a change, keep the baseline binary and run both:
+
+```bash
+cargo build --locked --release -p etl-benchmarks --bin hot_paths
+cp target/release/hot_paths target/release/hot_paths-baseline
+# apply the change, rebuild, then:
+target/release/hot_paths-baseline --filter numeric --repeat 9
+target/release/hot_paths --filter numeric --repeat 9
+```
+
+Use `--filter <text>` to select scenarios by name, `--units <n>` to change the
+rows or cells per pass, `--seed <n>` to change the generated fixtures, and
+`--json` for one JSON object per scenario. Judge each scenario on its own; a
+change often moves only one.
+
+Destination scenarios are compiled only with the destination's feature. For
+example, `bigquery_row_encode` needs `--features bigquery`.
+
+The binary uses jemalloc, as the replicator does, and installs the Prometheus
+recorder so metric calls pay the real registry cost. Instruction counts come
+from `proc_pid_rusage` and are reported on macOS only. On other platforms the
+column shows `n/a`; run one scenario under `perf stat -e instructions:u` or
+Cachegrind instead, and subtract a `--repeat 1` run to remove setup.
+
+Scenarios isolate one code path with synthetic fixtures. They rank and confirm
+local changes; confirm a result that matters with `table_copy` or
+`table_streaming` before relying on it.
+
+## Comparing Two Commits On One Machine
+
+Runs on different machines cannot resolve small changes: identical code has
+differed by 6% to 25% in throughput between CI runners. To compare two commits,
+run both on the same machine in one invocation:
+
+```bash
+git worktree add ../etl-baseline <baseline-commit>
+cargo x benchmark --samples 6 --warmup-samples 1 --baseline-dir ../etl-baseline
+cargo x benchmark-compare \
+  --previous-dir target/bench-results/baseline \
+  --current-dir target/bench-results
+```
+
+Each sample runs the baseline checkout and the current checkout back to back,
+alternating which goes first, against the same database. `--samples` must be
+even, so each side runs first equally often. Baseline reports are written to
+`<output-dir>/baseline`. In each report, `sample_summary.<metric>.values` lists
+the samples in run order, so the two sides can be paired sample by sample.
+
+The baseline checkout must accept the same `table_copy` and `table_streaming`
+arguments as the current one. Streaming samples add rows to the TPC-C tables,
+so later samples run against slightly more data; alternating the order keeps
+that from favoring one side.
+
+In the `Benchmark` workflow, set `baseline_commit` to do the same on one runner.
+The comparison then appears in the job summary.
+
 ## GitHub Actions
 
 The `Benchmark` workflow runs nightly and on demand through `workflow_dispatch`.
@@ -408,6 +489,10 @@ Important workflow inputs:
   selected workflow ref (a backfill). The workflow still comes from the
   selected ref, so the commit's `cargo x benchmark` must accept the flags the
   workflow passes; older commits fail fast on unknown flags.
+- `baseline_commit`: optional full 40-character commit SHA to benchmark as a
+  baseline on the same runner, alternating samples with the benchmarked commit.
+  See [Comparing Two Commits On One Machine](#comparing-two-commits-on-one-machine).
+- `samples`: measured samples per benchmark, after one warmup. Defaults to 3.
 - `force_prepare`: drop and regenerate TPC-C tables before running.
 - `skip_table_copy`: skip table copy.
 - `skip_table_streaming`: skip table streaming.
@@ -499,6 +584,7 @@ Table copy benchmark
   Throughput
     Rows/s              87,738.47
     Est. decoded MiB/s  47.11
+    CPU µs/row          1.842
 ```
 
 Example table-streaming summary:
@@ -518,6 +604,7 @@ Table streaming benchmark
   Throughput
     Events/s             6,842.31
     Est. decoded MiB/s   1.93
+    CPU µs/event         12.406
     Elapsed              6.18 s
 ```
 
@@ -525,6 +612,7 @@ The main fields to compare across runs are:
 
 - rows or CDC events processed
 - rows/events per second
+- CPU microseconds per row or event
 - estimated decoded MiB per second
 - copy wait, streaming elapsed, shutdown, and total timings
 - destination batch counts and max event batch size
@@ -533,6 +621,14 @@ The main fields to compare across runs are:
 Byte values are estimates based on ETL's decoded in-memory row/event size hints.
 They are useful for comparing benchmark runs in this repository, but they are
 not raw WAL bytes, network bytes, or destination billing bytes.
+
+CPU per row or event is the benchmark process's user and kernel CPU time,
+summed over its threads, divided by the rows copied or events observed. The
+pipeline and destination client run in that process; Postgres and the TPC-C
+generator do not. Throughput is often bounded by those two, so this is the
+number that shows a change in what the pipeline itself costs. Copy CPU is
+measured from pipeline start until the copy finishes, and streaming CPU from
+workload start until the drain finishes.
 
 ## Direct Benchmark Binaries
 
