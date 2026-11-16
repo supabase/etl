@@ -3,7 +3,7 @@ use std::sync::atomic::AtomicUsize;
 use std::{
     error, process,
     sync::{
-        Arc, Mutex, Weak,
+        Arc, Mutex, PoisonError, Weak,
         atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
     time::Duration,
@@ -329,8 +329,7 @@ pub(super) struct DuckLakeInterruptRegistry {
 impl DuckLakeInterruptRegistry {
     /// Registers one live DuckLake connection interrupt handle.
     fn register(&self, handle: &Arc<RegisteredDuckLakeInterrupt>) {
-        let mut handles =
-            self.handles.lock().expect("ducklake interrupt registry mutex should not be poisoned");
+        let mut handles = self.handles.lock().unwrap_or_else(PoisonError::into_inner);
         handles.retain(|registered| registered.strong_count() > 0);
         handles.push(Arc::downgrade(handle));
     }
@@ -344,8 +343,7 @@ impl DuckLakeInterruptRegistry {
     /// Interrupts all live connections and records one shared reason.
     fn interrupt_all_with_reason(&self, reason: DuckLakeInterruptReason) -> usize {
         let mut interrupted = 0;
-        let mut handles =
-            self.handles.lock().expect("ducklake interrupt registry mutex should not be poisoned");
+        let mut handles = self.handles.lock().unwrap_or_else(PoisonError::into_inner);
         handles.retain(|handle| {
             let Some(handle) = handle.upgrade() else {
                 return false;

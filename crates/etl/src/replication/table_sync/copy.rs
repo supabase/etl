@@ -3,7 +3,7 @@ use std::{
     collections::VecDeque,
     pin::Pin,
     sync::{
-        Arc,
+        Arc, Mutex, PoisonError,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -12,10 +12,7 @@ use std::{
 use etl_config::shared::BatchConfig;
 use futures::{Stream, StreamExt};
 use metrics::{counter, histogram};
-use tokio::{
-    pin,
-    sync::{Mutex, watch},
-};
+use tokio::{pin, sync::watch};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
@@ -499,7 +496,7 @@ where
     let mut total_progress = TableCopyProgress::default();
 
     loop {
-        let copy_partition = work_queue.lock().await.pop_front();
+        let copy_partition = work_queue.lock().unwrap_or_else(PoisonError::into_inner).pop_front();
         let Some(copy_partition) = copy_partition else {
             // The queue is fully populated before workers start; an empty queue
             // means all CTID work has been claimed.
