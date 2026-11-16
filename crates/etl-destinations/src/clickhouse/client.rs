@@ -17,7 +17,7 @@ use url::Url;
 use crate::{
     clickhouse::{
         core::{ClickHouseClientConfig, ClickHouseOperationKind},
-        encoding::{ClickHouseValue, ColumnEncoding, encode_to_row_binary, rb_varint},
+        encoding::{ClickHouseRow, ColumnEncoding, encode_row, rb_varint},
         metrics::{
             ETL_CLICKHOUSE_CONNECTIVITY_CHECK_DURATION_SECONDS,
             ETL_CLICKHOUSE_DDL_DURATION_SECONDS, ETL_CLICKHOUSE_DDL_ERRORS_TOTAL,
@@ -829,9 +829,9 @@ impl ClickHouseClient {
     /// Inserts `rows` into `table_name` using the `RowBinaryWithNamesAndTypes`
     /// format.
     ///
-    /// Each element of `rows` is a complete, already-encoded row of
-    /// [`ClickHouseValue`]s in `layout` column order (user columns + CDC
-    /// columns). Every INSERT statement starts with the layout header, so
+    /// Each element of `rows` is a complete row in `layout` column order (user
+    /// columns + CDC columns), encoded as it is written. Every INSERT
+    /// statement starts with the layout header, so
     /// ClickHouse checks column names and types before reading any row. The
     /// error reports whether ClickHouse rejected that layout.
     ///
@@ -855,7 +855,7 @@ impl ClickHouseClient {
     pub(crate) async fn insert_rows(
         &self,
         table_name: &str,
-        rows: Vec<Vec<ClickHouseValue>>,
+        rows: Vec<ClickHouseRow>,
         layout: &RowBinaryLayout,
         max_bytes_per_insert: u64,
         copy_batch_id: Option<TableCopyBatchId>,
@@ -864,6 +864,8 @@ impl ClickHouseClient {
         let sql = build_insert_rows_sql(table_name, layout);
         let mut rows = rows.into_iter().peekable();
         let mut row_buf = Vec::new();
+        // Formatted text of the current cell, reused for every row.
+        let mut scratch = String::new();
         let mut statements = 0u64;
 
         while rows.peek().is_some() {
@@ -891,15 +893,14 @@ impl ClickHouseClient {
             while bytes < max_bytes_per_insert {
                 let Some(row) = rows.next() else { break };
                 row_buf.clear();
-                encode_to_row_binary(row, &layout.column_encodings, &mut row_buf).inspect_err(
-                    |_| {
+                encode_row(&row, &layout.column_encodings, &mut scratch, &mut row_buf)
+                    .inspect_err(|_| {
                         metrics::counter!(
                             ETL_CLICKHOUSE_INSERT_ENCODING_ERRORS_TOTAL,
                             REPLICATION_PATH_LABEL => replication_path,
                         )
                         .increment(1);
-                    },
-                )?;
+                    })?;
                 insert.write_buffered(&row_buf);
                 bytes += row_buf.len() as u64;
                 rows_in_statement += 1;
