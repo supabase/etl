@@ -9,13 +9,15 @@
 -- runs are re-fetched daily, so runs of the last week whose artifacts have not
 -- expired fill in on the first sync after deploy; older runs keep no results.
 --
--- `ci_report.test_result` gains `workflow_path` and `property_budget_secs` as
--- trailing columns, so `create or replace view` keeps dependents and grants.
--- `test_duration_daily` and `flaky_test` keep their meaning by reading CI
--- results only: property durations follow the budget, and a property that
--- fails and then passes on a re-run found a counterexample the re-run did not
--- draw again, which is not a flake. `ci_report.property_test_run` has one row
--- per completed property-test run attempt on `main`.
+-- `ci_report.test_result` gains a trailing `workflow_path` column, so
+-- `create or replace view` keeps dependents and grants. The budget stays off
+-- per-test rows because only properties on the shared runner honor it; it is
+-- a per-run column of `property_test_run`. `test_duration_daily` and
+-- `flaky_test` keep their meaning by reading CI results only: property
+-- durations follow the budget, and a property that fails and then passes on a
+-- re-run found a counterexample the re-run did not draw again, which is not a
+-- flake. `ci_report.property_test_run` has one row per completed property-test
+-- run attempt on `main`.
 --
 -- Deploy: the collector refuses to sync until its newest embedded migration
 -- is applied, so run `cargo x ci-metrics migrate` as the owner once the
@@ -42,8 +44,7 @@ select
     tr.duration_ms,
     coalesce((m.payload ->> 'coverage')::boolean, false) as coverage,
     'https://github.com/supabase/etl/actions/runs/' || j.run_id || '/job/' || j.job_id as job_url,
-    w.path as workflow_path,
-    (m.payload ->> 'property_budget_secs')::bigint as property_budget_secs
+    w.path as workflow_path
 from ci.test_result tr
 join ci.test t using (test_id)
 join ci.job j using (job_id)

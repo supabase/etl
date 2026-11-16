@@ -141,6 +141,20 @@ impl NextestArgs {
 
         check_forwarded_args(&self.extra, self.shards)?;
 
+        // Read the manifest's inputs before any test runs, so a misconfigured
+        // job fails at once instead of losing its results after the suite.
+        let manifest_output = self
+            .test_manifest
+            .as_deref()
+            .map(|path| -> Result<ManifestOutput<'_>> {
+                Ok(ManifestOutput {
+                    path,
+                    job: TestJob::from_env()?,
+                    property_budget_secs: test_manifest::property_budget_from_env()?,
+                })
+            })
+            .transpose()?;
+
         let pg_env = PgEnv::from_env();
 
         eprintln!(
@@ -202,7 +216,7 @@ impl NextestArgs {
 
         // A lane that fails to start writes no report; a stale one from an
         // earlier run must not stand in for it.
-        if self.test_manifest.is_some() {
+        if manifest_output.is_some() {
             for profile in profiles {
                 let path = junit_path(profile);
                 match fs::remove_file(&path) {
@@ -246,8 +260,8 @@ impl NextestArgs {
 
         // Results matter most when tests fail, so the manifest is written
         // first. Failing to write it only warns: it must not fail CI.
-        if let Some(path) = &self.test_manifest
-            && let Err(error) = write_test_manifest(self.mode, &profiles, path)
+        if let Some(output) = manifest_output
+            && let Err(error) = write_test_manifest(self.mode, &profiles, output)
         {
             eprintln!("warning: test manifest not written: {error:#}");
         }
@@ -357,11 +371,18 @@ fn junit_path(profile: &str) -> PathBuf {
     Path::new("target").join("nextest").join(profile).join(JUNIT_FILE_NAME)
 }
 
-/// Writes the results of every lane's JUnit report to `path` as a
+/// Where and for which job a run writes its [`TestManifest`].
+struct ManifestOutput<'a> {
+    path: &'a Path,
+    job: TestJob,
+    /// Property budget the job exported to the tests, if any.
+    property_budget_secs: Option<u32>,
+}
+
+/// Writes the results of every lane's JUnit report to `output` as a
 /// [`TestManifest`].
-fn write_test_manifest(mode: Mode, profiles: &[&str], path: &Path) -> Result<()> {
-    let job = TestJob::from_env()?;
-    let property_budget_secs = test_manifest::property_budget_from_env()?;
+fn write_test_manifest(mode: Mode, profiles: &[&str], output: ManifestOutput<'_>) -> Result<()> {
+    let ManifestOutput { path, job, property_budget_secs } = output;
     let mut tests = Vec::new();
     for profile in profiles {
         let junit = junit_path(profile);
