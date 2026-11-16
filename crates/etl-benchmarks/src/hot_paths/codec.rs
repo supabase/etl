@@ -262,7 +262,7 @@ fn copy_row(fields: &[Option<String>]) -> Vec<u8> {
 ///
 /// The rows come from the COPY decoder, so destination scenarios encode
 /// exactly what a table copy would hand them.
-#[cfg(feature = "bigquery")]
+#[cfg(any(feature = "bigquery", feature = "clickhouse"))]
 pub(super) fn decoded_wide_rows(rng: &mut Rng, units: usize) -> Vec<TableRow> {
     let mut column_schemas = plain_column_schemas();
     column_schemas.extend([

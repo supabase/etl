@@ -1,7 +1,9 @@
-use chrono::NaiveDate;
+use std::fmt::{self, Write};
+
+use chrono::{DateTime, NaiveDate};
 use etl::{
     data::{ArrayCell, Cell, Date, Timestamp},
-    error::{ErrorKind, EtlResult},
+    error::{ErrorKind, EtlError, EtlResult},
     etl_error,
 };
 
@@ -13,37 +15,54 @@ use etl::{
 //   `serialize_some`, telescoping `&mut &mut ... BytesMut` on nullable array
 //   elements and overflowing the compiler recursion limit.
 //
-// Direct byte-writing has no generics and no type-level recursion.
+// Direct byte-writing has no generics and no type-level recursion. Cells are
+// encoded straight into the row buffer; text-formatted values go through one
+// reused scratch string, so encoding a row allocates nothing.
 
-/// Owned ClickHouse-compatible value, moved (not cloned) from a [`Cell`].
-pub(crate) enum ClickHouseValue {
-    Null,
-    Bool(bool),
-    Int16(i16),
-    Int32(i32),
-    Int64(i64),
-    /// Unsigned 8-bit integer, used for the ReplacingMergeTree `_etl_deleted`
-    /// tombstone.
-    UInt8(u8),
-    UInt32(u32),
-    /// Unsigned 64-bit integer, used for MergeTree ordering metadata.
-    UInt64(u64),
-    /// Unsigned 128-bit integer, used for the ReplacingMergeTree `_etl_version`
-    /// column (the packed `EventPosition`).
-    UInt128(u128),
-    Float32(f32),
-    Float64(f64),
-    /// TEXT, NUMERIC, TIME, TIMETZ, INTERVAL, JSON, and BYTEA as strings.
-    String(String),
-    /// Days from Unix epoch (ClickHouse `Date32` on wire = Int32 LE).
-    Date32(i32),
-    /// Microseconds since Unix epoch (ClickHouse `DateTime64(6)` on wire =
-    /// Int64 LE)
-    DateTime64(i64),
-    /// UUID in standard 16-byte big-endian order (converted to ClickHouse wire
-    /// format on encode)
-    Uuid([u8; 16]),
-    Array(Vec<ClickHouseValue>),
+/// Lowercase hex digits, indexed by nibble.
+const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+
+/// Trailing CDC column values of one row, by table engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CdcColumns {
+    /// MergeTree: `cdc_operation` (String), `cdc_lsn` (UInt64 commit LSN), and
+    /// `cdc_tx_ordinal` (UInt64 transaction ordinal).
+    MergeTree {
+        /// Operation name, such as `INSERT`.
+        operation: &'static str,
+        /// Commit LSN of the source transaction.
+        commit_lsn: u64,
+        /// Ordinal of the change within its transaction.
+        tx_ordinal: u64,
+    },
+    /// ReplacingMergeTree: `_etl_version` (UInt128 packed `EventPosition`)
+    /// and `_etl_deleted` (UInt8 tombstone flag).
+    ReplacingMergeTree {
+        /// Packed event position; later events have larger versions.
+        version: u128,
+        /// Whether the row is a delete tombstone.
+        deleted: bool,
+    },
+}
+
+impl CdcColumns {
+    /// Returns the number of trailing CDC columns.
+    fn len(self) -> usize {
+        match self {
+            Self::MergeTree { .. } => 3,
+            Self::ReplacingMergeTree { .. } => 2,
+        }
+    }
+}
+
+/// One destination row: user cells in source column order, then the CDC
+/// columns.
+#[derive(Debug)]
+pub(crate) struct ClickHouseRow {
+    /// User column values in source column order.
+    pub(crate) cells: Vec<Cell>,
+    /// Trailing CDC column values.
+    pub(crate) cdc: CdcColumns,
 }
 
 /// RowBinary encoding shape of one destination column.
@@ -71,93 +90,38 @@ impl ColumnEncoding {
     }
 }
 
-/// Converts a [`Cell`] to a [`ClickHouseValue`], consuming it (no clone).
-pub(crate) fn cell_to_clickhouse_value(cell: Cell) -> EtlResult<ClickHouseValue> {
-    Ok(match cell {
-        Cell::Null => ClickHouseValue::Null,
-        Cell::Bool(b) => ClickHouseValue::Bool(b),
-        Cell::I16(v) => ClickHouseValue::Int16(v),
-        Cell::I32(v) => ClickHouseValue::Int32(v),
-        Cell::I64(v) => ClickHouseValue::Int64(v),
-        Cell::U32(v) => ClickHouseValue::UInt32(v),
-        Cell::F32(v) => ClickHouseValue::Float32(v),
-        Cell::F64(v) => ClickHouseValue::Float64(v),
-        Cell::Numeric(n) => ClickHouseValue::String(n.to_string()),
-        Cell::Date(Date::Value(d)) => ClickHouseValue::Date32(date_to_date32_days(d)),
-        Cell::Time(t) => ClickHouseValue::String(t.to_string()),
-        Cell::TimeTz(t) => ClickHouseValue::String(t.to_string()),
-        Cell::Timestamp(Timestamp::Value(dt)) => {
-            ClickHouseValue::DateTime64(dt.and_utc().timestamp_micros())
-        }
-        Cell::TimestampTz(Timestamp::Value(dt)) => {
-            ClickHouseValue::DateTime64(dt.timestamp_micros())
-        }
-        Cell::Uuid(u) => ClickHouseValue::Uuid(*u.as_bytes()),
-        Cell::Json(j) => ClickHouseValue::String(j.to_string()),
-        Cell::Bytes(b) => ClickHouseValue::String(bytes_to_hex(&b)),
-        Cell::String(s) => ClickHouseValue::String(s),
-        Cell::Array(array_cell) => {
-            ClickHouseValue::Array(array_cell_to_clickhouse_values(array_cell)?)
-        }
-        Cell::Date(_) | Cell::Timestamp(_) | Cell::TimestampTz(_) => {
-            return Err(etl_error!(
-                ErrorKind::ConversionError,
-                "Cannot encode infinite temporal value",
-                "ClickHouse dates and timestamps use finite wire integers"
-            ));
-        }
-    })
+/// Returns the error for an infinite date or timestamp, which ClickHouse's
+/// finite wire integers cannot represent.
+fn infinite_temporal_error() -> EtlError {
+    etl_error!(
+        ErrorKind::ConversionError,
+        "Cannot encode infinite temporal value",
+        "ClickHouse dates and timestamps use finite wire integers"
+    )
 }
 
-/// Converts an [`ArrayCell`] to a flat `Vec<ClickHouseValue>`, mapping each
-/// `Some(x)` to the matching scalar variant and each `None` to
-/// [`ClickHouseValue::Null`]. Per-element conversions mirror
-/// [`cell_to_clickhouse_value`].
-fn array_cell_to_clickhouse_values(array_cell: ArrayCell) -> EtlResult<Vec<ClickHouseValue>> {
-    Ok(match array_cell {
-        ArrayCell::Bool(v) => map_array(v, ClickHouseValue::Bool),
-        ArrayCell::String(v) => map_array(v, ClickHouseValue::String),
-        ArrayCell::I16(v) => map_array(v, ClickHouseValue::Int16),
-        ArrayCell::I32(v) => map_array(v, ClickHouseValue::Int32),
-        ArrayCell::I64(v) => map_array(v, ClickHouseValue::Int64),
-        ArrayCell::U32(v) => map_array(v, ClickHouseValue::UInt32),
-        ArrayCell::F32(v) => map_array(v, ClickHouseValue::Float32),
-        ArrayCell::F64(v) => map_array(v, ClickHouseValue::Float64),
-        ArrayCell::Numeric(v) => map_array(v, |n| ClickHouseValue::String(n.to_string())),
-        ArrayCell::Date(v) => return map_temporal_array(v, Cell::Date),
-        ArrayCell::Time(v) => map_array(v, |t| ClickHouseValue::String(t.to_string())),
-        ArrayCell::TimeTz(v) => map_array(v, |t| ClickHouseValue::String(t.to_string())),
-        ArrayCell::Timestamp(v) => return map_temporal_array(v, Cell::Timestamp),
-        ArrayCell::TimestampTz(v) => return map_temporal_array(v, Cell::TimestampTz),
-        ArrayCell::Uuid(v) => map_array(v, |u| ClickHouseValue::Uuid(*u.as_bytes())),
-        ArrayCell::Json(v) => map_array(v, |j| ClickHouseValue::String(j.to_string())),
-        ArrayCell::Bytes(v) => map_array(v, |b| ClickHouseValue::String(bytes_to_hex(&b))),
-    })
-}
+/// Rejects infinite dates and timestamps, including array elements.
+///
+/// Callers run this over a whole batch before inserting it, so such a value
+/// fails the batch before any INSERT statement is sent.
+pub(crate) fn ensure_finite_temporals(cells: &[Cell]) -> EtlResult<()> {
+    let finite = cells.iter().all(|cell| match cell {
+        Cell::Date(date) => matches!(date, Date::Value(_)),
+        Cell::Timestamp(timestamp) => matches!(timestamp, Timestamp::Value(_)),
+        Cell::TimestampTz(timestamp) => matches!(timestamp, Timestamp::Value(_)),
+        Cell::Array(ArrayCell::Date(values)) => {
+            values.iter().flatten().all(|date| matches!(date, Date::Value(_)))
+        }
+        Cell::Array(ArrayCell::Timestamp(values)) => {
+            values.iter().flatten().all(|timestamp| matches!(timestamp, Timestamp::Value(_)))
+        }
+        Cell::Array(ArrayCell::TimestampTz(values)) => {
+            values.iter().flatten().all(|timestamp| matches!(timestamp, Timestamp::Value(_)))
+        }
+        _ => true,
+    });
 
-/// Uses the scalar encoder for temporal array elements and preserves nulls.
-fn map_temporal_array<T>(
-    values: Vec<Option<T>>,
-    cell: impl Fn(T) -> Cell,
-) -> EtlResult<Vec<ClickHouseValue>> {
-    values
-        .into_iter()
-        .map(|value| cell_to_clickhouse_value(value.map_or(Cell::Null, &cell)))
-        .collect()
-}
-
-/// Maps a `Vec<Option<T>>` to `Vec<ClickHouseValue>`, applying `f` to each
-/// `Some` and substituting [`ClickHouseValue::Null`] for each `None`.
-fn map_array<T, F>(v: Vec<Option<T>>, mut f: F) -> Vec<ClickHouseValue>
-where
-    F: FnMut(T) -> ClickHouseValue,
-{
-    v.into_iter()
-        .map(|o| match o {
-            Some(t) => f(t),
-            None => ClickHouseValue::Null,
-        })
-        .collect()
+    if finite { Ok(()) } else { Err(infinite_temporal_error()) }
 }
 
 /// Converts a [`NaiveDate`] to a ClickHouse `Date32` day offset (signed days
@@ -169,17 +133,6 @@ fn date_to_date32_days(d: NaiveDate) -> i32 {
 
 fn unix_epoch() -> NaiveDate {
     NaiveDate::from_ymd_opt(1970, 1, 1).expect("valid date")
-}
-
-/// Lowercase hex-encodes `bytes` into a fresh `String`.
-fn bytes_to_hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for &b in bytes {
-        s.push(HEX[(b >> 4) as usize] as char);
-        s.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    s
 }
 
 /// Encodes `v` as LEB128 for ClickHouse string/array lengths.
@@ -196,22 +149,155 @@ pub(crate) fn rb_varint(mut v: usize, buf: &mut Vec<u8>) {
     }
 }
 
-/// Encodes a value for a `Nullable(T)` column (1-byte null indicator + value).
-pub(crate) fn rb_encode_nullable(val: ClickHouseValue, buf: &mut Vec<u8>) -> EtlResult<()> {
-    match val {
-        ClickHouseValue::Null => buf.push(1),
-        v => {
-            buf.push(0);
-            rb_encode_value(v, buf)?;
-        }
+/// Encodes a length-prefixed RowBinary string.
+fn rb_string(value: &[u8], buf: &mut Vec<u8>) {
+    rb_varint(value.len(), buf);
+    buf.extend_from_slice(value);
+}
+
+/// Encodes a value's display text as a RowBinary string, formatting it into
+/// `scratch` first because the length prefix comes before the text.
+fn rb_display(value: impl fmt::Display, scratch: &mut String, buf: &mut Vec<u8>) {
+    scratch.clear();
+    write!(scratch, "{value}").expect("formatting into a String cannot fail");
+    rb_string(scratch.as_bytes(), buf);
+}
+
+/// Encodes bytes as a RowBinary string of lowercase hex digits.
+fn rb_hex(bytes: &[u8], buf: &mut Vec<u8>) {
+    rb_varint(bytes.len() * 2, buf);
+    buf.reserve(bytes.len() * 2);
+    for &byte in bytes {
+        buf.push(HEX_DIGITS[usize::from(byte >> 4)]);
+        buf.push(HEX_DIGITS[usize::from(byte & 0x0f)]);
     }
+}
+
+/// Encodes a UUID as ClickHouse RowBinary: the high `u64`, then the low
+/// `u64`, each little-endian.
+fn rb_uuid(value: &uuid::Uuid, buf: &mut Vec<u8>) {
+    let (high, low) = value.as_u64_pair();
+    buf.extend_from_slice(&high.to_le_bytes());
+    buf.extend_from_slice(&low.to_le_bytes());
+}
+
+/// Encodes a date as `Date32`: days from the Unix epoch, little-endian.
+fn rb_date(value: &Date<NaiveDate>, buf: &mut Vec<u8>) -> EtlResult<()> {
+    let Date::Value(date) = value else {
+        return Err(infinite_temporal_error());
+    };
+    buf.extend_from_slice(&date_to_date32_days(*date).to_le_bytes());
+
     Ok(())
 }
 
-/// Encodes a value for a non-nullable column (no null indicator byte).
-pub(crate) fn rb_encode_value(val: ClickHouseValue, buf: &mut Vec<u8>) -> EtlResult<()> {
-    match val {
-        ClickHouseValue::Null => {
+/// Encodes microseconds since the Unix epoch as `DateTime64(6)`.
+fn rb_micros<T>(
+    value: &Timestamp<T>,
+    micros: impl FnOnce(&T) -> i64,
+    buf: &mut Vec<u8>,
+) -> EtlResult<()> {
+    let Timestamp::Value(timestamp) = value else {
+        return Err(infinite_temporal_error());
+    };
+    buf.extend_from_slice(&micros(timestamp).to_le_bytes());
+
+    Ok(())
+}
+
+/// Encodes one `Nullable(T)` array element: a null byte, then the value.
+fn rb_element<T>(
+    value: &Option<T>,
+    buf: &mut Vec<u8>,
+    encode: impl FnOnce(&T, &mut Vec<u8>) -> EtlResult<()>,
+) -> EtlResult<()> {
+    match value {
+        None => buf.push(1),
+        Some(value) => {
+            buf.push(0);
+            encode(value, buf)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Encodes array elements, which ClickHouse always stores as
+/// `Array(Nullable(T))`.
+fn rb_elements<T>(
+    values: &[Option<T>],
+    buf: &mut Vec<u8>,
+    mut encode: impl FnMut(&T, &mut Vec<u8>) -> EtlResult<()>,
+) -> EtlResult<()> {
+    rb_varint(values.len(), buf);
+    for value in values {
+        rb_element(value, buf, &mut encode)?;
+    }
+
+    Ok(())
+}
+
+/// Encodes an array cell.
+fn rb_array(array: &ArrayCell, scratch: &mut String, buf: &mut Vec<u8>) -> EtlResult<()> {
+    /// Encodes a fixed-width little-endian element.
+    fn le<const N: usize>(bytes: [u8; N], buf: &mut Vec<u8>) -> EtlResult<()> {
+        buf.extend_from_slice(&bytes);
+        Ok(())
+    }
+
+    match array {
+        ArrayCell::Bool(values) => rb_elements(values, buf, |v, buf| le([u8::from(*v)], buf)),
+        ArrayCell::String(values) => rb_elements(values, buf, |v, buf| {
+            rb_string(v.as_bytes(), buf);
+            Ok(())
+        }),
+        ArrayCell::I16(values) => rb_elements(values, buf, |v, buf| le(v.to_le_bytes(), buf)),
+        ArrayCell::I32(values) => rb_elements(values, buf, |v, buf| le(v.to_le_bytes(), buf)),
+        ArrayCell::I64(values) => rb_elements(values, buf, |v, buf| le(v.to_le_bytes(), buf)),
+        ArrayCell::U32(values) => rb_elements(values, buf, |v, buf| le(v.to_le_bytes(), buf)),
+        ArrayCell::F32(values) => rb_elements(values, buf, |v, buf| le(v.to_le_bytes(), buf)),
+        ArrayCell::F64(values) => rb_elements(values, buf, |v, buf| le(v.to_le_bytes(), buf)),
+        ArrayCell::Numeric(values) => rb_elements(values, buf, |v, buf| {
+            rb_display(v, scratch, buf);
+            Ok(())
+        }),
+        ArrayCell::Date(values) => rb_elements(values, buf, rb_date),
+        ArrayCell::Time(values) => rb_elements(values, buf, |v, buf| {
+            rb_display(v, scratch, buf);
+            Ok(())
+        }),
+        ArrayCell::TimeTz(values) => rb_elements(values, buf, |v, buf| {
+            rb_display(v, scratch, buf);
+            Ok(())
+        }),
+        ArrayCell::Timestamp(values) => {
+            rb_elements(values, buf, |v, buf| rb_micros(v, |t| t.and_utc().timestamp_micros(), buf))
+        }
+        ArrayCell::TimestampTz(values) => {
+            rb_elements(values, buf, |v, buf| rb_micros(v, DateTime::timestamp_micros, buf))
+        }
+        ArrayCell::Uuid(values) => rb_elements(values, buf, |v, buf| {
+            rb_uuid(v, buf);
+            Ok(())
+        }),
+        ArrayCell::Json(values) => rb_elements(values, buf, |v, buf| {
+            rb_display(v, scratch, buf);
+            Ok(())
+        }),
+        ArrayCell::Bytes(values) => rb_elements(values, buf, |v, buf| {
+            rb_hex(v, buf);
+            Ok(())
+        }),
+    }
+}
+
+/// Encodes a non-null cell for a column without a null indicator byte.
+///
+/// TEXT, NUMERIC, TIME, TIMETZ, and JSON are written as strings, BYTEA as hex
+/// text, dates as `Date32`, and timestamps as `DateTime64(6)`.
+fn rb_value(cell: &Cell, scratch: &mut String, buf: &mut Vec<u8>) -> EtlResult<()> {
+    match cell {
+        Cell::Null => {
             // The physical ClickHouse column is non-nullable, so encoding NULL
             // would require a lossy fallback value.
             return Err(etl_error!(
@@ -219,67 +305,113 @@ pub(crate) fn rb_encode_value(val: ClickHouseValue, buf: &mut Vec<u8>) -> EtlRes
                 "NULL value for non-nullable ClickHouse column"
             ));
         }
-        ClickHouseValue::Bool(b) => buf.push(u8::from(b)),
-        ClickHouseValue::Int16(v) => buf.extend_from_slice(&v.to_le_bytes()),
-        ClickHouseValue::Int32(v) => buf.extend_from_slice(&v.to_le_bytes()),
-        ClickHouseValue::Int64(v) => buf.extend_from_slice(&v.to_le_bytes()),
-        ClickHouseValue::UInt8(v) => buf.push(v),
-        ClickHouseValue::UInt32(v) => buf.extend_from_slice(&v.to_le_bytes()),
-        ClickHouseValue::UInt64(v) => buf.extend_from_slice(&v.to_le_bytes()),
-        ClickHouseValue::UInt128(v) => buf.extend_from_slice(&v.to_le_bytes()),
-        ClickHouseValue::Float32(v) => buf.extend_from_slice(&v.to_le_bytes()),
-        ClickHouseValue::Float64(v) => buf.extend_from_slice(&v.to_le_bytes()),
-        ClickHouseValue::String(s) => {
-            rb_varint(s.len(), buf);
-            buf.extend_from_slice(s.as_bytes());
-        }
-        ClickHouseValue::Date32(days) => buf.extend_from_slice(&days.to_le_bytes()),
-        ClickHouseValue::DateTime64(micros) => buf.extend_from_slice(&micros.to_le_bytes()),
-        ClickHouseValue::Uuid(bytes) => {
-            // ClickHouse RowBinary UUID = high u64 (LE) then low u64 (LE). Our
-            // bytes are in standard UUID big-endian order; reinterpret as a
-            // u128 to split halves cleanly.
-            let n = u128::from_be_bytes(bytes);
-            buf.extend_from_slice(&((n >> 64) as u64).to_le_bytes());
-            buf.extend_from_slice(&(n as u64).to_le_bytes());
-        }
-        // Array elements are always Nullable in ClickHouse: Array(Nullable(T)).
-        ClickHouseValue::Array(items) => {
-            rb_varint(items.len(), buf);
-            for item in items {
-                rb_encode_nullable(item, buf)?;
-            }
-        }
+        Cell::Bool(value) => buf.push(u8::from(*value)),
+        Cell::I16(value) => buf.extend_from_slice(&value.to_le_bytes()),
+        Cell::I32(value) => buf.extend_from_slice(&value.to_le_bytes()),
+        Cell::I64(value) => buf.extend_from_slice(&value.to_le_bytes()),
+        Cell::U32(value) => buf.extend_from_slice(&value.to_le_bytes()),
+        Cell::F32(value) => buf.extend_from_slice(&value.to_le_bytes()),
+        Cell::F64(value) => buf.extend_from_slice(&value.to_le_bytes()),
+        Cell::String(value) => rb_string(value.as_bytes(), buf),
+        Cell::Numeric(value) => rb_display(value, scratch, buf),
+        Cell::Date(value) => rb_date(value, buf)?,
+        Cell::Time(value) => rb_display(value, scratch, buf),
+        Cell::TimeTz(value) => rb_display(value, scratch, buf),
+        Cell::Timestamp(value) => rb_micros(value, |t| t.and_utc().timestamp_micros(), buf)?,
+        Cell::TimestampTz(value) => rb_micros(value, DateTime::timestamp_micros, buf)?,
+        Cell::Uuid(value) => rb_uuid(value, buf),
+        Cell::Json(value) => rb_display(value, scratch, buf),
+        Cell::Bytes(value) => rb_hex(value, buf),
+        Cell::Array(array) => rb_array(array, scratch, buf)?,
     }
+
     Ok(())
 }
 
-/// Encodes a complete row into `buf`, selecting the encoding per column.
-pub(crate) fn encode_to_row_binary(
-    values: Vec<ClickHouseValue>,
-    column_encodings: &[ColumnEncoding],
+/// Encodes one cell with its column's encoding.
+pub(crate) fn encode_cell(
+    cell: &Cell,
+    encoding: ColumnEncoding,
+    scratch: &mut String,
     buf: &mut Vec<u8>,
 ) -> EtlResult<()> {
-    if values.len() != column_encodings.len() {
+    match (encoding, cell) {
+        (ColumnEncoding::Nullable, Cell::Null) => buf.push(1),
+        (ColumnEncoding::Nullable, cell) => {
+            buf.push(0);
+            rb_value(cell, scratch, buf)?;
+        }
+        // An empty array is a single zero length varint.
+        (ColumnEncoding::Array, Cell::Null) => rb_varint(0, buf),
+        (ColumnEncoding::Array | ColumnEncoding::Required, cell) => rb_value(cell, scratch, buf)?,
+    }
+
+    Ok(())
+}
+
+/// Encodes one fixed-width CDC value, with a null indicator byte if its
+/// column is nullable.
+fn encode_cdc_value(bytes: &[u8], encoding: ColumnEncoding, buf: &mut Vec<u8>) {
+    if encoding == ColumnEncoding::Nullable {
+        buf.push(0);
+    }
+    buf.extend_from_slice(bytes);
+}
+
+/// Encodes the trailing CDC columns with their column encodings.
+fn encode_cdc_columns(cdc: CdcColumns, encodings: &[ColumnEncoding], buf: &mut Vec<u8>) {
+    match (cdc, encodings) {
+        (
+            CdcColumns::MergeTree { operation, commit_lsn, tx_ordinal },
+            &[operation_encoding, lsn_encoding, ordinal_encoding],
+        ) => {
+            if operation_encoding == ColumnEncoding::Nullable {
+                buf.push(0);
+            }
+            rb_string(operation.as_bytes(), buf);
+            encode_cdc_value(&commit_lsn.to_le_bytes(), lsn_encoding, buf);
+            encode_cdc_value(&tx_ordinal.to_le_bytes(), ordinal_encoding, buf);
+        }
+        (
+            CdcColumns::ReplacingMergeTree { version, deleted },
+            &[version_encoding, deleted_encoding],
+        ) => {
+            encode_cdc_value(&version.to_le_bytes(), version_encoding, buf);
+            encode_cdc_value(&[u8::from(deleted)], deleted_encoding, buf);
+        }
+        _ => unreachable!("the caller checked that the encodings cover every CDC column"),
+    }
+}
+
+/// Encodes a complete row into `buf`, selecting the encoding per column.
+///
+/// `scratch` holds formatted text between calls; pass the same string for
+/// every row of a statement so formatting stops allocating once it has grown.
+pub(crate) fn encode_row(
+    row: &ClickHouseRow,
+    column_encodings: &[ColumnEncoding],
+    scratch: &mut String,
+    buf: &mut Vec<u8>,
+) -> EtlResult<()> {
+    let value_count = row.cells.len() + row.cdc.len();
+    if value_count != column_encodings.len() {
         return Err(etl_error!(
             ErrorKind::ConversionError,
             "ClickHouse RowBinary row width mismatch",
             format!(
                 "values length {} does not match column encodings length {}",
-                values.len(),
+                value_count,
                 column_encodings.len()
             )
         ));
     }
 
-    for (val, &encoding) in values.into_iter().zip(column_encodings.iter()) {
-        match (encoding, val) {
-            (ColumnEncoding::Nullable, val) => rb_encode_nullable(val, buf)?,
-            // An empty array is a single zero length varint.
-            (ColumnEncoding::Array, ClickHouseValue::Null) => rb_varint(0, buf),
-            (ColumnEncoding::Array | ColumnEncoding::Required, val) => rb_encode_value(val, buf)?,
-        }
+    let (cell_encodings, cdc_encodings) = column_encodings.split_at(row.cells.len());
+    for (cell, &encoding) in row.cells.iter().zip(cell_encodings) {
+        encode_cell(cell, encoding, scratch, buf)?;
     }
+    encode_cdc_columns(row.cdc, cdc_encodings, buf);
+
     Ok(())
 }
 
@@ -291,167 +423,130 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn cell_to_clickhouse_value_null() {
-        assert!(matches!(cell_to_clickhouse_value(Cell::Null).unwrap(), ClickHouseValue::Null));
+    /// MergeTree CDC columns used where a row needs a trailer.
+    const MERGE_TREE_CDC: CdcColumns =
+        CdcColumns::MergeTree { operation: "INSERT", commit_lsn: 5, tx_ordinal: 9 };
+
+    /// Encodings of the MergeTree CDC columns.
+    const MERGE_TREE_CDC_ENCODINGS: [ColumnEncoding; 3] = [ColumnEncoding::Required; 3];
+
+    /// Encodes one cell with a fresh buffer.
+    fn encode(cell: &Cell, encoding: ColumnEncoding) -> EtlResult<Vec<u8>> {
+        let mut buf = Vec::new();
+        encode_cell(cell, encoding, &mut String::new(), &mut buf)?;
+
+        Ok(buf)
+    }
+
+    /// Returns `value` as a RowBinary string.
+    fn row_binary_string(value: &str) -> Vec<u8> {
+        let mut buf = Vec::new();
+        rb_string(value.as_bytes(), &mut buf);
+
+        buf
+    }
+
+    /// Returns the RowBinary bytes of [`MERGE_TREE_CDC`].
+    fn merge_tree_cdc_bytes() -> Vec<u8> {
+        let mut bytes = row_binary_string("INSERT");
+        bytes.extend_from_slice(&5u64.to_le_bytes());
+        bytes.extend_from_slice(&9u64.to_le_bytes());
+
+        bytes
     }
 
     #[test]
-    fn cell_to_clickhouse_value_bool() {
-        assert!(matches!(
-            cell_to_clickhouse_value(Cell::Bool(true)).unwrap(),
-            ClickHouseValue::Bool(true)
-        ));
+    fn scalars_encode_as_little_endian_values() {
+        assert_eq!(encode(&Cell::Bool(true), ColumnEncoding::Required).unwrap(), [1]);
+        assert_eq!(
+            encode(&Cell::I32(-1), ColumnEncoding::Required).unwrap(),
+            (-1i32).to_le_bytes()
+        );
+        assert_eq!(
+            encode(&Cell::I64(i64::MAX), ColumnEncoding::Required).unwrap(),
+            i64::MAX.to_le_bytes()
+        );
+        assert_eq!(
+            encode(&Cell::U32(u32::MAX), ColumnEncoding::Required).unwrap(),
+            u32::MAX.to_le_bytes()
+        );
+        assert_eq!(
+            encode(&Cell::String("hi".to_owned()), ColumnEncoding::Required).unwrap(),
+            [2, b'h', b'i']
+        );
     }
 
     #[test]
-    fn cell_to_clickhouse_value_i32() {
-        assert!(matches!(
-            cell_to_clickhouse_value(Cell::I32(42)).unwrap(),
-            ClickHouseValue::Int32(42)
-        ));
-    }
+    fn dates_encode_as_signed_days_from_the_epoch() {
+        for (date, days) in [((1970, 1, 1), 0i32), ((1970, 1, 2), 1), ((1969, 12, 31), -1)] {
+            let date = NaiveDate::from_ymd_opt(date.0, date.1, date.2).unwrap();
 
-    #[test]
-    fn cell_to_clickhouse_value_string() {
-        if let ClickHouseValue::String(s) =
-            cell_to_clickhouse_value(Cell::String("hello".to_owned())).unwrap()
-        {
-            assert_eq!(s, "hello");
-        } else {
-            panic!("expected String variant");
+            let bytes = encode(&Cell::Date(Date::Value(date)), ColumnEncoding::Required).unwrap();
+
+            assert_eq!(bytes, days.to_le_bytes());
         }
     }
 
     #[test]
-    fn cell_to_clickhouse_value_date() {
-        let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
-        assert!(matches!(
-            cell_to_clickhouse_value(Cell::Date(Date::Value(epoch))).unwrap(),
-            ClickHouseValue::Date32(0)
-        ));
+    fn dates_outside_the_clickhouse_domain_are_not_validated() {
+        for date in [
+            NaiveDate::from_ymd_opt(1899, 12, 31).unwrap(),
+            NaiveDate::from_ymd_opt(2300, 1, 1).unwrap(),
+        ] {
+            let expected =
+                i32::try_from(date.signed_duration_since(unix_epoch()).num_days()).unwrap();
 
-        let day1 = NaiveDate::from_ymd_opt(1970, 1, 2).unwrap();
-        assert!(matches!(
-            cell_to_clickhouse_value(Cell::Date(Date::Value(day1))).unwrap(),
-            ClickHouseValue::Date32(1)
-        ));
+            let bytes = encode(&Cell::Date(Date::Value(date)), ColumnEncoding::Required).unwrap();
 
-        // Pre-1970 dates round-trip through Date32 as a negative offset rather
-        // than being silently clamped to the epoch.
-        let pre_epoch = NaiveDate::from_ymd_opt(1969, 12, 31).unwrap();
-        assert!(matches!(
-            cell_to_clickhouse_value(Cell::Date(Date::Value(pre_epoch))).unwrap(),
-            ClickHouseValue::Date32(-1)
-        ));
+            assert_eq!(bytes, expected.to_le_bytes());
+        }
     }
 
     #[test]
-    fn cell_to_clickhouse_value_does_not_validate_date_domain() {
-        let too_old = NaiveDate::from_ymd_opt(1899, 12, 31).unwrap();
-        let expected_too_old =
-            i32::try_from(too_old.signed_duration_since(unix_epoch()).num_days()).unwrap();
-        assert!(matches!(
-            cell_to_clickhouse_value(Cell::Date(Date::Value(too_old))).unwrap(),
-            ClickHouseValue::Date32(days) if days == expected_too_old
-        ));
-
-        let too_new = NaiveDate::from_ymd_opt(2300, 1, 1).unwrap();
-        let expected_too_new =
-            i32::try_from(too_new.signed_duration_since(unix_epoch()).num_days()).unwrap();
-        assert!(matches!(
-            cell_to_clickhouse_value(Cell::Date(Date::Value(too_new))).unwrap(),
-            ClickHouseValue::Date32(days) if days == expected_too_new
-        ));
-    }
-
-    #[test]
-    fn cell_to_clickhouse_value_timestamp() {
+    fn timestamps_encode_as_epoch_microseconds() {
         let epoch = chrono::DateTime::from_timestamp(0, 0).unwrap().naive_utc();
-        assert!(matches!(
-            cell_to_clickhouse_value(Cell::Timestamp(Timestamp::Value(epoch))).unwrap(),
-            ClickHouseValue::DateTime64(0)
-        ));
+
+        let bytes =
+            encode(&Cell::Timestamp(Timestamp::Value(epoch)), ColumnEncoding::Required).unwrap();
+
+        assert_eq!(bytes, 0i64.to_le_bytes());
     }
 
     #[test]
-    fn cell_to_clickhouse_value_uuid() {
-        let u = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
-        let expected_bytes = *u.as_bytes();
-        if let ClickHouseValue::Uuid(bytes) = cell_to_clickhouse_value(Cell::Uuid(u)).unwrap() {
-            assert_eq!(bytes, expected_bytes);
-        } else {
-            panic!("expected Uuid variant");
-        }
-    }
+    fn uuids_encode_high_then_low_half_little_endian() {
+        let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
 
-    #[test]
-    fn cell_to_clickhouse_value_bytes_hex() {
-        let bytes = vec![0xde, 0xad, 0xbe, 0xef];
-        if let ClickHouseValue::String(s) = cell_to_clickhouse_value(Cell::Bytes(bytes)).unwrap() {
-            assert_eq!(s, "deadbeef");
-        } else {
-            panic!("expected String variant");
-        }
-    }
+        let bytes = encode(&Cell::Uuid(uuid), ColumnEncoding::Required).unwrap();
 
-    #[test]
-    fn rb_encode_value_scalars() {
-        let mut buf = Vec::new();
-
-        buf.clear();
-        rb_encode_value(ClickHouseValue::Bool(true), &mut buf).unwrap();
-        assert_eq!(buf, [1u8]);
-
-        buf.clear();
-        rb_encode_value(ClickHouseValue::Int32(-1), &mut buf).unwrap();
-        assert_eq!(buf, (-1i32).to_le_bytes());
-
-        buf.clear();
-        rb_encode_value(ClickHouseValue::UInt64(u64::MAX), &mut buf).unwrap();
-        assert_eq!(buf, u64::MAX.to_le_bytes());
-
-        buf.clear();
-        rb_encode_value(ClickHouseValue::String("hi".to_owned()), &mut buf).unwrap();
-        assert_eq!(buf, [2, b'h', b'i']); // varint(2) + bytes
-
-        buf.clear();
-        rb_encode_value(ClickHouseValue::Date32(1), &mut buf).unwrap();
-        assert_eq!(buf, 1i32.to_le_bytes());
-
-        buf.clear();
-        rb_encode_value(ClickHouseValue::Date32(-1), &mut buf).unwrap();
-        assert_eq!(buf, (-1i32).to_le_bytes());
-    }
-
-    #[test]
-    fn rb_encode_uuid_wire_format() {
-        let u = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
-        let val = ClickHouseValue::Uuid(*u.as_bytes());
-        let mut buf = Vec::new();
-        rb_encode_value(val, &mut buf).unwrap();
-
-        assert_eq!(buf.len(), 16);
-        let bytes = u.as_bytes();
-        let high = u64::from_be_bytes(bytes[0..8].try_into().unwrap());
-        let low = u64::from_be_bytes(bytes[8..16].try_into().unwrap());
+        let high = u64::from_be_bytes(uuid.as_bytes()[0..8].try_into().unwrap());
+        let low = u64::from_be_bytes(uuid.as_bytes()[8..16].try_into().unwrap());
         let mut expected = high.to_le_bytes().to_vec();
         expected.extend_from_slice(&low.to_le_bytes());
-        assert_eq!(buf, expected);
+        assert_eq!(bytes, expected);
     }
 
     #[test]
-    fn encode_nullable() {
-        let mut buf = Vec::new();
+    fn bytes_encode_as_lowercase_hex_strings() {
+        for (bytes, hex) in [
+            (vec![], ""),
+            (vec![0x00], "00"),
+            (vec![0xff], "ff"),
+            (vec![0xde, 0xad, 0xbe, 0xef], "deadbeef"),
+        ] {
+            assert_eq!(
+                encode(&Cell::Bytes(bytes), ColumnEncoding::Required).unwrap(),
+                row_binary_string(hex)
+            );
+        }
+    }
 
-        rb_encode_nullable(ClickHouseValue::Null, &mut buf).unwrap();
-        assert_eq!(buf, [1u8]);
+    #[test]
+    fn nullable_columns_prefix_a_null_indicator() {
+        assert_eq!(encode(&Cell::Null, ColumnEncoding::Nullable).unwrap(), [1]);
 
-        buf.clear();
-        rb_encode_nullable(ClickHouseValue::Int32(42), &mut buf).unwrap();
         let mut expected = vec![0u8];
         expected.extend_from_slice(&42i32.to_le_bytes());
-        assert_eq!(buf, expected);
+        assert_eq!(encode(&Cell::I32(42), ColumnEncoding::Nullable).unwrap(), expected);
     }
 
     #[test]
@@ -473,107 +568,103 @@ mod tests {
         assert_eq!(buf, [0xac, 0x02]);
     }
 
-    #[test]
-    fn hex_encoding() {
-        assert_eq!(bytes_to_hex(&[]), "");
-        assert_eq!(bytes_to_hex(&[0x00]), "00");
-        assert_eq!(bytes_to_hex(&[0xff]), "ff");
-        assert_eq!(bytes_to_hex(&[0xde, 0xad, 0xbe, 0xef]), "deadbeef");
-    }
-
     /// NULL for a non-nullable column is a conversion error that writes no
     /// bytes.
     #[test]
-    fn rb_encode_value_rejects_null_for_non_nullable_column() {
-        // GIVEN: an empty buffer.
+    fn null_for_required_column_is_rejected_without_writing() {
         let mut buf = Vec::new();
 
-        // WHEN: NULL is encoded without a null marker.
-        let result = rb_encode_value(ClickHouseValue::Null, &mut buf);
+        let error =
+            encode_cell(&Cell::Null, ColumnEncoding::Required, &mut String::new(), &mut buf)
+                .unwrap_err();
 
-        // THEN: encoding fails and the buffer stays empty.
-        assert!(result.is_err(), "NULL in non-nullable column must error");
-        let err = result.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::ConversionError);
-        assert!(buf.is_empty(), "no bytes should be written on error");
+        assert_eq!(error.kind(), ErrorKind::ConversionError);
+        assert!(buf.is_empty());
     }
 
     /// A top-level NULL array is stored as an empty array, while the row's
     /// other columns keep their own encodings.
     #[test]
-    fn encode_to_row_binary_writes_null_array_as_empty_array() {
-        let encodings = [ColumnEncoding::Array, ColumnEncoding::Nullable, ColumnEncoding::Required];
+    fn row_writes_null_array_as_empty_array() {
+        let row = ClickHouseRow {
+            cells: vec![Cell::Null, Cell::Null, Cell::I32(7)],
+            cdc: MERGE_TREE_CDC,
+        };
+        let mut encodings =
+            vec![ColumnEncoding::Array, ColumnEncoding::Nullable, ColumnEncoding::Required];
+        encodings.extend(MERGE_TREE_CDC_ENCODINGS);
         let mut buf = Vec::new();
-        encode_to_row_binary(
-            vec![ClickHouseValue::Null, ClickHouseValue::Null, ClickHouseValue::Int32(7)],
-            &encodings,
-            &mut buf,
-        )
-        .unwrap();
 
-        let mut expected = Vec::new();
-        encode_to_row_binary(
-            vec![
-                ClickHouseValue::Array(Vec::new()),
-                ClickHouseValue::Null,
-                ClickHouseValue::Int32(7),
-            ],
-            &encodings,
-            &mut expected,
-        )
-        .unwrap();
+        encode_row(&row, &encodings, &mut String::new(), &mut buf).unwrap();
+
+        let mut expected = vec![0x00, 0x01, 0x07, 0x00, 0x00, 0x00];
+        expected.extend(merge_tree_cdc_bytes());
         assert_eq!(buf, expected);
-        assert_eq!(buf, [0x00, 0x01, 0x07, 0x00, 0x00, 0x00]);
+    }
+
+    /// The CDC columns follow the user cells, each with its column's encoding.
+    #[test]
+    fn row_appends_cdc_columns_for_each_engine() {
+        let mut buf = Vec::new();
+        let merge_tree = ClickHouseRow { cells: vec![Cell::Bool(true)], cdc: MERGE_TREE_CDC };
+        let mut encodings = vec![ColumnEncoding::Required];
+        encodings.extend(MERGE_TREE_CDC_ENCODINGS);
+
+        encode_row(&merge_tree, &encodings, &mut String::new(), &mut buf).unwrap();
+
+        let mut expected = vec![1];
+        expected.extend(merge_tree_cdc_bytes());
+        assert_eq!(buf, expected);
+
+        buf.clear();
+        let replacing = ClickHouseRow {
+            cells: vec![Cell::Bool(true)],
+            cdc: CdcColumns::ReplacingMergeTree { version: u128::MAX - 1, deleted: true },
+        };
+        let encodings =
+            [ColumnEncoding::Required, ColumnEncoding::Required, ColumnEncoding::Nullable];
+
+        encode_row(&replacing, &encodings, &mut String::new(), &mut buf).unwrap();
+
+        let mut expected = vec![1];
+        expected.extend_from_slice(&(u128::MAX - 1).to_le_bytes());
+        expected.extend_from_slice(&[0, 1]);
+        assert_eq!(buf, expected);
     }
 
     /// Only array columns turn NULL into a value; a required scalar column
     /// still rejects it.
     #[test]
-    fn encode_to_row_binary_rejects_null_for_required_column() {
-        let error = encode_to_row_binary(
-            vec![ClickHouseValue::Null],
-            &[ColumnEncoding::Required],
-            &mut Vec::new(),
-        )
-        .unwrap_err();
+    fn row_rejects_null_for_required_column() {
+        let row = ClickHouseRow { cells: vec![Cell::Null], cdc: MERGE_TREE_CDC };
+        let mut encodings = vec![ColumnEncoding::Required];
+        encodings.extend(MERGE_TREE_CDC_ENCODINGS);
+
+        let error = encode_row(&row, &encodings, &mut String::new(), &mut Vec::new()).unwrap_err();
 
         assert_eq!(error.kind(), ErrorKind::ConversionError);
     }
 
-    /// A row narrower than its layout is rejected before any byte is written.
+    /// A row narrower or wider than its layout is rejected before any byte is
+    /// written. The width counts the CDC columns.
     #[test]
-    fn encode_to_row_binary_rejects_fewer_values_than_column_encodings() {
-        let mut buf = vec![0xaa];
-        let result = encode_to_row_binary(
-            vec![ClickHouseValue::Int32(1)],
-            &[ColumnEncoding::Required, ColumnEncoding::Required],
-            &mut buf,
-        );
+    fn row_width_mismatch_is_rejected_without_writing() {
+        let row = ClickHouseRow { cells: vec![Cell::I32(1)], cdc: MERGE_TREE_CDC };
 
-        assert!(result.is_err(), "row width mismatch must error");
-        let err = result.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::ConversionError);
-        assert_eq!(err.description(), Some("ClickHouse RowBinary row width mismatch"));
-        assert_eq!(err.detail(), Some("values length 1 does not match column encodings length 2"));
-        assert_eq!(buf, vec![0xaa], "no bytes should be written on error");
-    }
+        for (encoding_count, detail) in [
+            (5, "values length 4 does not match column encodings length 5"),
+            (3, "values length 4 does not match column encodings length 3"),
+        ] {
+            let mut buf = vec![0xaa];
+            let encodings = vec![ColumnEncoding::Required; encoding_count];
 
-    /// A row wider than its layout is rejected before any byte is written.
-    #[test]
-    fn encode_to_row_binary_rejects_more_values_than_column_encodings() {
-        let mut buf = vec![0xaa];
-        let result = encode_to_row_binary(
-            vec![ClickHouseValue::Int32(1), ClickHouseValue::Int32(2)],
-            &[ColumnEncoding::Required],
-            &mut buf,
-        );
+            let error = encode_row(&row, &encodings, &mut String::new(), &mut buf).unwrap_err();
 
-        assert!(result.is_err(), "row width mismatch must error");
-        let err = result.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::ConversionError);
-        assert_eq!(err.description(), Some("ClickHouse RowBinary row width mismatch"));
-        assert_eq!(err.detail(), Some("values length 2 does not match column encodings length 1"));
-        assert_eq!(buf, vec![0xaa], "no bytes should be written on error");
+            assert_eq!(error.kind(), ErrorKind::ConversionError);
+            assert_eq!(error.description(), Some("ClickHouse RowBinary row width mismatch"));
+            assert_eq!(error.detail(), Some(detail));
+            assert_eq!(buf, [0xaa]);
+        }
     }
 
     #[test]
@@ -587,10 +678,21 @@ mod tests {
             Cell::Array(ArrayCell::Timestamp(vec![None, Some(Timestamp::NegInfinity)])),
             Cell::Array(ArrayCell::TimestampTz(vec![None, Some(Timestamp::PosInfinity)])),
         ] {
-            assert!(cell_to_clickhouse_value(cell).is_err());
+            assert!(encode(&cell, ColumnEncoding::Required).is_err());
+            assert!(ensure_finite_temporals(std::slice::from_ref(&cell)).is_err());
         }
-        let value = cell_to_clickhouse_value(Cell::Time(etl::data::PgTime::EndOfDay)).unwrap();
-        assert!(matches!(value, ClickHouseValue::String(value) if value == "24:00:00"));
+
+        let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+        ensure_finite_temporals(&[
+            Cell::Date(Date::Value(epoch)),
+            Cell::Array(ArrayCell::Date(vec![None, Some(Date::Value(epoch))])),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            encode(&Cell::Time(etl::data::PgTime::EndOfDay), ColumnEncoding::Required).unwrap(),
+            row_binary_string("24:00:00")
+        );
     }
 
     /// Generated rows decoded with ClickHouse's documented RowBinary layout.
@@ -603,9 +705,7 @@ mod tests {
         use proptest::{collection::vec, prelude::*};
         use uuid::Uuid;
 
-        use crate::clickhouse::encoding::{
-            ColumnEncoding, cell_to_clickhouse_value, encode_to_row_binary,
-        };
+        use crate::clickhouse::encoding::{CdcColumns, ClickHouseRow, ColumnEncoding, encode_row};
 
         /// Reads RowBinary bytes as the ClickHouse format documentation
         /// describes them.
@@ -797,19 +897,60 @@ mod tests {
             ]
         }
 
+        /// Trailing CDC columns for either engine.
+        fn cdc_columns() -> impl Strategy<Value = CdcColumns> {
+            prop_oneof![
+                (
+                    prop_oneof![Just("INSERT"), Just("UPDATE"), Just("DELETE")],
+                    any::<u64>(),
+                    any::<u64>()
+                )
+                    .prop_map(|(operation, commit_lsn, tx_ordinal)| {
+                        CdcColumns::MergeTree { operation, commit_lsn, tx_ordinal }
+                    }),
+                (any::<u128>(), any::<bool>()).prop_map(|(version, deleted)| {
+                    CdcColumns::ReplacingMergeTree { version, deleted }
+                }),
+            ]
+        }
+
+        /// Reads the trailing CDC columns and checks that they encode `cdc`.
+        fn check_cdc(reader: &mut Reader<'_>, cdc: CdcColumns) -> Result<(), String> {
+            let ok = match cdc {
+                CdcColumns::MergeTree { operation, commit_lsn, tx_ordinal } => {
+                    reader.string()? == operation
+                        && u64::from_le_bytes(reader.take()?) == commit_lsn
+                        && u64::from_le_bytes(reader.take()?) == tx_ordinal
+                }
+                CdcColumns::ReplacingMergeTree { version, deleted } => {
+                    u128::from_le_bytes(reader.take()?) == version
+                        && reader.take::<1>()? == [u8::from(deleted)]
+                }
+            };
+            if ok { Ok(()) } else { Err(format!("CDC columns differ for {cdc:?}")) }
+        }
+
         /// Every generated row encodes to exactly the RowBinary bytes the
         /// ClickHouse documentation describes, with nothing left over.
         #[test]
         fn rows_decode_with_documented_row_binary_layout() {
-            run_property("clickhouse row binary layout", &vec(column(), 1..6), |columns| {
-                let encodings: Vec<_> = columns.iter().map(|(encoding, _)| *encoding).collect();
-                let values = columns
+            let strategy = (vec(column(), 1..6), cdc_columns());
+            run_property("clickhouse row binary layout", &strategy, |(columns, cdc)| {
+                let cdc_column_count = match cdc {
+                    CdcColumns::MergeTree { .. } => 3,
+                    CdcColumns::ReplacingMergeTree { .. } => 2,
+                };
+                let encodings: Vec<_> = columns
                     .iter()
-                    .map(|(_, cell)| cell_to_clickhouse_value(cell.clone()))
-                    .collect::<Result<Vec<_>, _>>()
-                    .unwrap();
+                    .map(|(encoding, _)| *encoding)
+                    .chain(std::iter::repeat_n(ColumnEncoding::Required, cdc_column_count))
+                    .collect();
+                let row = ClickHouseRow {
+                    cells: columns.iter().map(|(_, cell)| cell.clone()).collect(),
+                    cdc: *cdc,
+                };
                 let mut bytes = Vec::new();
-                encode_to_row_binary(values, &encodings, &mut bytes).unwrap();
+                encode_row(&row, &encodings, &mut String::new(), &mut bytes).unwrap();
 
                 let mut reader = Reader(&bytes);
                 for (encoding, cell) in columns {
@@ -823,6 +964,7 @@ mod tests {
                     };
                     checked.map_err(TestCaseError::fail)?;
                 }
+                check_cdc(&mut reader, *cdc).map_err(TestCaseError::fail)?;
                 prop_assert!(reader.0.is_empty(), "{} trailing bytes", reader.0.len());
                 Ok(())
             });
