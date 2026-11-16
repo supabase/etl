@@ -2886,7 +2886,7 @@ mod tests {
 
     use super::*;
     use crate::clickhouse::{
-        encoding::{ColumnEncoding, encode_cell},
+        encoding::{ColumnEncoding, encode_cell, encode_row},
         schema::{
             CDC_LSN_COLUMN_NAME, CDC_OPERATION_COLUMN_NAME, CDC_TX_ORDINAL_COLUMN_NAME,
             ETL_DELETED_COLUMN_NAME, ETL_VERSION_COLUMN_NAME, clickhouse_column_type,
@@ -4001,18 +4001,26 @@ mod tests {
         assert_eq!(insertion_index, 1);
     }
 
+    /// A MergeTree delete at the largest LSN carries the full `u64` on the
+    /// wire, after the operation name and before the transaction ordinal.
     #[test]
-    fn merge_tree_cdc_columns_preserve_full_lsn_range() {
-        let cdc = cdc_columns(
+    fn merge_tree_trailer_carries_full_lsn_range() {
+        let row = clickhouse_row(
+            Vec::new(),
             CdcOperation::Delete,
             EventPosition::new(PgLsn::from(u64::MAX), 7),
             ClickHouseEngine::MergeTree,
-        );
+        )
+        .unwrap();
+        let mut buf = Vec::new();
 
-        assert_eq!(
-            cdc,
-            CdcColumns::MergeTree { operation: "DELETE", commit_lsn: u64::MAX, tx_ordinal: 7 }
-        );
+        encode_row(&row, &[ColumnEncoding::Required; 3], &mut String::new(), &mut buf).unwrap();
+
+        let mut expected = vec![6];
+        expected.extend_from_slice(b"DELETE");
+        expected.extend_from_slice(&[0xff; 8]);
+        expected.extend_from_slice(&7u64.to_le_bytes());
+        assert_eq!(buf, expected);
     }
 
     #[test]
