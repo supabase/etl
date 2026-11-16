@@ -6,6 +6,7 @@ use etl::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
 };
+use uuid::Uuid;
 
 // RowBinary bytes are written directly via `Client::insert_formatted_with`,
 // bypassing the typed `Inserter<T>` / serde path because:
@@ -175,7 +176,7 @@ fn rb_hex(bytes: &[u8], buf: &mut Vec<u8>) {
 
 /// Encodes a UUID as ClickHouse RowBinary: the high `u64`, then the low
 /// `u64`, each little-endian.
-fn rb_uuid(value: &uuid::Uuid, buf: &mut Vec<u8>) {
+fn rb_uuid(value: &Uuid, buf: &mut Vec<u8>) {
     let (high, low) = value.as_u64_pair();
     buf.extend_from_slice(&high.to_le_bytes());
     buf.extend_from_slice(&low.to_le_bytes());
