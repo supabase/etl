@@ -2876,7 +2876,7 @@ fn maybe_fail_after_copy_batch_commit_for_tests(table_name: &DuckLakeTableName) 
 
 #[cfg(test)]
 mod tests {
-    use std::{error::Error as _, num::NonZeroU32};
+    use std::{error::Error as _, num::NonZeroU16};
 
     use etl::{
         data::{OldTableRow, PartialTableRow, Timestamp, UpdatedTableRow},
@@ -2927,7 +2927,7 @@ mod tests {
             .await
             .unwrap();
             let pool = Arc::new(
-                build_warm_ducklake_pool(manager, NonZeroU32::MIN, "batch-test", ()).await.unwrap(),
+                build_warm_ducklake_pool(manager, NonZeroU16::MIN, "batch-test", ()).await.unwrap(),
             );
             let reader =
                 run_duckdb_blocking(Arc::clone(&pool), Arc::new(Semaphore::new(1)), |conn| {

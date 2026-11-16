@@ -4,7 +4,7 @@
 //! connecting to Google Cloud BigQuery in test environments.
 
 use std::{
-    error::Error as _, fmt, future::Future, num::NonZeroUsize, path::Path, str::FromStr,
+    error::Error as _, fmt, future::Future, num::NonZeroU16, path::Path, str::FromStr,
     time::Duration,
 };
 
@@ -488,8 +488,8 @@ impl BigQueryDatabase {
             self.project_id.clone(),
             self.dataset_id.clone(),
             &self.sa_key_path,
-            Some(0), // Zero staleness for immediate consistency in tests
-            NonZeroUsize::new(10).unwrap(), // Allow concurrent streams for testing
+            Some(0),                      // Zero staleness for immediate consistency in tests
+            NonZeroU16::new(10).unwrap(), // Allow concurrent streams for testing
             pipeline_id,
             schema_store,
         )

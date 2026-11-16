@@ -494,7 +494,7 @@ mod tests {
             "1".into(),
             memory_monitor.clone(),
             0.2,
-            BatchConfig::DEFAULT_MAX_BYTES,
+            NonZeroUsize::new(32 * 1024 * 1024).unwrap(),
         )
     }
 

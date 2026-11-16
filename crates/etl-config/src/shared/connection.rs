@@ -28,6 +28,9 @@ const COMMON_CLIENT_ENCODING: &str = "UTF8";
 const COMMON_TIMEZONE: &str = "UTC";
 const COMMON_BYTEA_OUTPUT: &str = "hex";
 /// Default statement timeout in milliseconds for bounded ETL queries.
+///
+/// The session timeouts mirror Postgres' 32-bit millisecond settings, so they
+/// stay `u32` instead of following the wider default for durations.
 const DEFAULT_STATEMENT_TIMEOUT: u32 = 30_000;
 /// Default lock timeout in milliseconds for bounded ETL queries.
 const DEFAULT_LOCK_TIMEOUT: u32 = 10_000;
@@ -277,7 +280,7 @@ pub struct TcpKeepaliveConfig {
     pub interval_secs: u64,
     /// Number of keepalive probes to send before considering the connection
     /// dead.
-    pub retries: u32,
+    pub retries: u16,
 }
 
 impl Validate for TcpKeepaliveConfig {}
@@ -399,7 +402,7 @@ impl IntoConnectOptions<TokioPgConnectOptions> for PgConnectionConfig {
             .keepalives(true)
             .keepalives_idle(Duration::from_secs(self.keepalive.idle_secs))
             .keepalives_interval(Duration::from_secs(self.keepalive.interval_secs))
-            .keepalives_retries(self.keepalive.retries);
+            .keepalives_retries(u32::from(self.keepalive.retries));
 
         // Apply options if provided
         if let Some(opts) = options {

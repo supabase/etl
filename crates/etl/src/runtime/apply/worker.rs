@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 
 use etl_config::shared::{
     InvalidatedSlotBehavior, PipelineConfig, ReplicationSlotConfig, ReplicationSlotPersistence,
@@ -132,7 +132,7 @@ impl<S, D> ApplyWorker<S, D> {
             pipeline_id.clone(),
             memory_monitor.clone(),
             config.batch.memory_budget_ratio,
-            config.batch.max_bytes,
+            NonZeroUsize::try_from(config.batch.max_bytes).unwrap_or(NonZeroUsize::MAX),
         );
 
         Self {
@@ -168,7 +168,7 @@ where
     async fn handle_apply_worker_error(
         config: &PipelineConfig,
         shutdown_token: &CancellationToken,
-        retry_attempts: &mut u32,
+        retry_attempts: &mut u16,
         err: EtlError,
     ) -> EtlResult<bool> {
         error!(error = %err, "apply worker failed");
@@ -253,7 +253,7 @@ where
     /// `table_error_retry_max_attempts`) so retry behavior is coherent across
     /// worker types.
     async fn guarded_run_apply_worker(self) -> EtlResult<()> {
-        let mut retry_attempts: u32 = 0;
+        let mut retry_attempts: u16 = 0;
         let mut entered_apply_loop = false;
 
         loop {

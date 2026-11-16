@@ -1,6 +1,6 @@
 use std::{
     collections::HashSet,
-    num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
+    num::{NonZeroU16, NonZeroU64},
 };
 
 use serde::{Deserialize, Serialize};
@@ -59,8 +59,8 @@ pub struct BatchConfig {
     /// single source row may exceed it because rows cannot be split safely
     /// after decoding.
     #[serde(default = "default_batch_max_bytes")]
-    #[cfg_attr(feature = "utoipa", schema(value_type = usize, example = 33554432))]
-    pub max_bytes: NonZeroUsize,
+    #[cfg_attr(feature = "utoipa", schema(value_type = u64, example = 33554432))]
+    pub max_bytes: NonZeroU64,
 }
 
 impl BatchConfig {
@@ -79,7 +79,7 @@ impl BatchConfig {
     /// The 32 MiB cap supplies substantial destination work while bounding
     /// multi-row accumulation before reactive memory backpressure can observe
     /// new allocations. An indivisible source row can exceed the cap.
-    pub const DEFAULT_MAX_BYTES: NonZeroUsize = NonZeroUsize::new(32 * 1024 * 1024).unwrap();
+    pub const DEFAULT_MAX_BYTES: NonZeroU64 = NonZeroU64::new(32 * 1024 * 1024).unwrap();
 }
 
 impl Validate for BatchConfig {
@@ -114,7 +114,7 @@ const fn default_memory_budget_ratio() -> f32 {
     BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO
 }
 
-const fn default_batch_max_bytes() -> NonZeroUsize {
+const fn default_batch_max_bytes() -> NonZeroU64 {
     BatchConfig::DEFAULT_MAX_BYTES
 }
 
@@ -390,7 +390,7 @@ pub struct PipelineConfig {
     ///
     /// This setting is shared by table sync and apply workers.
     #[serde(default = "default_table_error_retry_max_attempts")]
-    pub table_error_retry_max_attempts: NonZeroU32,
+    pub table_error_retry_max_attempts: NonZeroU16,
     /// Maximum number of table sync workers that can run at a time.
     ///
     /// Must be positive. The product with
@@ -514,13 +514,13 @@ impl PipelineConfig {
     pub const DEFAULT_TABLE_ERROR_RETRY_DELAY_MS: u64 = 10000;
 
     /// Default maximum number of retry attempts for table errors.
-    pub const DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS: NonZeroU32 = NonZeroU32::new(5).unwrap();
+    pub const DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS: NonZeroU16 = NonZeroU16::new(5).unwrap();
 
     /// Maximum aggregate copy worker connections configured for one pipeline.
     ///
     /// Parent replication connections and other database connections are
     /// additional to this ceiling.
-    pub const MAX_TOTAL_COPY_CONNECTIONS: u32 = 256;
+    pub const MAX_TOTAL_COPY_CONNECTIONS: u16 = 256;
 
     /// Default maximum number of concurrent table sync workers.
     pub const DEFAULT_MAX_TABLE_SYNC_WORKERS: NonZeroU16 = NonZeroU16::new(4).unwrap();
@@ -598,7 +598,7 @@ pub fn validate_copy_concurrency(
 ) -> Result<(), ValidationError> {
     let total_copy_connections =
         u32::from(max_table_sync_workers.get()) * u32::from(max_copy_connections_per_table.get());
-    if total_copy_connections > PipelineConfig::MAX_TOTAL_COPY_CONNECTIONS {
+    if total_copy_connections > u32::from(PipelineConfig::MAX_TOTAL_COPY_CONNECTIONS) {
         return Err(ValidationError::InvalidFieldValue {
             field: "max_copy_connections_per_table".to_owned(),
             constraint: format!(
@@ -654,7 +654,7 @@ const fn default_table_error_retry_delay_ms() -> u64 {
     PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_DELAY_MS
 }
 
-const fn default_table_error_retry_max_attempts() -> NonZeroU32 {
+const fn default_table_error_retry_max_attempts() -> NonZeroU16 {
     PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS
 }
 
@@ -735,7 +735,7 @@ pub struct PipelineConfigWithoutSecrets {
     ///
     /// This setting is shared by table sync and apply workers.
     #[serde(default = "default_table_error_retry_max_attempts")]
-    pub table_error_retry_max_attempts: NonZeroU32,
+    pub table_error_retry_max_attempts: NonZeroU16,
     /// Maximum number of table sync workers that can run at a time.
     ///
     /// Must be positive. The product with
@@ -1136,11 +1136,11 @@ mod tests {
             (r#"{"max_fill_ms":5000,"memory_budget_ratio":0.2}"#, BatchConfig::DEFAULT_MAX_BYTES),
             (
                 r#"{"max_fill_ms":5000,"memory_budget_ratio":0.2,"max_bytes":4194304}"#,
-                NonZeroUsize::new(4 * 1024 * 1024).unwrap(),
+                NonZeroU64::new(4 * 1024 * 1024).unwrap(),
             ),
             (
                 r#"{"max_fill_ms":5000,"memory_budget_ratio":0.2,"max_bytes":4194304,"future_field":true}"#,
-                NonZeroUsize::new(4 * 1024 * 1024).unwrap(),
+                NonZeroU64::new(4 * 1024 * 1024).unwrap(),
             ),
         ] {
             let config: BatchConfig = serde_json::from_str(json).unwrap();

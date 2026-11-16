@@ -31,11 +31,7 @@ The pipeline will automatically:
 
 */
 
-use std::{
-    error::Error,
-    num::{NonZeroU16, NonZeroUsize},
-    sync::Once,
-};
+use std::{error::Error, num::NonZeroU16, sync::Once};
 
 use clap::{Args, Parser};
 use etl::{
@@ -224,7 +220,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         args.bq_args.bq_dataset_id,
         &args.bq_args.bq_sa_key_file,
         None,
-        NonZeroUsize::MIN,
+        NonZeroU16::MIN,
         PipelineId::from(&pipeline_config.id),
         store.clone(),
     )

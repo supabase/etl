@@ -2,7 +2,7 @@
 use std::sync::atomic::AtomicUsize;
 use std::{
     error,
-    num::NonZeroU32,
+    num::NonZeroU16,
     process,
     sync::{
         Arc, Mutex, Weak,
@@ -881,7 +881,7 @@ pub(super) fn format_query_error_detail(sql: &str) -> String {
 /// retaining the caller's lifecycle guard through native setup.
 pub(super) async fn build_warm_ducklake_pool(
     manager: DuckLakeConnectionManager,
-    pool_size: NonZeroU32,
+    pool_size: NonZeroU16,
     purpose: &'static str,
     guard: impl Send + 'static,
 ) -> EtlResult<r2d2::Pool<DuckLakeConnectionManager>> {
@@ -892,7 +892,7 @@ pub(super) async fn build_warm_ducklake_pool(
         }
         let started = Instant::now();
         let pool = r2d2::Pool::builder()
-            .max_size(pool_size.get())
+            .max_size(u32::from(pool_size.get()))
             .min_idle(Some(0))
             .connection_timeout(Duration::from_mins(4))
             .test_on_check_out(true)
@@ -908,17 +908,18 @@ pub(super) async fn build_warm_ducklake_pool(
                 )
             })?;
 
-        let mut warmed_connections = Vec::with_capacity(pool_size.get() as usize);
-        for _ in 0..pool_size.get() {
-            let conn = pool.get().map_err(|e| {
-                classified_error(
-                    ErrorKind::DestinationConnectionFailed,
-                    "Failed to warm DuckLake connection pool",
-                    e,
-                )
-            })?;
-            warmed_connections.push(conn);
-        }
+        // Holding every connection at once forces the pool to open all of them.
+        let warmed_connections = (0..pool_size.get())
+            .map(|_| {
+                pool.get().map_err(|e| {
+                    classified_error(
+                        ErrorKind::DestinationConnectionFailed,
+                        "Failed to warm DuckLake connection pool",
+                        e,
+                    )
+                })
+            })
+            .collect::<EtlResult<Vec<_>>>()?;
         drop(warmed_connections);
 
         trace!(
@@ -970,11 +971,11 @@ impl<G> DuckLakeBlockingGuard<G> {
 /// exceeding that deadline aborts the process so unacknowledged WAL can replay.
 pub(super) async fn drain_duckdb_blocking_operations(
     blocking_slots: Arc<Semaphore>,
-    pool_size: NonZeroU32,
+    pool_size: NonZeroU16,
 ) {
     match tokio::time::timeout(
         BLOCKING_ABORT_GRACE,
-        Arc::clone(&blocking_slots).acquire_many_owned(pool_size.get()),
+        Arc::clone(&blocking_slots).acquire_many_owned(u32::from(pool_size.get())),
     )
     .await
     {
@@ -1284,7 +1285,7 @@ mod tests {
                 .unwrap();
             runtime.block_on(drain_duckdb_blocking_operations(
                 Arc::new(Semaphore::new(0)),
-                NonZeroU32::MIN,
+                NonZeroU16::MIN,
             ));
             panic!("native cleanup returned without owning every permit");
         }
@@ -1539,7 +1540,7 @@ mod tests {
     #[tokio::test]
     async fn run_duckdb_blocking_timeout_releases_resources_for_follow_up_queries() {
         let pool = Arc::new(
-            build_warm_ducklake_pool(make_blocking_test_manager(), NonZeroU32::MIN, "test", ())
+            build_warm_ducklake_pool(make_blocking_test_manager(), NonZeroU16::MIN, "test", ())
                 .await
                 .expect("failed to build blocking test pool"),
         );
@@ -1595,7 +1596,7 @@ mod tests {
     #[tokio::test]
     async fn cancelled_blocking_caller_retains_watchdog_and_permit() {
         let pool = Arc::new(
-            build_warm_ducklake_pool(make_blocking_test_manager(), NonZeroU32::MIN, "test", ())
+            build_warm_ducklake_pool(make_blocking_test_manager(), NonZeroU16::MIN, "test", ())
                 .await
                 .unwrap(),
         );
@@ -1697,7 +1698,7 @@ mod tests {
         manager.interrupt_all_connections_for_shutdown();
         let mut drain = Box::pin(drain_duckdb_blocking_operations(
             Arc::clone(&slots),
-            NonZeroU32::new(2).unwrap(),
+            NonZeroU16::new(2).unwrap(),
         ));
         assert!(drain.as_mut().now_or_never().is_none());
         drop(drain);
@@ -1705,13 +1706,13 @@ mod tests {
         resume.send(()).unwrap();
         tokio::time::timeout(
             Duration::from_secs(5),
-            drain_duckdb_blocking_operations(Arc::clone(&slots), NonZeroU32::new(2).unwrap()),
+            drain_duckdb_blocking_operations(Arc::clone(&slots), NonZeroU16::new(2).unwrap()),
         )
         .await
         .unwrap();
         assert!(gate.try_read().is_ok());
         assert!(slots.is_closed());
-        drain_duckdb_blocking_operations(Arc::clone(&slots), NonZeroU32::new(2).unwrap()).await;
+        drain_duckdb_blocking_operations(Arc::clone(&slots), NonZeroU16::new(2).unwrap()).await;
         manager.shared_instance.lock().unwrap().execute_batch("select * from original").unwrap();
         assert!(is_ducklake_shutdown_requested_error(
             &manager.recreate_shared_instance(()).await.unwrap_err()
@@ -2238,7 +2239,7 @@ mod tests {
     async fn interrupt_all_connections_cancels_running_query() {
         let manager = make_blocking_test_manager();
         let pool = Arc::new(
-            build_warm_ducklake_pool(manager.clone(), NonZeroU32::MIN, "test", ())
+            build_warm_ducklake_pool(manager.clone(), NonZeroU16::MIN, "test", ())
                 .await
                 .expect("failed to build blocking test pool"),
         );
@@ -2295,7 +2296,7 @@ mod tests {
     async fn shutdown_requested_skips_new_blocking_operations() {
         let manager = make_blocking_test_manager();
         let pool = Arc::new(
-            build_warm_ducklake_pool(manager.clone(), NonZeroU32::MIN, "shutdown-skip-test", ())
+            build_warm_ducklake_pool(manager.clone(), NonZeroU16::MIN, "shutdown-skip-test", ())
                 .await
                 .expect("failed to build blocking test pool"),
         );

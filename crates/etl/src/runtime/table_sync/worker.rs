@@ -87,7 +87,7 @@ pub(crate) struct TableSyncWorkerStateInner {
     /// Notification mechanism for notifying state changes to waiting workers.
     state_change: Arc<Notify>,
     /// Number of consecutive automatic retry attempts.
-    retry_attempts: u32,
+    retry_attempts: u16,
 }
 
 impl TableSyncWorkerStateInner {
@@ -116,12 +116,12 @@ impl TableSyncWorkerStateInner {
     }
 
     /// Returns the number of consecutive automatic retry attempts.
-    pub(crate) fn retry_attempts(&self) -> u32 {
+    pub(crate) fn retry_attempts(&self) -> u16 {
         self.retry_attempts
     }
 
     /// Increments the retry attempt counter and returns the updated value.
-    pub(crate) fn increment_retry_attempts(&mut self) -> u32 {
+    pub(crate) fn increment_retry_attempts(&mut self) -> u16 {
         self.retry_attempts = self.retry_attempts.saturating_add(1);
         self.retry_attempts
     }

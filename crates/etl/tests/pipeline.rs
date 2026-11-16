@@ -1,4 +1,4 @@
-use std::{error::Error, num::NonZeroUsize, sync::Arc, time::Duration};
+use std::{error::Error, num::NonZeroU64, sync::Arc, time::Duration};
 
 use etl::{
     activity::{self, ActivityKind},
@@ -1340,7 +1340,7 @@ async fn table_copy_replicates_many_rows_with_parallel_connections() {
     .with_batch_config(BatchConfig {
         max_fill_ms: 1000,
         memory_budget_ratio: 0.2,
-        max_bytes: NonZeroUsize::new(8 * 1024 * 1024).unwrap(),
+        max_bytes: NonZeroU64::new(8 * 1024 * 1024).unwrap(),
     })
     .build();
 
@@ -1388,7 +1388,7 @@ async fn table_copy_waits_for_durable_terminal_barrier_after_accepted_write() {
     .with_batch_config(BatchConfig {
         max_fill_ms: 1000,
         memory_budget_ratio: 0.2,
-        max_bytes: NonZeroUsize::MIN,
+        max_bytes: NonZeroU64::MIN,
     })
     .build();
 

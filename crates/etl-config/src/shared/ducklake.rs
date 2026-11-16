@@ -227,7 +227,7 @@ mod tests {
         assert!(bucket(0).is_err());
         // Counts beyond DuckLake's signed integer argument fail validation.
         assert!(bucket(u32::MAX).unwrap().validate().is_err());
-        bucket(i32::MAX as u32).unwrap().validate().unwrap();
+        bucket(i32::MAX.cast_unsigned()).unwrap().validate().unwrap();
         let config: DuckLakeTablePartitioningConfig = serde_json::from_value(json!({
             "tables": [{"schema": "public", "table": "events", "partition_by": [
                 {"column": "id", "transform": {"kind": "identity"}},

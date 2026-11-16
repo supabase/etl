@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt::Display,
-    num::NonZeroUsize,
+    num::NonZeroU16,
     str::FromStr,
     sync::Arc,
 };
@@ -441,7 +441,7 @@ where
         dataset_id: BigQueryDatasetId,
         sa_key: &str,
         max_staleness_mins: Option<u16>,
-        connection_pool_size: NonZeroUsize,
+        connection_pool_size: NonZeroU16,
         pipeline_id: PipelineId,
         state_store: S,
     ) -> EtlResult<Self> {
@@ -474,7 +474,7 @@ where
         dataset_id: BigQueryDatasetId,
         sa_key: &str,
         max_staleness_mins: Option<u16>,
-        connection_pool_size: NonZeroUsize,
+        connection_pool_size: NonZeroU16,
         pipeline_id: PipelineId,
         state_store: S,
     ) -> EtlResult<Self> {
@@ -506,7 +506,7 @@ where
         project_id: String,
         dataset_id: BigQueryDatasetId,
         max_staleness_mins: Option<u16>,
-        connection_pool_size: NonZeroUsize,
+        connection_pool_size: NonZeroU16,
         pipeline_id: PipelineId,
         state_store: S,
     ) -> EtlResult<Self> {
@@ -541,7 +541,7 @@ where
         secret: Secret,
         persistent_file_path: Path,
         max_staleness_mins: Option<u16>,
-        connection_pool_size: NonZeroUsize,
+        connection_pool_size: NonZeroU16,
         pipeline_id: PipelineId,
         store: S,
     ) -> EtlResult<Self>

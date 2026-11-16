@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeSet,
-    num::{NonZeroU16, NonZeroUsize},
+    num::{NonZeroU16, NonZeroU64},
     sync::LazyLock,
     time::Duration,
 };
@@ -176,7 +176,7 @@ fn pipeline_config(pg_connection: PgConnectionConfig) -> PipelineConfig {
         batch: BatchConfig {
             max_fill_ms: 5000,
             memory_budget_ratio: 0.2,
-            max_bytes: NonZeroUsize::new(8 * 1024 * 1024).unwrap(),
+            max_bytes: NonZeroU64::new(8 * 1024 * 1024).unwrap(),
         },
         table_error_retry_delay_ms: 10000,
         table_error_retry_max_attempts: PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS,

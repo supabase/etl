@@ -1019,7 +1019,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
 mod tests {
     use std::{
         future::{Future, pending},
-        num::NonZeroUsize,
+        num::NonZeroU64,
         pin::Pin,
         sync::atomic::{AtomicBool, AtomicUsize, Ordering},
         task::{Context, Poll, Waker},
@@ -1791,7 +1791,7 @@ mod tests {
             destination.clone(),
         )
         .with_batch_config(BatchConfig {
-            max_bytes: NonZeroUsize::MIN,
+            max_bytes: NonZeroU64::MIN,
             max_fill_ms: 100,
             memory_budget_ratio: 0.2,
         })

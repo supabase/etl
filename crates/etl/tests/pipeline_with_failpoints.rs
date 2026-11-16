@@ -1,7 +1,7 @@
 #![cfg(all(feature = "test-utils", feature = "failpoints"))]
 
 use std::{
-    num::NonZeroUsize,
+    num::NonZeroU64,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -3195,7 +3195,7 @@ async fn durability_deadline_during_split_transaction_keeps_commit_boundary() {
         Some(600_000),
         Some(BatchConfig {
             max_fill_ms: 100,
-            max_bytes: NonZeroUsize::new(16_384).unwrap(),
+            max_bytes: NonZeroU64::new(16_384).unwrap(),
             memory_budget_ratio: 0.2,
         }),
     )

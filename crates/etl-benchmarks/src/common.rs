@@ -1,5 +1,5 @@
 #[cfg(unix)]
-use std::num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize};
+use std::num::{NonZeroU16, NonZeroU64};
 #[cfg(any(feature = "bigquery", feature = "clickhouse", feature = "snowflake"))]
 use std::sync::Once;
 use std::{
@@ -258,7 +258,7 @@ pub struct DestinationArgs {
     pub bq_max_staleness_mins: Option<u16>,
     /// BigQuery connection pool size.
     #[arg(long, default_value = "32")]
-    pub bq_connection_pool_size: NonZeroUsize,
+    pub bq_connection_pool_size: NonZeroU16,
     /// ClickHouse HTTP URL (for example, `http://localhost:8123`).
     #[arg(long)]
     pub clickhouse_url: Option<String>,
@@ -282,7 +282,7 @@ pub struct DestinationArgs {
     pub ducklake_data_path: Option<String>,
     /// Size of the DuckDB connection pool.
     #[arg(long, default_value = "4")]
-    pub ducklake_pool_size: NonZeroU32,
+    pub ducklake_pool_size: NonZeroU16,
     /// Enable deferred initial-copy buffering.
     #[arg(long, default_value_t = false)]
     pub ducklake_copy_buffer_enabled: bool,

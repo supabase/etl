@@ -1,4 +1,8 @@
-use std::{num::NonZeroUsize, str::FromStr, time::Duration};
+use std::{
+    num::{NonZeroU16, NonZeroU64},
+    str::FromStr,
+    time::Duration,
+};
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::{
@@ -956,7 +960,7 @@ async fn table_truncate_with_batching() {
         BatchConfig {
             max_fill_ms: 1000,
             memory_budget_ratio: 0.2,
-            max_bytes: NonZeroUsize::new(8 * 1024 * 1024).unwrap(),
+            max_bytes: NonZeroU64::new(8 * 1024 * 1024).unwrap(),
         },
     );
 
@@ -1937,7 +1941,7 @@ async fn literal_defaults_preserve_unicode_and_numeric_values() {
     let client = BigQueryClient::new_with_key_path(
         bigquery_database.project_id().to_owned(),
         bigquery_database.sa_key_path(),
-        NonZeroUsize::MIN,
+        NonZeroU16::MIN,
     )
     .await
     .unwrap();

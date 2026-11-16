@@ -21,7 +21,7 @@
 //! ```
 
 #[cfg(feature = "test-utils")]
-use std::num::{NonZeroU32, NonZeroU64};
+use std::num::{NonZeroU16, NonZeroU32, NonZeroU64};
 use std::{
     f64::consts::PI,
     path::Path,
@@ -434,7 +434,7 @@ async fn new_test_destination(
 async fn new_unbuffered_destination<S>(
     catalog_url: Url,
     data_url: Url,
-    pool_size: u32,
+    pool_size: u16,
     s3: Option<S3Config>,
     metadata_schema: Option<String>,
     maintenance_target_file_size: Option<String>,
@@ -444,7 +444,7 @@ async fn new_unbuffered_destination<S>(
 where
     S: DestinationStore,
 {
-    DuckLakeDestination::builder(catalog_url, data_url, NonZeroU32::new(pool_size).unwrap(), store)
+    DuckLakeDestination::builder(catalog_url, data_url, NonZeroU16::new(pool_size).unwrap(), store)
         .s3(s3)
         .metadata_schema(metadata_schema)
         .maintenance_target_file_size(maintenance_target_file_size)
@@ -512,7 +512,7 @@ async fn assert_pending_layout_failure_does_not_block_writes(sorting: bool) {
     let mut builder = DuckLakeDestination::builder(
         lake.catalog_url.clone(),
         lake.data_url.clone(),
-        NonZeroU32::MIN,
+        NonZeroU16::MIN,
         store.clone(),
     )
     .copy_buffer(DuckLakeCopyBufferConfig { enabled: false, ..Default::default() });
@@ -866,7 +866,7 @@ async fn namespaced_projects_isolate_copy_cdc_replay_and_truncate() {
         let destination = DuckLakeDestination::builder(
             lake.catalog_url.clone(),
             lake.data_url.clone(),
-            NonZeroU32::MIN,
+            NonZeroU16::MIN,
             store.clone(),
         )
         .table_namespace(Some(namespace.to_owned()))
@@ -927,7 +927,7 @@ async fn namespaced_projects_isolate_copy_cdc_replay_and_truncate() {
     let redirected = DuckLakeDestination::builder(
         lake.catalog_url.clone(),
         lake.data_url.clone(),
-        NonZeroU32::MIN,
+        NonZeroU16::MIN,
         stores[1].clone(),
     )
     .table_namespace(Some("project_a".to_owned()))
@@ -948,7 +948,7 @@ async fn namespaced_projects_isolate_copy_cdc_replay_and_truncate() {
     let restarted = DuckLakeDestination::builder(
         lake.catalog_url.clone(),
         lake.data_url.clone(),
-        NonZeroU32::MIN,
+        NonZeroU16::MIN,
         stores[1].clone(),
     )
     .table_namespace(Some("project_b".to_owned()))
@@ -984,7 +984,7 @@ async fn namespaced_projects_reconcile_partitioning_and_sorting_independently() 
         let destination = DuckLakeDestination::builder(
             lake.catalog_url.clone(),
             lake.data_url.clone(),
-            NonZeroU32::MIN,
+            NonZeroU16::MIN,
             store,
         )
         .table_namespace(Some(namespace.to_owned()))
@@ -1055,7 +1055,7 @@ async fn namespaced_tables_preserve_identifier_components() {
     let destination = DuckLakeDestination::builder(
         lake.catalog_url.clone(),
         lake.data_url.clone(),
-        NonZeroU32::MIN,
+        NonZeroU16::MIN,
         store.clone(),
     )
     .table_namespace(Some(namespace.to_owned()))
@@ -1105,7 +1105,7 @@ async fn maintenance_discovers_metadata_schema_and_flushes_rows() {
     let result = DuckLakeDestination::builder(
         lake.catalog_url.clone(),
         lake.data_url.clone(),
-        NonZeroU32::MIN,
+        NonZeroU16::MIN,
         MemoryStore::new(),
     )
     .table_namespace(Some("project_a".to_owned()))
@@ -1225,7 +1225,7 @@ async fn copy_writes_parquet_and_reuses_attached_catalog() {
     let destination = DuckLakeDestination::builder(
         lake.catalog_url.clone(),
         lake.data_url.clone(),
-        NonZeroU32::new(2).unwrap(),
+        NonZeroU16::new(2).unwrap(),
         store,
     )
     .build()
@@ -1322,7 +1322,7 @@ async fn buffered_copy_combines_batches_at_terminal_barrier() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
     let destination =
-        DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), NonZeroU32::MIN, store)
+        DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), NonZeroU16::MIN, store)
             .copy_buffer(DuckLakeCopyBufferConfig {
                 enabled: true,
                 target_bytes: NonZeroU64::new(1024 * 1024).unwrap(),
@@ -1388,7 +1388,7 @@ async fn buffered_copy_sessions_do_not_self_starve_with_single_connection() {
     store.store_table_schema(schema_a).await.unwrap();
     store.store_table_schema(schema_b).await.unwrap();
     let destination =
-        DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), NonZeroU32::MIN, store)
+        DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), NonZeroU16::MIN, store)
             .copy_buffer(DuckLakeCopyBufferConfig {
                 enabled: true,
                 target_bytes: NonZeroU64::new(1024 * 1024).unwrap(),
@@ -1451,7 +1451,7 @@ async fn buffered_copy_rejects_batch_larger_than_global_bound() {
     let small_row = TableRow::new(vec![Cell::I32(1), Cell::String("ok".to_owned())]);
     let max_total_bytes = u64::try_from(small_row.size_hint()).unwrap();
     let destination =
-        DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), NonZeroU32::MIN, store)
+        DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), NonZeroU16::MIN, store)
             .copy_buffer(DuckLakeCopyBufferConfig {
                 enabled: true,
                 target_bytes: NonZeroU64::new(max_total_bytes).unwrap(),
@@ -1501,7 +1501,7 @@ async fn buffered_copy_reset_waits_for_cancelled_blocking_append() {
     let destination = DuckLakeDestination::builder(
         catalog_url.clone(),
         data_url.clone(),
-        NonZeroU32::new(2).unwrap(),
+        NonZeroU16::new(2).unwrap(),
         store.clone(),
     )
     .copy_buffer(DuckLakeCopyBufferConfig {
@@ -1581,7 +1581,7 @@ async fn shutdown_waits_for_cancelled_copy_and_rejects_new_work() {
     let destination = DuckLakeDestination::builder(
         lake.catalog_url.clone(),
         lake.data_url.clone(),
-        NonZeroU32::new(2).unwrap(),
+        NonZeroU16::new(2).unwrap(),
         store,
     )
     .copy_buffer(DuckLakeCopyBufferConfig { enabled: false, ..Default::default() })
@@ -1643,7 +1643,7 @@ async fn buffered_copy_capacity_pressure_waits_for_cancelled_blocking_append() {
     let first_row = TableRow::new(vec![Cell::I32(1), Cell::String("first".to_owned())]);
     let max_total_bytes = u64::try_from(first_row.size_hint()).unwrap();
     let destination =
-        DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), NonZeroU32::MIN, store)
+        DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), NonZeroU16::MIN, store)
             .copy_buffer(DuckLakeCopyBufferConfig {
                 enabled: true,
                 target_bytes: NonZeroU64::new(max_total_bytes).unwrap(),
@@ -1707,7 +1707,7 @@ async fn buffered_copy_continues_while_maintenance_waits_for_session() {
     store.store_table_schema(schema).await.unwrap();
     store.store_table_schema(unrelated_schema).await.unwrap();
     let destination =
-        DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), NonZeroU32::MIN, store)
+        DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), NonZeroU16::MIN, store)
             .copy_buffer(DuckLakeCopyBufferConfig {
                 enabled: true,
                 target_bytes: NonZeroU64::new(1024 * 1024).unwrap(),
@@ -1801,7 +1801,7 @@ async fn buffered_copy_expired_maintenance_pause_resumes_watcher() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
     let destination =
-        DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), NonZeroU32::MIN, store)
+        DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), NonZeroU16::MIN, store)
             .copy_buffer(DuckLakeCopyBufferConfig {
                 enabled: true,
                 target_bytes: NonZeroU64::new(1024 * 1024).unwrap(),
@@ -1919,7 +1919,7 @@ async fn buffered_copy_flushes_when_target_bytes_are_reached() {
     let sample_row = TableRow::new(vec![Cell::I32(1), Cell::String("x".repeat(256))]);
     let target_bytes = u64::try_from(sample_row.size_hint().saturating_mul(2)).unwrap();
     let destination =
-        DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), NonZeroU32::MIN, store)
+        DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), NonZeroU16::MIN, store)
             .copy_buffer(DuckLakeCopyBufferConfig {
                 enabled: true,
                 target_bytes: NonZeroU64::new(target_bytes).unwrap(),
@@ -1984,7 +1984,7 @@ async fn buffered_copy_restart_recopies_without_loss_or_duplicates() {
     let destination = DuckLakeDestination::builder(
         catalog_url.clone(),
         data_url.clone(),
-        NonZeroU32::MIN,
+        NonZeroU16::MIN,
         store.clone(),
     )
     .copy_buffer(copy_buffer)
@@ -2004,7 +2004,7 @@ async fn buffered_copy_restart_recopies_without_loss_or_duplicates() {
     let restarted = DuckLakeDestination::builder(
         catalog_url.clone(),
         data_url.clone(),
-        NonZeroU32::MIN,
+        NonZeroU16::MIN,
         store.clone(),
     )
     .copy_buffer(copy_buffer)
@@ -2073,7 +2073,7 @@ async fn buffered_copy_ambiguous_commit_requires_full_recopy() {
     let destination = DuckLakeDestination::builder(
         catalog_url.clone(),
         data_url.clone(),
-        NonZeroU32::MIN,
+        NonZeroU16::MIN,
         store.clone(),
     )
     .copy_buffer(DuckLakeCopyBufferConfig {
@@ -2768,7 +2768,7 @@ async fn write_events() {
     let destination = DuckLakeDestination::builder(
         catalog_url.clone(),
         data_url.clone(),
-        NonZeroU32::new(4).unwrap(),
+        NonZeroU16::new(4).unwrap(),
         store,
     )
     .build()
@@ -4881,7 +4881,7 @@ async fn external_inline_flush_retries_pool_refresh_before_replication_resumes()
     store.store_table_schema(schema).await.unwrap();
 
     let destination =
-        DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), NonZeroU32::MIN, store)
+        DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), NonZeroU16::MIN, store)
             .build()
             .await
             .unwrap();
@@ -6092,7 +6092,7 @@ async fn partition_layout_reconciles_without_rewriting_historical_files() {
         let destination = DuckLakeDestination::builder(
             lake.catalog_url.clone(),
             lake.data_url.clone(),
-            NonZeroU32::MIN,
+            NonZeroU16::MIN,
             store.clone(),
         )
         .copy_buffer(DuckLakeCopyBufferConfig { enabled: false, ..Default::default() })
@@ -6225,7 +6225,7 @@ async fn partition_layout_rejects_unreplicated_and_incompatible_columns() {
         let destination = DuckLakeDestination::builder(
             lake.catalog_url.clone(),
             lake.data_url.clone(),
-            NonZeroU32::MIN,
+            NonZeroU16::MIN,
             store.clone(),
         )
         .table_partitioning(config.clone())
@@ -6245,7 +6245,7 @@ async fn partition_layout_rejects_unreplicated_and_incompatible_columns() {
         let pending = DuckLakeDestination::builder(
             lake.catalog_url.clone(),
             lake.data_url.clone(),
-            NonZeroU32::MIN,
+            NonZeroU16::MIN,
             store.clone(),
         )
         .table_partitioning(config)
@@ -6258,7 +6258,7 @@ async fn partition_layout_rejects_unreplicated_and_incompatible_columns() {
         let corrected = DuckLakeDestination::builder(
             lake.catalog_url.clone(),
             lake.data_url.clone(),
-            NonZeroU32::MIN,
+            NonZeroU16::MIN,
             store,
         )
         .table_partitioning(DuckLakeTablePartitioningConfig::new(vec![
@@ -6318,7 +6318,7 @@ async fn partition_layout_applies_calendar_transforms_with_quoted_columns() {
     let destination = DuckLakeDestination::builder(
         lake.catalog_url.clone(),
         lake.data_url.clone(),
-        NonZeroU32::MIN,
+        NonZeroU16::MIN,
         store,
     )
     .copy_buffer(DuckLakeCopyBufferConfig { enabled: false, ..Default::default() })
@@ -6400,7 +6400,7 @@ async fn partition_layout_handles_source_schema_changes() {
             DuckLakeDestination::builder(
                 lake.catalog_url.clone(),
                 lake.data_url.clone(),
-                NonZeroU32::MIN,
+                NonZeroU16::MIN,
                 store.clone(),
             )
             .copy_buffer(DuckLakeCopyBufferConfig { enabled: false, ..Default::default() })
@@ -6559,7 +6559,7 @@ async fn startup_layout_failure_is_isolated_and_retried() {
         let mut builder = DuckLakeDestination::builder(
             lake.catalog_url.clone(),
             lake.data_url.clone(),
-            NonZeroU32::MIN,
+            NonZeroU16::MIN,
             store,
         )
         .copy_buffer(DuckLakeCopyBufferConfig { enabled: false, ..Default::default() });
@@ -6680,7 +6680,7 @@ async fn periodic_layout_reconciliation_repairs_drift_without_resetting_tables()
     let destination = DuckLakeDestination::builder(
         lake.catalog_url.clone(),
         lake.data_url.clone(),
-        NonZeroU32::MIN,
+        NonZeroU16::MIN,
         store.clone(),
     )
     .external_maintenance(DuckLakeExternalMaintenanceConfig::postgres("layout-test"))
@@ -6918,7 +6918,7 @@ async fn catalog_pooler_roundtrip(direct: Url, writer: Url, pooler: Url, test_co
     let builder = DuckLakeDestination::builder(
         writer.clone(),
         data.clone(),
-        NonZeroU32::new(2).unwrap(),
+        NonZeroU16::new(2).unwrap(),
         store.clone(),
     )
     .catalog_pooler_url(Some(pooler.clone()))
@@ -7045,7 +7045,7 @@ async fn catalog_pooler_roundtrip(direct: Url, writer: Url, pooler: Url, test_co
         "maintenance discovery must use the pooler"
     );
 
-    let restarted = DuckLakeDestination::builder(writer, data.clone(), NonZeroU32::MIN, store)
+    let restarted = DuckLakeDestination::builder(writer, data.clone(), NonZeroU16::MIN, store)
         .catalog_pooler_url(Some(pooler))
         .metadata_schema(Some(metadata_schema.clone()))
         .build()

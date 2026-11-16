@@ -1,5 +1,5 @@
 use std::{
-    num::{NonZeroU16, NonZeroU32, NonZeroU64},
+    num::{NonZeroU16, NonZeroU64},
     time::Duration,
 };
 
@@ -102,7 +102,7 @@ pub struct PipelineBuilder<S, D> {
     /// 1000ms.
     table_error_retry_delay_ms: u64,
     /// Maximum number of retry attempts for table operations. Default: 2.
-    table_error_retry_max_attempts: NonZeroU32,
+    table_error_retry_max_attempts: NonZeroU16,
     /// Maximum number of concurrent table sync workers. Default: 1.
     max_table_sync_workers: NonZeroU16,
     /// Table sync copy configuration. Uses default if not specified.
@@ -174,7 +174,7 @@ where
                 max_bytes: BatchConfig::DEFAULT_MAX_BYTES,
             },
             table_error_retry_delay_ms: 1000,
-            table_error_retry_max_attempts: NonZeroU32::new(2).unwrap(),
+            table_error_retry_max_attempts: NonZeroU16::new(2).unwrap(),
             max_table_sync_workers: NonZeroU16::MIN,
             table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
             invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
@@ -241,9 +241,9 @@ where
     /// # Panics
     ///
     /// Panics if `max_attempts` is zero.
-    pub fn with_retry_config(mut self, delay_ms: u64, max_attempts: u32) -> Self {
+    pub fn with_retry_config(mut self, delay_ms: u64, max_attempts: u16) -> Self {
         self.table_error_retry_delay_ms = delay_ms;
-        self.table_error_retry_max_attempts = NonZeroU32::new(max_attempts).unwrap();
+        self.table_error_retry_max_attempts = NonZeroU16::new(max_attempts).unwrap();
         self
     }
 

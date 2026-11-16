@@ -1,6 +1,6 @@
 use std::{
     collections::HashSet,
-    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
+    num::{NonZeroU16, NonZeroU64},
 };
 
 use secrecy::SecretString;
@@ -16,11 +16,11 @@ use crate::{
     },
 };
 
-const fn default_connection_pool_size() -> NonZeroUsize {
+const fn default_connection_pool_size() -> NonZeroU16 {
     DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE
 }
 
-const fn default_ducklake_pool_size() -> NonZeroU32 {
+const fn default_ducklake_pool_size() -> NonZeroU16 {
     DestinationConfig::DEFAULT_DUCKLAKE_POOL_SIZE
 }
 
@@ -538,12 +538,13 @@ pub enum DestinationConfig {
         ///
         /// Controls the number of concurrent connections maintained in the pool
         /// for writing to BigQuery. The maximum number of inflight requests is
-        /// calculated as `connection_pool_size * 100`.
+        /// calculated as `connection_pool_size * 100`, clamped to 100,000.
         ///
         /// A higher connection pool size allows more parallel writes but
-        /// consumes more resources.
+        /// consumes more resources. Sizes above 1,000 add connections without
+        /// raising the inflight request limit.
         #[serde(default = "default_connection_pool_size")]
-        connection_pool_size: NonZeroUsize,
+        connection_pool_size: NonZeroU16,
         /// Per-table partitioning and clustering, applied only when the
         /// physical table is created or recreated.
         #[serde(default, skip_serializing_if = "BigQueryTableOptionsConfig::is_empty")]
@@ -580,7 +581,7 @@ pub enum DestinationConfig {
         data_path: String,
         /// Size of the DuckDB connection pool.
         #[serde(default = "default_ducklake_pool_size")]
-        pool_size: NonZeroU32,
+        pool_size: NonZeroU16,
         /// Optional S3-compatible storage access key ID.
         s3_access_key_id: Option<SecretString>,
         /// Optional S3-compatible storage secret access key.
@@ -641,9 +642,9 @@ pub enum DestinationConfig {
 
 impl DestinationConfig {
     /// Default connection pool size for BigQuery destinations.
-    pub const DEFAULT_CONNECTION_POOL_SIZE: NonZeroUsize = NonZeroUsize::new(4).unwrap();
+    pub const DEFAULT_CONNECTION_POOL_SIZE: NonZeroU16 = NonZeroU16::new(4).unwrap();
     /// Default connection pool size for DuckLake destinations.
-    pub const DEFAULT_DUCKLAKE_POOL_SIZE: NonZeroU32 = NonZeroU32::new(4).unwrap();
+    pub const DEFAULT_DUCKLAKE_POOL_SIZE: NonZeroU16 = NonZeroU16::new(4).unwrap();
 
     /// Returns the destination kind represented by this config.
     pub fn kind(&self) -> DestinationKind {
@@ -704,12 +705,13 @@ pub enum DestinationConfigWithoutSecrets {
         ///
         /// Controls the number of concurrent connections maintained in the pool
         /// for writing to BigQuery. The maximum number of inflight requests is
-        /// calculated as `connection_pool_size * 100`.
+        /// calculated as `connection_pool_size * 100`, clamped to 100,000.
         ///
         /// A higher connection pool size allows more parallel writes but
-        /// consumes more resources.
+        /// consumes more resources. Sizes above 1,000 add connections without
+        /// raising the inflight request limit.
         #[serde(default = "default_connection_pool_size")]
-        connection_pool_size: NonZeroUsize,
+        connection_pool_size: NonZeroU16,
         /// Per-table partitioning and clustering, applied only when the
         /// physical table is created or recreated.
         #[serde(default, skip_serializing_if = "BigQueryTableOptionsConfig::is_empty")]
@@ -735,7 +737,7 @@ pub enum DestinationConfigWithoutSecrets {
         data_path: String,
         /// Size of the DuckDB connection pool.
         #[serde(default = "default_ducklake_pool_size")]
-        pool_size: NonZeroU32,
+        pool_size: NonZeroU16,
         /// Optional S3-compatible storage region.
         s3_region: Option<String>,
         /// Optional S3-compatible storage endpoint.
