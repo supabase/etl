@@ -1,10 +1,10 @@
 #[cfg(unix)]
-use std::num::{NonZeroU16, NonZeroU64};
+use std::mem::MaybeUninit;
 #[cfg(any(feature = "bigquery", feature = "clickhouse", feature = "snowflake"))]
 use std::sync::Once;
 use std::{
     fs,
-    mem::MaybeUninit,
+    num::{NonZeroU16, NonZeroU64},
     path::Path,
     sync::{
         Arc,

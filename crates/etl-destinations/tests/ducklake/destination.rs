@@ -21,14 +21,15 @@
 //! ```
 
 #[cfg(feature = "test-utils")]
-use std::num::{NonZeroU16, NonZeroU32, NonZeroU64};
+use std::sync::{
+    LazyLock,
+    atomic::{AtomicBool, Ordering},
+};
 use std::{
     f64::consts::PI,
+    num::{NonZeroU16, NonZeroU32, NonZeroU64},
     path::Path,
-    sync::{
-        Arc, LazyLock,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::Arc,
     time::Duration,
 };
 
