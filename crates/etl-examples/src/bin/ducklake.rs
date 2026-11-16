@@ -28,7 +28,12 @@ Usage:
 
 */
 
-use std::{error::Error, ffi::OsStr, num::NonZeroU16, sync::Once};
+use std::{
+    error::Error,
+    ffi::OsStr,
+    num::{NonZeroU16, NonZeroU32},
+    sync::Once,
+};
 
 use clap::{
     Args, Parser,
@@ -132,7 +137,7 @@ struct DuckLakeArgs {
     data_path: Url,
     /// DuckDB connection pool size
     #[arg(long, default_value = "4")]
-    pool_size: u32,
+    pool_size: NonZeroU32,
     /// Maximum time to wait for a batch to fill in milliseconds
     #[arg(long, default_value = "5000")]
     max_batch_fill_duration_ms: u64,

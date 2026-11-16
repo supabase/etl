@@ -3,7 +3,10 @@
 //! Provides a database wrapper for managing BigQuery datasets and constants for
 //! connecting to Google Cloud BigQuery in test environments.
 
-use std::{error::Error as _, fmt, future::Future, path::Path, str::FromStr, time::Duration};
+use std::{
+    error::Error as _, fmt, future::Future, num::NonZeroUsize, path::Path, str::FromStr,
+    time::Duration,
+};
 
 use etl::{error::EtlError, pipeline::PipelineId, schema::TableName, store::DestinationStore};
 use gcp_bigquery_client::{
@@ -486,7 +489,7 @@ impl BigQueryDatabase {
             self.dataset_id.clone(),
             &self.sa_key_path,
             Some(0), // Zero staleness for immediate consistency in tests
-            10,      // Allow concurrent streams for testing
+            NonZeroUsize::new(10).unwrap(), // Allow concurrent streams for testing
             pipeline_id,
             schema_store,
         )

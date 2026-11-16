@@ -1937,7 +1937,7 @@ async fn literal_defaults_preserve_unicode_and_numeric_values() {
     let client = BigQueryClient::new_with_key_path(
         bigquery_database.project_id().to_owned(),
         bigquery_database.sa_key_path(),
-        1,
+        NonZeroUsize::MIN,
     )
     .await
     .unwrap();

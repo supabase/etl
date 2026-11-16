@@ -1,4 +1,7 @@
-use std::{collections::HashSet, num::NonZeroU64};
+use std::{
+    collections::HashSet,
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
+};
 
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
@@ -13,11 +16,11 @@ use crate::{
     },
 };
 
-const fn default_connection_pool_size() -> usize {
+const fn default_connection_pool_size() -> NonZeroUsize {
     DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE
 }
 
-const fn default_ducklake_pool_size() -> u32 {
+const fn default_ducklake_pool_size() -> NonZeroU32 {
     DestinationConfig::DEFAULT_DUCKLAKE_POOL_SIZE
 }
 
@@ -540,7 +543,7 @@ pub enum DestinationConfig {
         /// A higher connection pool size allows more parallel writes but
         /// consumes more resources.
         #[serde(default = "default_connection_pool_size")]
-        connection_pool_size: usize,
+        connection_pool_size: NonZeroUsize,
         /// Per-table partitioning and clustering, applied only when the
         /// physical table is created or recreated.
         #[serde(default, skip_serializing_if = "BigQueryTableOptionsConfig::is_empty")]
@@ -577,7 +580,7 @@ pub enum DestinationConfig {
         data_path: String,
         /// Size of the DuckDB connection pool.
         #[serde(default = "default_ducklake_pool_size")]
-        pool_size: u32,
+        pool_size: NonZeroU32,
         /// Optional S3-compatible storage access key ID.
         s3_access_key_id: Option<SecretString>,
         /// Optional S3-compatible storage secret access key.
@@ -638,9 +641,9 @@ pub enum DestinationConfig {
 
 impl DestinationConfig {
     /// Default connection pool size for BigQuery destinations.
-    pub const DEFAULT_CONNECTION_POOL_SIZE: usize = 4;
+    pub const DEFAULT_CONNECTION_POOL_SIZE: NonZeroUsize = NonZeroUsize::new(4).unwrap();
     /// Default connection pool size for DuckLake destinations.
-    pub const DEFAULT_DUCKLAKE_POOL_SIZE: u32 = 4;
+    pub const DEFAULT_DUCKLAKE_POOL_SIZE: NonZeroU32 = NonZeroU32::new(4).unwrap();
 
     /// Returns the destination kind represented by this config.
     pub fn kind(&self) -> DestinationKind {
@@ -706,7 +709,7 @@ pub enum DestinationConfigWithoutSecrets {
         /// A higher connection pool size allows more parallel writes but
         /// consumes more resources.
         #[serde(default = "default_connection_pool_size")]
-        connection_pool_size: usize,
+        connection_pool_size: NonZeroUsize,
         /// Per-table partitioning and clustering, applied only when the
         /// physical table is created or recreated.
         #[serde(default, skip_serializing_if = "BigQueryTableOptionsConfig::is_empty")]
@@ -732,7 +735,7 @@ pub enum DestinationConfigWithoutSecrets {
         data_path: String,
         /// Size of the DuckDB connection pool.
         #[serde(default = "default_ducklake_pool_size")]
-        pool_size: u32,
+        pool_size: NonZeroU32,
         /// Optional S3-compatible storage region.
         s3_region: Option<String>,
         /// Optional S3-compatible storage endpoint.
@@ -892,6 +895,77 @@ mod tests {
 
     use super::*;
 
+    /// Omitted pool sizes keep their defaults and explicit nonzero sizes are
+    /// preserved, in both public configuration forms.
+    #[test]
+    fn destination_pool_sizes_default_and_accept_nonzero_values() {
+        for (pool_size, expected_bigquery, expected_ducklake) in [
+            (None, DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE.get(), 4),
+            (Some(1), 1, 1),
+            (Some(32), 32, 32),
+        ] {
+            let mut bigquery = json!({
+                "big_query": {
+                    "project_id": "placeholder-project",
+                    "dataset_id": "placeholder_dataset",
+                    "service_account_key": "{}"
+                }
+            });
+            let mut ducklake = json!({
+                "ducklake": {
+                    "catalog_url": "postgres://placeholder@catalog.example.com/catalog",
+                    "data_path": "s3://example-bucket/"
+                }
+            });
+            if let Some(pool_size) = pool_size {
+                bigquery["big_query"]["connection_pool_size"] = json!(pool_size);
+                ducklake["ducklake"]["pool_size"] = json!(pool_size);
+            }
+
+            let DestinationConfig::BigQuery { connection_pool_size, .. } =
+                from_value(bigquery.clone()).unwrap()
+            else {
+                panic!("expected a BigQuery destination");
+            };
+            let DestinationConfig::Ducklake { pool_size: ducklake_pool_size, .. } =
+                from_value(ducklake.clone()).unwrap()
+            else {
+                panic!("expected a DuckLake destination");
+            };
+
+            assert_eq!(connection_pool_size.get(), expected_bigquery);
+            assert_eq!(ducklake_pool_size.get(), expected_ducklake);
+            from_value::<DestinationConfigWithoutSecrets>(bigquery).unwrap();
+            from_value::<DestinationConfigWithoutSecrets>(ducklake).unwrap();
+        }
+    }
+
+    /// A zero pool size cannot be represented, so both public configuration
+    /// forms reject it while deserializing.
+    #[test]
+    fn destination_pool_sizes_reject_zero() {
+        let bigquery = json!({
+            "big_query": {
+                "project_id": "placeholder-project",
+                "dataset_id": "placeholder_dataset",
+                "service_account_key": "{}",
+                "connection_pool_size": 0
+            }
+        });
+        let ducklake = json!({
+            "ducklake": {
+                "catalog_url": "postgres://placeholder@catalog.example.com/catalog",
+                "data_path": "s3://example-bucket/",
+                "pool_size": 0
+            }
+        });
+
+        for value in [bigquery, ducklake] {
+            from_value::<DestinationConfig>(value.clone()).unwrap_err();
+            from_value::<DestinationConfigWithoutSecrets>(value).unwrap_err();
+        }
+    }
+
     /// Both public configuration forms reject namespace case aliases.
     #[test]
     fn ducklake_configs_validate_namespace_case() {
@@ -958,7 +1032,7 @@ mod tests {
             catalog_url: "postgres://user:pass@localhost:5432/ducklake_catalog".to_owned().into(),
             catalog_pooler_url: Some("postgres://placeholder@pooler.example.com/catalog".into()),
             data_path: "s3://bucket/path".to_owned(),
-            pool_size: 4,
+            pool_size: DestinationConfig::DEFAULT_DUCKLAKE_POOL_SIZE,
             s3_access_key_id: None,
             s3_secret_access_key: None,
             s3_region: None,

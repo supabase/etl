@@ -3,7 +3,7 @@
 //! These tests use a PostgreSQL-backed DuckLake catalog and verify the final
 //! table contents by querying DuckLake directly through DuckDB.
 
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU32, NonZeroUsize};
 
 use duckdb::Connection;
 #[cfg(feature = "test-utils")]
@@ -359,7 +359,7 @@ async fn build_destination(
     let raw_destination = DuckLakeDestination::new(
         catalog_url.clone(),
         data_url.clone(),
-        1,
+        NonZeroU32::MIN,
         None,
         None,
         None,
@@ -2033,7 +2033,7 @@ async fn build_shutdown_replay_pipeline(
     let destination = DuckLakeDestination::new(
         catalog.clone(),
         data.clone(),
-        1,
+        NonZeroU32::MIN,
         None,
         None,
         None,

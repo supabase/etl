@@ -1,4 +1,4 @@
-use std::{error::Error as _, fmt, io};
+use std::{error::Error as _, fmt, io, num::NonZeroUsize};
 
 use etl::{
     data::Cell,
@@ -387,8 +387,9 @@ fn create_append_trace_id(pipeline_id: PipelineId, table_id: &str, request_index
 /// Uses checked arithmetic to safely multiply the connection pool size by the
 /// per-connection limit, clamping the result to [`MAX_SAFE_INFLIGHT_REQUESTS`]
 /// to prevent overflow and resource exhaustion.
-fn compute_max_inflight_requests(connection_pool_size: usize) -> usize {
+fn compute_max_inflight_requests(connection_pool_size: NonZeroUsize) -> usize {
     connection_pool_size
+        .get()
         .checked_mul(MAX_INFLIGHT_REQUESTS_PER_CONNECTION)
         .unwrap_or(MAX_SAFE_INFLIGHT_REQUESTS)
         .min(MAX_SAFE_INFLIGHT_REQUESTS)
@@ -856,13 +857,16 @@ impl BigQueryClient {
     pub async fn new_with_key_path(
         project_id: BigQueryProjectId,
         sa_key_file: &str,
-        connection_pool_size: usize,
+        connection_pool_size: NonZeroUsize,
     ) -> EtlResult<BigQueryClient> {
         let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
         // Gzip is CPU-bound on every append with no compression-level control,
         // and rows can carry large text/JSON payloads.
-        let storage_config =
-            StorageApiConfig { connection_pool_size, max_inflight_requests, compression: false };
+        let storage_config = StorageApiConfig {
+            connection_pool_size: connection_pool_size.get(),
+            max_inflight_requests,
+            compression: false,
+        };
 
         let sa_key = read_service_account_key(sa_key_file).await.map_err(bq_error_to_etl_error)?;
         let client = ClientBuilder::new()
@@ -881,13 +885,16 @@ impl BigQueryClient {
     pub async fn new_with_key(
         project_id: BigQueryProjectId,
         sa_key: &str,
-        connection_pool_size: usize,
+        connection_pool_size: NonZeroUsize,
     ) -> EtlResult<BigQueryClient> {
         let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
         // Gzip is CPU-bound on every append with no compression-level control,
         // and rows can carry large text/JSON payloads.
-        let storage_config =
-            StorageApiConfig { connection_pool_size, max_inflight_requests, compression: false };
+        let storage_config = StorageApiConfig {
+            connection_pool_size: connection_pool_size.get(),
+            max_inflight_requests,
+            compression: false,
+        };
 
         let sa_key = parse_service_account_key(sa_key.as_bytes()).map_err(bq_error_to_etl_error)?;
         let client = ClientBuilder::new()
@@ -906,13 +913,16 @@ impl BigQueryClient {
     /// error if credentials are missing or invalid.
     pub async fn new_with_adc(
         project_id: BigQueryProjectId,
-        connection_pool_size: usize,
+        connection_pool_size: NonZeroUsize,
     ) -> EtlResult<BigQueryClient> {
         let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
         // Gzip is CPU-bound on every append with no compression-level control,
         // and rows can carry large text/JSON payloads.
-        let storage_config =
-            StorageApiConfig { connection_pool_size, max_inflight_requests, compression: false };
+        let storage_config = StorageApiConfig {
+            connection_pool_size: connection_pool_size.get(),
+            max_inflight_requests,
+            compression: false,
+        };
 
         let client = ClientBuilder::new()
             .with_storage_config(storage_config)
@@ -932,13 +942,16 @@ impl BigQueryClient {
         project_id: BigQueryProjectId,
         secret: S,
         persistent_file_path: P,
-        connection_pool_size: usize,
+        connection_pool_size: NonZeroUsize,
     ) -> EtlResult<BigQueryClient> {
         let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
         // Gzip is CPU-bound on every append with no compression-level control,
         // and rows can carry large text/JSON payloads.
-        let storage_config =
-            StorageApiConfig { connection_pool_size, max_inflight_requests, compression: false };
+        let storage_config = StorageApiConfig {
+            connection_pool_size: connection_pool_size.get(),
+            max_inflight_requests,
+            compression: false,
+        };
 
         let client = ClientBuilder::new()
             .with_storage_config(storage_config)
@@ -1740,13 +1753,17 @@ mod tests {
         let document = serde_json::to_string(SERVICE_ACCOUNT_DOCUMENT).unwrap();
         let file = tempfile::NamedTempFile::new().unwrap();
         tokio::fs::write(file.path(), &document).await.unwrap();
-        let inline = BigQueryClient::new_with_key("placeholder-project".to_owned(), &document, 1)
-            .await
-            .unwrap_err();
+        let inline = BigQueryClient::new_with_key(
+            "placeholder-project".to_owned(),
+            &document,
+            NonZeroUsize::MIN,
+        )
+        .await
+        .unwrap_err();
         let from_file = BigQueryClient::new_with_key_path(
             "placeholder-project".to_owned(),
             file.path().to_str().unwrap(),
-            1,
+            NonZeroUsize::MIN,
         )
         .await
         .unwrap_err();
@@ -1781,7 +1798,7 @@ mod tests {
         let error = BigQueryClient::new_with_key_path(
             "placeholder-project".to_owned(),
             path.to_str().unwrap(),
-            1,
+            NonZeroUsize::MIN,
         )
         .await
         .unwrap_err();
