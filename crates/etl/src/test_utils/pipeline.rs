@@ -1,4 +1,7 @@
-use std::time::Duration;
+use std::{
+    num::{NonZeroU16, NonZeroU32, NonZeroU64},
+    time::Duration,
+};
 
 use etl_config::shared::{
     BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
@@ -82,7 +85,7 @@ pub fn random_pipeline_id() -> String {
 ///     .with_batch_config(BatchConfig {
 ///         max_fill_ms: 5000,
 ///         memory_budget_ratio: 0.2,
-///         max_bytes: 32 * 1024 * 1024,
+///         max_bytes: BatchConfig::DEFAULT_MAX_BYTES,
 ///     })
 ///     .with_retry_config(2000, 10)
 ///     .build();
@@ -99,21 +102,21 @@ pub struct PipelineBuilder<S, D> {
     /// 1000ms.
     table_error_retry_delay_ms: u64,
     /// Maximum number of retry attempts for table operations. Default: 2.
-    table_error_retry_max_attempts: u32,
+    table_error_retry_max_attempts: NonZeroU32,
     /// Maximum number of concurrent table sync workers. Default: 1.
-    max_table_sync_workers: u16,
+    max_table_sync_workers: NonZeroU16,
     /// Table sync copy configuration. Uses default if not specified.
     table_sync_copy: TableSyncCopyConfig,
     /// Behavior when the main replication slot is found to be invalidated.
     invalidated_slot_behavior: InvalidatedSlotBehavior,
     /// Maximum worker connections per table during initial copy.
-    max_copy_connections_per_table: u16,
+    max_copy_connections_per_table: NonZeroU16,
     /// Milliseconds between memory samples. Defaults to 100 milliseconds.
-    memory_refresh_interval_ms: u64,
+    memory_refresh_interval_ms: NonZeroU64,
     /// Milliseconds between copy-slot checks. Defaults to 10,000 milliseconds.
-    table_sync_monitor_refresh_interval_ms: u64,
+    table_sync_monitor_refresh_interval_ms: NonZeroU64,
     /// Milliseconds between lag samples. Defaults to 10,000 milliseconds.
-    replication_lag_refresh_interval_ms: u64,
+    replication_lag_refresh_interval_ms: NonZeroU64,
     /// Minimum age of an accepted write before an idle keepalive may force
     /// durability. Defaults to `None`, allowing any eligible keepalive.
     settle_durable_interval_ms: Option<u64>,
@@ -171,12 +174,12 @@ where
                 max_bytes: BatchConfig::DEFAULT_MAX_BYTES,
             },
             table_error_retry_delay_ms: 1000,
-            table_error_retry_max_attempts: 2,
-            max_table_sync_workers: 1,
+            table_error_retry_max_attempts: NonZeroU32::new(2).unwrap(),
+            max_table_sync_workers: NonZeroU16::MIN,
             table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
             invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
             max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
-            memory_refresh_interval_ms: 100,
+            memory_refresh_interval_ms: PipelineConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS,
             table_sync_monitor_refresh_interval_ms:
                 PipelineConfig::DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS,
             replication_lag_refresh_interval_ms:
@@ -234,15 +237,23 @@ where
     }
 
     /// Sets custom retry configuration for table operations.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max_attempts` is zero.
     pub fn with_retry_config(mut self, delay_ms: u64, max_attempts: u32) -> Self {
         self.table_error_retry_delay_ms = delay_ms;
-        self.table_error_retry_max_attempts = max_attempts;
+        self.table_error_retry_max_attempts = NonZeroU32::new(max_attempts).unwrap();
         self
     }
 
     /// Sets the maximum number of concurrent table sync workers.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `workers` is zero.
     pub fn with_max_table_sync_workers(mut self, workers: u16) -> Self {
-        self.max_table_sync_workers = workers;
+        self.max_table_sync_workers = NonZeroU16::new(workers).unwrap();
         self
     }
 
@@ -255,20 +266,32 @@ where
 
     /// Sets the maximum number of parallel connections per table during initial
     /// copy.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `connections` is zero.
     pub fn with_max_copy_connections_per_table(mut self, connections: u16) -> Self {
-        self.max_copy_connections_per_table = connections;
+        self.max_copy_connections_per_table = NonZeroU16::new(connections).unwrap();
         self
     }
 
     /// Sets the milliseconds between copy-slot validity checks.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `interval_ms` is zero.
     pub fn with_table_sync_monitor_refresh_interval_ms(mut self, interval_ms: u64) -> Self {
-        self.table_sync_monitor_refresh_interval_ms = interval_ms;
+        self.table_sync_monitor_refresh_interval_ms = NonZeroU64::new(interval_ms).unwrap();
         self
     }
 
     /// Sets the milliseconds between pipeline-wide lag samples.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `interval_ms` is zero.
     pub fn with_replication_lag_refresh_interval_ms(mut self, interval_ms: u64) -> Self {
-        self.replication_lag_refresh_interval_ms = interval_ms;
+        self.replication_lag_refresh_interval_ms = NonZeroU64::new(interval_ms).unwrap();
         self
     }
 

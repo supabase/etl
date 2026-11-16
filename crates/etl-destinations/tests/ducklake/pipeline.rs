@@ -3,6 +3,8 @@
 //! These tests use a PostgreSQL-backed DuckLake catalog and verify the final
 //! table contents by querying DuckLake directly through DuckDB.
 
+use std::num::NonZeroUsize;
+
 use duckdb::Connection;
 #[cfg(feature = "test-utils")]
 use etl::pipeline::PipelineId;
@@ -543,7 +545,11 @@ async fn table_copy_preserves_identical_oversized_rows_across_batches() {
         publication_name.to_owned(),
         store.clone(),
         destination.clone(),
-        BatchConfig { max_fill_ms: 1000, memory_budget_ratio: 0.2, max_bytes: 8 * 1024 * 1024 },
+        BatchConfig {
+            max_fill_ms: 1000,
+            memory_budget_ratio: 0.2,
+            max_bytes: NonZeroUsize::new(8 * 1024 * 1024).unwrap(),
+        },
     );
     let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 

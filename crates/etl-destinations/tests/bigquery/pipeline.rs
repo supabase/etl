@@ -1,4 +1,4 @@
-use std::{str::FromStr, time::Duration};
+use std::{num::NonZeroUsize, str::FromStr, time::Duration};
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::{
@@ -953,7 +953,11 @@ async fn table_truncate_with_batching() {
         destination.clone(),
         // We use a batch size > 1, so that we can make sure that interleaved truncate statements
         // work well with multiple batches of events.
-        BatchConfig { max_fill_ms: 1000, memory_budget_ratio: 0.2, max_bytes: 8 * 1024 * 1024 },
+        BatchConfig {
+            max_fill_ms: 1000,
+            memory_budget_ratio: 0.2,
+            max_bytes: NonZeroUsize::new(8 * 1024 * 1024).unwrap(),
+        },
     );
 
     // Register notifications for table copy completion.

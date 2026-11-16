@@ -1,6 +1,7 @@
 #![cfg(all(feature = "test-utils", feature = "failpoints"))]
 
 use std::{
+    num::NonZeroUsize,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -3192,7 +3193,11 @@ async fn durability_deadline_during_split_transaction_keeps_commit_boundary() {
     let _scenario = FailScenario::setup();
     let mut test = IdleDurabilityTest::start_with_batch(
         Some(600_000),
-        Some(BatchConfig { max_fill_ms: 100, max_bytes: 16_384, memory_budget_ratio: 0.2 }),
+        Some(BatchConfig {
+            max_fill_ms: 100,
+            max_bytes: NonZeroUsize::new(16_384).unwrap(),
+            memory_budget_ratio: 0.2,
+        }),
     )
     .await;
     test.insert(1).await;

@@ -2689,7 +2689,7 @@ where
         handle.reservations.lock().push(reservation);
         let blocking_handle = Arc::clone(&handle);
         let connection = handle.connection.clone();
-        let target_bytes = self.copy_buffer_config.target_bytes;
+        let target_bytes = self.copy_buffer_config.target_bytes.get();
         let table_write_permit = Arc::clone(&table_write_permit);
         let append_result = run_duckdb_dedicated_blocking_with_context(
             connection,

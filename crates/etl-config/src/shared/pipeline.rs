@@ -1,4 +1,7 @@
-use std::collections::HashSet;
+use std::{
+    collections::HashSet,
+    num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
+};
 
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "utoipa")]
@@ -56,8 +59,8 @@ pub struct BatchConfig {
     /// single source row may exceed it because rows cannot be split safely
     /// after decoding.
     #[serde(default = "default_batch_max_bytes")]
-    #[cfg_attr(feature = "utoipa", schema(example = 33554432))]
-    pub max_bytes: usize,
+    #[cfg_attr(feature = "utoipa", schema(value_type = usize, example = 33554432))]
+    pub max_bytes: NonZeroUsize,
 }
 
 impl BatchConfig {
@@ -76,7 +79,7 @@ impl BatchConfig {
     /// The 32 MiB cap supplies substantial destination work while bounding
     /// multi-row accumulation before reactive memory backpressure can observe
     /// new allocations. An indivisible source row can exceed the cap.
-    pub const DEFAULT_MAX_BYTES: usize = 32 * 1024 * 1024;
+    pub const DEFAULT_MAX_BYTES: NonZeroUsize = NonZeroUsize::new(32 * 1024 * 1024).unwrap();
 }
 
 impl Validate for BatchConfig {
@@ -86,13 +89,6 @@ impl Validate for BatchConfig {
             return Err(ValidationError::InvalidFieldValue {
                 field: "batch.memory_budget_ratio".to_owned(),
                 constraint: "must be in the (0.0, 1.0] interval".to_owned(),
-            });
-        }
-
-        if self.max_bytes == 0 {
-            return Err(ValidationError::InvalidFieldValue {
-                field: "batch.max_bytes".to_owned(),
-                constraint: "must be greater than 0".to_owned(),
             });
         }
 
@@ -118,7 +114,7 @@ const fn default_memory_budget_ratio() -> f32 {
     BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO
 }
 
-const fn default_batch_max_bytes() -> usize {
+const fn default_batch_max_bytes() -> NonZeroUsize {
     BatchConfig::DEFAULT_MAX_BYTES
 }
 
@@ -394,14 +390,14 @@ pub struct PipelineConfig {
     ///
     /// This setting is shared by table sync and apply workers.
     #[serde(default = "default_table_error_retry_max_attempts")]
-    pub table_error_retry_max_attempts: u32,
+    pub table_error_retry_max_attempts: NonZeroU32,
     /// Maximum number of table sync workers that can run at a time.
     ///
     /// Must be positive. The product with
     /// [`Self::max_copy_connections_per_table`] must not exceed
     /// [`PipelineConfig::MAX_TOTAL_COPY_CONNECTIONS`].
     #[serde(default = "default_max_table_sync_workers")]
-    pub max_table_sync_workers: u16,
+    pub max_table_sync_workers: NonZeroU16,
     /// Maximum worker connections per table during initial copy.
     ///
     /// Must be positive. The product with [`Self::max_table_sync_workers`]
@@ -411,7 +407,7 @@ pub struct PipelineConfig {
     /// set to 1. ETL may plan more ctid ranges than worker connections so
     /// workers can pull new ranges as they finish.
     #[serde(default = "default_max_copy_connections_per_table")]
-    pub max_copy_connections_per_table: u16,
+    pub max_copy_connections_per_table: NonZeroU16,
     /// Number of milliseconds between coherent memory snapshots.
     ///
     /// One shared sampler drives dynamic batch targets and emergency
@@ -419,20 +415,20 @@ pub struct PipelineConfig {
     /// operating-system or cgroup files per row. Must be positive; defaults to
     /// 100 milliseconds.
     #[serde(default = "default_memory_refresh_interval_ms")]
-    pub memory_refresh_interval_ms: u64,
+    pub memory_refresh_interval_ms: NonZeroU64,
     /// Milliseconds between replication-slot validity checks during table copy.
     ///
     /// Must be positive; defaults to 10,000 milliseconds. Controls how quickly
     /// an unusable copy slot is detected, independently of lag sampling.
     #[serde(default = "default_table_sync_monitor_refresh_interval_ms")]
-    pub table_sync_monitor_refresh_interval_ms: u64,
+    pub table_sync_monitor_refresh_interval_ms: NonZeroU64,
     /// Milliseconds between pipeline-wide replication lag samples.
     ///
     /// One sampler measures all apply, table-copy, and table-sync CDC workers.
     /// Must be positive; defaults to 10,000 milliseconds. Independent of copy
     /// slot validity checks and Prometheus scraping.
     #[serde(default = "default_replication_lag_refresh_interval_ms")]
-    pub replication_lag_refresh_interval_ms: u64,
+    pub replication_lag_refresh_interval_ms: NonZeroU64,
     /// Optional window, in milliseconds, before an idle keepalive may force
     /// durability of an accepted streaming write.
     ///
@@ -518,7 +514,7 @@ impl PipelineConfig {
     pub const DEFAULT_TABLE_ERROR_RETRY_DELAY_MS: u64 = 10000;
 
     /// Default maximum number of retry attempts for table errors.
-    pub const DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS: u32 = 5;
+    pub const DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS: NonZeroU32 = NonZeroU32::new(5).unwrap();
 
     /// Maximum aggregate copy worker connections configured for one pipeline.
     ///
@@ -527,19 +523,20 @@ impl PipelineConfig {
     pub const MAX_TOTAL_COPY_CONNECTIONS: u32 = 256;
 
     /// Default maximum number of concurrent table sync workers.
-    pub const DEFAULT_MAX_TABLE_SYNC_WORKERS: u16 = 4;
+    pub const DEFAULT_MAX_TABLE_SYNC_WORKERS: NonZeroU16 = NonZeroU16::new(4).unwrap();
 
     /// Default maximum worker connections per table during initial copy.
-    pub const DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE: u16 = 4;
+    pub const DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE: NonZeroU16 = NonZeroU16::new(4).unwrap();
 
     /// Default interval in milliseconds between coherent memory snapshots.
     ///
     /// A 100 ms interval reacts quickly to allocation bursts and cgroup limit
     /// changes without moving operating-system reads into per-row hot paths.
-    pub const DEFAULT_MEMORY_REFRESH_INTERVAL_MS: u64 = 100;
+    pub const DEFAULT_MEMORY_REFRESH_INTERVAL_MS: NonZeroU64 = NonZeroU64::new(100).unwrap();
 
     /// Default interval in milliseconds between copy-slot validity checks.
-    pub const DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS: u64 = 10_000;
+    pub const DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS: NonZeroU64 =
+        NonZeroU64::new(10_000).unwrap();
 
     /// Default for whether shutdown drains buffered apply work.
     pub const DEFAULT_DRAIN_ON_SHUTDOWN: bool = true;
@@ -548,7 +545,8 @@ impl PipelineConfig {
     pub const DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS: u64 = 30_000;
 
     /// Default interval in milliseconds between pipeline-wide lag samples.
-    pub const DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS: u64 = 10_000;
+    pub const DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS: NonZeroU64 =
+        NonZeroU64::new(10_000).unwrap();
 
     /// Returns the Postgres connection configuration for state storage.
     pub fn store_pg_connection(&self) -> &PgConnectionConfig {
@@ -580,14 +578,8 @@ impl Validate for PipelineConfig {
         validate_pipeline_settings(
             &self.batch,
             self.max_table_sync_workers,
-            self.table_error_retry_max_attempts,
             self.max_copy_connections_per_table,
             self.memory_backpressure.as_ref(),
-        )?;
-        validate_refresh_intervals(
-            self.memory_refresh_interval_ms,
-            self.table_sync_monitor_refresh_interval_ms,
-            self.replication_lag_refresh_interval_ms,
         )?;
         validate_source_tls_config(&self.pg_connection.tls)?;
         validate_table_error_retry_delay_ms(self.table_error_retry_delay_ms)?;
@@ -596,30 +588,16 @@ impl Validate for PipelineConfig {
     }
 }
 
-/// Validates positive concurrency and the aggregate initial-copy ceiling.
+/// Validates the aggregate initial-copy connection ceiling.
 ///
 /// The configured worker count times the per-table copy connection count must
 /// not exceed [`PipelineConfig::MAX_TOTAL_COPY_CONNECTIONS`].
 pub fn validate_copy_concurrency(
-    max_table_sync_workers: u16,
-    max_copy_connections_per_table: u16,
+    max_table_sync_workers: NonZeroU16,
+    max_copy_connections_per_table: NonZeroU16,
 ) -> Result<(), ValidationError> {
-    if max_table_sync_workers == 0 {
-        return Err(ValidationError::InvalidFieldValue {
-            field: "max_table_sync_workers".to_owned(),
-            constraint: "must be greater than 0".to_owned(),
-        });
-    }
-
-    if max_copy_connections_per_table == 0 {
-        return Err(ValidationError::InvalidFieldValue {
-            field: "max_copy_connections_per_table".to_owned(),
-            constraint: "must be greater than 0".to_owned(),
-        });
-    }
-
     let total_copy_connections =
-        u32::from(max_table_sync_workers) * u32::from(max_copy_connections_per_table);
+        u32::from(max_table_sync_workers.get()) * u32::from(max_copy_connections_per_table.get());
     if total_copy_connections > PipelineConfig::MAX_TOTAL_COPY_CONNECTIONS {
         return Err(ValidationError::InvalidFieldValue {
             field: "max_copy_connections_per_table".to_owned(),
@@ -636,46 +614,16 @@ pub fn validate_copy_concurrency(
 /// Validates pipeline settings shared by secret and without-secret configs.
 fn validate_pipeline_settings(
     batch: &BatchConfig,
-    max_table_sync_workers: u16,
-    table_error_retry_max_attempts: u32,
-    max_copy_connections_per_table: u16,
+    max_table_sync_workers: NonZeroU16,
+    max_copy_connections_per_table: NonZeroU16,
     memory_backpressure: Option<&MemoryBackpressureConfig>,
 ) -> Result<(), ValidationError> {
     batch.validate()?;
 
     validate_copy_concurrency(max_table_sync_workers, max_copy_connections_per_table)?;
 
-    if table_error_retry_max_attempts == 0 {
-        return Err(ValidationError::InvalidFieldValue {
-            field: "table_error_retry_max_attempts".to_owned(),
-            constraint: "must be greater than 0".to_owned(),
-        });
-    }
-
     if let Some(memory_backpressure) = memory_backpressure {
         memory_backpressure.validate()?;
-    }
-
-    Ok(())
-}
-
-/// Validates the positive intervals used by periodic pipeline monitors.
-pub fn validate_refresh_intervals(
-    memory_refresh_interval_ms: u64,
-    table_sync_monitor_refresh_interval_ms: u64,
-    replication_lag_refresh_interval_ms: u64,
-) -> Result<(), ValidationError> {
-    for (field, interval_ms) in [
-        ("memory_refresh_interval_ms", memory_refresh_interval_ms),
-        ("table_sync_monitor_refresh_interval_ms", table_sync_monitor_refresh_interval_ms),
-        ("replication_lag_refresh_interval_ms", replication_lag_refresh_interval_ms),
-    ] {
-        if interval_ms == 0 {
-            return Err(ValidationError::InvalidFieldValue {
-                field: field.to_owned(),
-                constraint: "must be greater than 0".to_owned(),
-            });
-        }
     }
 
     Ok(())
@@ -706,28 +654,28 @@ const fn default_table_error_retry_delay_ms() -> u64 {
     PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_DELAY_MS
 }
 
-const fn default_table_error_retry_max_attempts() -> u32 {
+const fn default_table_error_retry_max_attempts() -> NonZeroU32 {
     PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS
 }
 
-const fn default_max_table_sync_workers() -> u16 {
+const fn default_max_table_sync_workers() -> NonZeroU16 {
     PipelineConfig::DEFAULT_MAX_TABLE_SYNC_WORKERS
 }
 
-const fn default_max_copy_connections_per_table() -> u16 {
+const fn default_max_copy_connections_per_table() -> NonZeroU16 {
     PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE
 }
 
-const fn default_memory_refresh_interval_ms() -> u64 {
+const fn default_memory_refresh_interval_ms() -> NonZeroU64 {
     PipelineConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS
 }
 
-const fn default_table_sync_monitor_refresh_interval_ms() -> u64 {
+const fn default_table_sync_monitor_refresh_interval_ms() -> NonZeroU64 {
     PipelineConfig::DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS
 }
 
 /// Returns the default interval between pipeline-wide lag samples.
-const fn default_replication_lag_refresh_interval_ms() -> u64 {
+const fn default_replication_lag_refresh_interval_ms() -> NonZeroU64 {
     PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS
 }
 
@@ -787,14 +735,14 @@ pub struct PipelineConfigWithoutSecrets {
     ///
     /// This setting is shared by table sync and apply workers.
     #[serde(default = "default_table_error_retry_max_attempts")]
-    pub table_error_retry_max_attempts: u32,
+    pub table_error_retry_max_attempts: NonZeroU32,
     /// Maximum number of table sync workers that can run at a time.
     ///
     /// Must be positive. The product with
     /// [`Self::max_copy_connections_per_table`] must not exceed
     /// [`PipelineConfig::MAX_TOTAL_COPY_CONNECTIONS`].
     #[serde(default = "default_max_table_sync_workers")]
-    pub max_table_sync_workers: u16,
+    pub max_table_sync_workers: NonZeroU16,
     /// Maximum worker connections per table during initial copy.
     ///
     /// Must be positive. The product with [`Self::max_table_sync_workers`]
@@ -804,7 +752,7 @@ pub struct PipelineConfigWithoutSecrets {
     /// set to 1. ETL may plan more ctid ranges than worker connections so
     /// workers can pull new ranges as they finish.
     #[serde(default = "default_max_copy_connections_per_table")]
-    pub max_copy_connections_per_table: u16,
+    pub max_copy_connections_per_table: NonZeroU16,
     /// Number of milliseconds between coherent memory snapshots.
     ///
     /// One shared sampler drives dynamic batch targets and emergency
@@ -812,20 +760,20 @@ pub struct PipelineConfigWithoutSecrets {
     /// operating-system or cgroup files per row. Must be positive; defaults to
     /// 100 milliseconds.
     #[serde(default = "default_memory_refresh_interval_ms")]
-    pub memory_refresh_interval_ms: u64,
+    pub memory_refresh_interval_ms: NonZeroU64,
     /// Milliseconds between replication-slot validity checks during table copy.
     ///
     /// Must be positive; defaults to 10,000 milliseconds. Controls how quickly
     /// an unusable copy slot is detected, independently of lag sampling.
     #[serde(default = "default_table_sync_monitor_refresh_interval_ms")]
-    pub table_sync_monitor_refresh_interval_ms: u64,
+    pub table_sync_monitor_refresh_interval_ms: NonZeroU64,
     /// Milliseconds between pipeline-wide replication lag samples.
     ///
     /// One sampler measures all apply, table-copy, and table-sync CDC workers.
     /// Must be positive; defaults to 10,000 milliseconds. Independent of copy
     /// slot validity checks and Prometheus scraping.
     #[serde(default = "default_replication_lag_refresh_interval_ms")]
-    pub replication_lag_refresh_interval_ms: u64,
+    pub replication_lag_refresh_interval_ms: NonZeroU64,
     /// Optional window, in milliseconds, before an idle keepalive may force
     /// durability of an accepted streaming write.
     ///
@@ -872,14 +820,8 @@ impl Validate for PipelineConfigWithoutSecrets {
         validate_pipeline_settings(
             &self.batch,
             self.max_table_sync_workers,
-            self.table_error_retry_max_attempts,
             self.max_copy_connections_per_table,
             self.memory_backpressure.as_ref(),
-        )?;
-        validate_refresh_intervals(
-            self.memory_refresh_interval_ms,
-            self.table_sync_monitor_refresh_interval_ms,
-            self.replication_lag_refresh_interval_ms,
         )?;
         validate_source_tls_config(&self.pg_connection.tls)?;
         validate_table_error_retry_delay_ms(self.table_error_retry_delay_ms)?;
@@ -1021,8 +963,8 @@ mod tests {
         PipelineConfigWithoutSecrets::from(config).validate().unwrap();
     }
 
-    /// Both config representations enforce positive concurrency and the
-    /// aggregate copy connection ceiling.
+    /// Both config representations enforce the aggregate copy connection
+    /// ceiling.
     #[test]
     fn pipeline_copy_concurrency_validation() {
         for (workers, connections, expected_field) in [
@@ -1032,8 +974,6 @@ mod tests {
             (256, 1, None),
             (8, 32, None),
             (3, 85, None),
-            (0, 1, Some("max_table_sync_workers")),
-            (1, 0, Some("max_copy_connections_per_table")),
             (1, 257, Some("max_copy_connections_per_table")),
             (257, 1, Some("max_copy_connections_per_table")),
             (3, 86, Some("max_copy_connections_per_table")),
@@ -1050,6 +990,31 @@ mod tests {
                 let field =
                     result.err().map(|ValidationError::InvalidFieldValue { field, .. }| field);
                 assert_eq!(field.as_deref(), expected_field, "{workers} x {connections}");
+            }
+        }
+    }
+
+    /// Zero counts and intervals cannot be represented, so both config
+    /// representations reject them while deserializing.
+    #[test]
+    fn pipeline_rejects_zero_counts_and_intervals() {
+        for field in [
+            "max_table_sync_workers",
+            "max_copy_connections_per_table",
+            "table_error_retry_max_attempts",
+            "memory_refresh_interval_ms",
+            "table_sync_monitor_refresh_interval_ms",
+            "replication_lag_refresh_interval_ms",
+        ] {
+            for value in [0, 1] {
+                let mut json = pipeline_config_json();
+                json[field] = value.into();
+
+                let config = serde_json::from_value::<PipelineConfig>(json.clone());
+                let without_secrets = serde_json::from_value::<PipelineConfigWithoutSecrets>(json);
+
+                assert_eq!(config.is_err(), value == 0, "{field} = {value}");
+                assert_eq!(without_secrets.is_err(), value == 0, "{field} = {value}");
             }
         }
     }
@@ -1101,9 +1066,12 @@ mod tests {
                 serde_json::from_value(json).unwrap();
             let converted = PipelineConfigWithoutSecrets::from(config.clone());
 
-            assert_eq!(config.memory_refresh_interval_ms, 100);
-            assert_eq!(config.table_sync_monitor_refresh_interval_ms, copy_ms.unwrap_or(10_000));
-            assert_eq!(config.replication_lag_refresh_interval_ms, lag_ms.unwrap_or(10_000));
+            assert_eq!(config.memory_refresh_interval_ms.get(), 100);
+            assert_eq!(
+                config.table_sync_monitor_refresh_interval_ms.get(),
+                copy_ms.unwrap_or(10_000)
+            );
+            assert_eq!(config.replication_lag_refresh_interval_ms.get(), lag_ms.unwrap_or(10_000));
             for without_secrets in [without_secrets, converted] {
                 assert_eq!(
                     without_secrets.memory_refresh_interval_ms,
@@ -1120,33 +1088,6 @@ mod tests {
                 without_secrets.validate().unwrap();
             }
             config.validate().unwrap();
-        }
-    }
-
-    /// Periodic monitors reject zero before constructing Tokio intervals.
-    #[test]
-    fn pipeline_refresh_intervals_must_be_positive() {
-        for field in [
-            "memory_refresh_interval_ms",
-            "table_sync_monitor_refresh_interval_ms",
-            "replication_lag_refresh_interval_ms",
-        ] {
-            for interval_ms in [0, 1] {
-                let mut json = pipeline_config_json();
-                json[field] = interval_ms.into();
-                let config: PipelineConfig = serde_json::from_value(json).unwrap();
-                let without_secrets = PipelineConfigWithoutSecrets::from(config.clone());
-
-                for result in [config.validate(), without_secrets.validate()] {
-                    if interval_ms == 0 {
-                        let ValidationError::InvalidFieldValue { field: actual_field, .. } =
-                            result.unwrap_err();
-                        assert_eq!(actual_field, field);
-                    } else {
-                        result.unwrap();
-                    }
-                }
-            }
         }
     }
 
@@ -1195,11 +1136,11 @@ mod tests {
             (r#"{"max_fill_ms":5000,"memory_budget_ratio":0.2}"#, BatchConfig::DEFAULT_MAX_BYTES),
             (
                 r#"{"max_fill_ms":5000,"memory_budget_ratio":0.2,"max_bytes":4194304}"#,
-                4 * 1024 * 1024,
+                NonZeroUsize::new(4 * 1024 * 1024).unwrap(),
             ),
             (
                 r#"{"max_fill_ms":5000,"memory_budget_ratio":0.2,"max_bytes":4194304,"future_field":true}"#,
-                4 * 1024 * 1024,
+                NonZeroUsize::new(4 * 1024 * 1024).unwrap(),
             ),
         ] {
             let config: BatchConfig = serde_json::from_str(json).unwrap();

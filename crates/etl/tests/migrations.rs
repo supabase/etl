@@ -1,4 +1,9 @@
-use std::{collections::BTreeSet, sync::LazyLock, time::Duration};
+use std::{
+    collections::BTreeSet,
+    num::{NonZeroU16, NonZeroUsize},
+    sync::LazyLock,
+    time::Duration,
+};
 
 use etl::{
     config::{
@@ -171,14 +176,15 @@ fn pipeline_config(pg_connection: PgConnectionConfig) -> PipelineConfig {
         batch: BatchConfig {
             max_fill_ms: 5000,
             memory_budget_ratio: 0.2,
-            max_bytes: 8 * 1024 * 1024,
+            max_bytes: NonZeroUsize::new(8 * 1024 * 1024).unwrap(),
         },
         table_error_retry_delay_ms: 10000,
-        table_error_retry_max_attempts: 5,
-        max_table_sync_workers: 4,
-        max_copy_connections_per_table: 2,
-        memory_refresh_interval_ms: 100,
-        table_sync_monitor_refresh_interval_ms: 10000,
+        table_error_retry_max_attempts: PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS,
+        max_table_sync_workers: PipelineConfig::DEFAULT_MAX_TABLE_SYNC_WORKERS,
+        max_copy_connections_per_table: NonZeroU16::new(2).unwrap(),
+        memory_refresh_interval_ms: PipelineConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS,
+        table_sync_monitor_refresh_interval_ms:
+            PipelineConfig::DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS,
         replication_lag_refresh_interval_ms:
             PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS,
         settle_durable_interval_ms: None,

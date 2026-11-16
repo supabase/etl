@@ -1,9 +1,10 @@
 #[cfg(unix)]
-use std::mem::MaybeUninit;
+use std::num::{NonZeroU16, NonZeroU64};
 #[cfg(any(feature = "bigquery", feature = "clickhouse", feature = "snowflake"))]
 use std::sync::Once;
 use std::{
     fs,
+    mem::MaybeUninit,
     path::Path,
     sync::{
         Arc,
@@ -209,10 +210,10 @@ pub struct PipelineTuningArgs {
     pub memory_budget_ratio: f32,
     /// Maximum number of table sync workers.
     #[arg(long, default_value_t = PipelineConfig::DEFAULT_MAX_TABLE_SYNC_WORKERS)]
-    pub max_table_sync_workers: u16,
+    pub max_table_sync_workers: NonZeroU16,
     /// Maximum number of parallel copy connections per table.
     #[arg(long, default_value_t = PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE)]
-    pub max_copy_connections_per_table: u16,
+    pub max_copy_connections_per_table: NonZeroU16,
     /// Disable memory backpressure.
     #[arg(long, default_value_t = false)]
     pub disable_memory_backpressure: bool,
@@ -287,7 +288,7 @@ pub struct DestinationArgs {
     pub ducklake_copy_buffer_enabled: bool,
     /// Approximate staged row bytes per buffered DuckLake commit.
     #[arg(long, default_value_t = DuckLakeCopyBufferConfig::DEFAULT_TARGET_BYTES)]
-    pub ducklake_copy_buffer_target_bytes: u64,
+    pub ducklake_copy_buffer_target_bytes: NonZeroU64,
     /// Maximum staged row bytes accepted across DuckLake copy sessions.
     #[arg(long, default_value_t = DuckLakeCopyBufferConfig::DEFAULT_MAX_TOTAL_BYTES)]
     pub ducklake_copy_buffer_max_total_bytes: u64,

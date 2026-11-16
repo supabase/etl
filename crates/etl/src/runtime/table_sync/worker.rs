@@ -421,11 +421,11 @@ where
         // maximum number of attempts before trying again. If we did, we switch
         // to a manual retry policy.
         if policy.should_retry()
-            && state_guard.retry_attempts() >= config.table_error_retry_max_attempts
+            && state_guard.retry_attempts() >= config.table_error_retry_max_attempts.get()
         {
             warn!(
                 table_id = table_id.0,
-                max_attempts = config.table_error_retry_max_attempts,
+                max_attempts = config.table_error_retry_max_attempts.get(),
                 "max automatic retry attempts reached, switching to manual retry"
             );
 

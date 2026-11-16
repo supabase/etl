@@ -1,6 +1,6 @@
 //! Pipeline consistency, retry, and shutdown under initial-copy locks.
 
-use std::{collections::BTreeMap, time::Duration};
+use std::{collections::BTreeMap, num::NonZeroUsize, time::Duration};
 
 use etl::{
     data::{Cell, TableRow},
@@ -65,7 +65,10 @@ async fn copy_converges_with_concurrent_writers() {
         destination.clone(),
     )
     .with_max_copy_connections_per_table(4)
-    .with_batch_config(BatchConfig { max_bytes: 1024, ..BatchConfig::default() })
+    .with_batch_config(BatchConfig {
+        max_bytes: NonZeroUsize::new(1024).unwrap(),
+        ..BatchConfig::default()
+    })
     .build();
 
     let copied = store.notify_on_table_sync_complete(table_id).await;

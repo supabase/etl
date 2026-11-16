@@ -1019,6 +1019,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
 mod tests {
     use std::{
         future::{Future, pending},
+        num::NonZeroUsize,
         pin::Pin,
         sync::atomic::{AtomicBool, AtomicUsize, Ordering},
         task::{Context, Poll, Waker},
@@ -1789,7 +1790,11 @@ mod tests {
             store.clone(),
             destination.clone(),
         )
-        .with_batch_config(BatchConfig { max_bytes: 1, max_fill_ms: 100, memory_budget_ratio: 0.2 })
+        .with_batch_config(BatchConfig {
+            max_bytes: NonZeroUsize::MIN,
+            max_fill_ms: 100,
+            memory_budget_ratio: 0.2,
+        })
         .with_settle_durable_interval_ms(Some(if source_failure { 600_000 } else { 1 }))
         .with_drain_on_shutdown(shutdown_drain.unwrap_or(true))
         .with_shutdown_drain_timeout_ms(if shutdown_drain.is_some() { 100 } else { 5_000 })

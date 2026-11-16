@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, num::NonZeroU64};
 
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
@@ -301,7 +301,8 @@ pub struct DuckLakeCopyBufferConfig {
     ///
     /// The default is 256 MiB (268,435,456 bytes).
     #[serde(default = "DuckLakeCopyBufferConfig::default_target_bytes")]
-    pub target_bytes: u64,
+    #[cfg_attr(feature = "utoipa", schema(value_type = u64))]
+    pub target_bytes: NonZeroU64,
     /// Maximum approximate staged row bytes accepted across all copied tables.
     ///
     /// The default is 1 GiB (1,073,741,824 bytes). The hard maximum is one byte
@@ -312,7 +313,7 @@ pub struct DuckLakeCopyBufferConfig {
 
 impl DuckLakeCopyBufferConfig {
     /// Default staged byte target for one buffered DuckLake commit: 256 MiB.
-    pub const DEFAULT_TARGET_BYTES: u64 = 256 * 1024 * 1024;
+    pub const DEFAULT_TARGET_BYTES: NonZeroU64 = NonZeroU64::new(256 * 1024 * 1024).unwrap();
     /// Default process-wide byte limit for accepted DuckLake copy rows: 1 GiB.
     pub const DEFAULT_MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
 
@@ -322,7 +323,7 @@ impl DuckLakeCopyBufferConfig {
     }
 
     /// Returns the default staged byte target for one buffered commit.
-    const fn default_target_bytes() -> u64 {
+    const fn default_target_bytes() -> NonZeroU64 {
         Self::DEFAULT_TARGET_BYTES
     }
 
@@ -349,14 +350,7 @@ impl Default for DuckLakeCopyBufferConfig {
 
 impl Validate for DuckLakeCopyBufferConfig {
     fn validate(&self) -> Result<(), ValidationError> {
-        if self.target_bytes == 0 {
-            return Err(ValidationError::InvalidFieldValue {
-                field: "copy_buffer.target_bytes".to_owned(),
-                constraint: "must be greater than zero".to_owned(),
-            });
-        }
-
-        if self.max_total_bytes < self.target_bytes {
+        if self.max_total_bytes < self.target_bytes.get() {
             return Err(ValidationError::InvalidFieldValue {
                 field: "copy_buffer.max_total_bytes".to_owned(),
                 constraint: "must be greater than or equal to copy_buffer.target_bytes".to_owned(),
@@ -1094,30 +1088,40 @@ mod tests {
 
     #[test]
     fn ducklake_copy_buffer_validates_bounds() {
-        DuckLakeCopyBufferConfig { enabled: true, target_bytes: 256, max_total_bytes: 1024 }
-            .validate()
-            .unwrap();
+        let target_bytes = |bytes: u64| NonZeroU64::new(bytes).unwrap();
 
-        let ValidationError::InvalidFieldValue { field, .. } =
-            (DuckLakeCopyBufferConfig { enabled: true, target_bytes: 0, max_total_bytes: 256 })
-                .validate()
-                .unwrap_err();
-        assert_eq!(field, "copy_buffer.target_bytes");
+        DuckLakeCopyBufferConfig {
+            enabled: true,
+            target_bytes: target_bytes(256),
+            max_total_bytes: 1024,
+        }
+        .validate()
+        .unwrap();
 
-        let ValidationError::InvalidFieldValue { field, .. } =
-            (DuckLakeCopyBufferConfig { enabled: true, target_bytes: 1024, max_total_bytes: 256 })
-                .validate()
-                .unwrap_err();
+        let ValidationError::InvalidFieldValue { field, .. } = (DuckLakeCopyBufferConfig {
+            enabled: true,
+            target_bytes: target_bytes(1024),
+            max_total_bytes: 256,
+        })
+        .validate()
+        .unwrap_err();
         assert_eq!(field, "copy_buffer.max_total_bytes");
 
         let ValidationError::InvalidFieldValue { field, .. } = DuckLakeCopyBufferConfig {
             enabled: true,
-            target_bytes: 1,
+            target_bytes: target_bytes(1),
             max_total_bytes: u64::from(u32::MAX) + 1,
         }
         .validate()
         .unwrap_err();
         assert_eq!(field, "copy_buffer.max_total_bytes");
+    }
+
+    /// A zero staged byte target cannot be represented, so it fails while
+    /// deserializing.
+    #[test]
+    fn ducklake_copy_buffer_rejects_zero_target_bytes() {
+        serde_json::from_str::<DuckLakeCopyBufferConfig>(r#"{"target_bytes":0}"#).unwrap_err();
     }
 
     #[test]

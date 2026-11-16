@@ -175,7 +175,9 @@ where
 
         let policy = build_error_handling_policy(&err);
         let error_type = match policy.retry_directive() {
-            RetryDirective::Timed if *retry_attempts >= config.table_error_retry_max_attempts => {
+            RetryDirective::Timed
+                if *retry_attempts >= config.table_error_retry_max_attempts.get() =>
+            {
                 "no_retry"
             }
             RetryDirective::Timed => "timed",
@@ -195,9 +197,9 @@ where
         }
 
         // If we reached the max attempts, we propagate the last known error.
-        if *retry_attempts >= config.table_error_retry_max_attempts {
+        if *retry_attempts >= config.table_error_retry_max_attempts.get() {
             warn!(
-                max_attempts = config.table_error_retry_max_attempts,
+                max_attempts = config.table_error_retry_max_attempts.get(),
                 "apply worker timed retry limit reached, stopping worker",
             );
 
@@ -209,7 +211,7 @@ where
 
         info!(
             retry_attempt = *retry_attempts,
-            max_attempts = config.table_error_retry_max_attempts,
+            max_attempts = config.table_error_retry_max_attempts.get(),
             sleep_duration_ms = sleep_duration.as_millis(),
             "retrying apply worker after timed-retriable error",
         );

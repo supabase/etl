@@ -21,11 +21,16 @@
 //! ```
 
 #[cfg(feature = "test-utils")]
-use std::sync::{
-    LazyLock,
-    atomic::{AtomicBool, Ordering},
+use std::num::{NonZeroU32, NonZeroU64};
+use std::{
+    f64::consts::PI,
+    path::Path,
+    sync::{
+        Arc, LazyLock,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
 };
-use std::{f64::consts::PI, path::Path, sync::Arc, time::Duration};
 
 use chrono::NaiveDate;
 #[cfg(feature = "test-utils")]
@@ -543,7 +548,7 @@ async fn assert_pending_layout_failure_does_not_block_writes(sorting: bool) {
                 "events".to_owned(),
                 vec![DuckLakePartitionColumn::new(
                     "id".to_owned(),
-                    DuckLakePartitionTransform::Bucket { count: 8 },
+                    DuckLakePartitionTransform::Bucket { count: NonZeroU32::new(8).unwrap() },
                 )],
             ),
         ]));
@@ -1311,7 +1316,7 @@ async fn buffered_copy_combines_batches_at_terminal_barrier() {
     let destination = DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), 1, store)
         .copy_buffer(DuckLakeCopyBufferConfig {
             enabled: true,
-            target_bytes: 1024 * 1024,
+            target_bytes: NonZeroU64::new(1024 * 1024).unwrap(),
             max_total_bytes: 2 * 1024 * 1024,
         })
         .build()
@@ -1376,7 +1381,7 @@ async fn buffered_copy_sessions_do_not_self_starve_with_single_connection() {
     let destination = DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), 1, store)
         .copy_buffer(DuckLakeCopyBufferConfig {
             enabled: true,
-            target_bytes: 1024 * 1024,
+            target_bytes: NonZeroU64::new(1024 * 1024).unwrap(),
             max_total_bytes: 2 * 1024 * 1024,
         })
         .build()
@@ -1438,7 +1443,7 @@ async fn buffered_copy_rejects_batch_larger_than_global_bound() {
     let destination = DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), 1, store)
         .copy_buffer(DuckLakeCopyBufferConfig {
             enabled: true,
-            target_bytes: max_total_bytes,
+            target_bytes: NonZeroU64::new(max_total_bytes).unwrap(),
             max_total_bytes,
         })
         .build()
@@ -1486,7 +1491,7 @@ async fn buffered_copy_reset_waits_for_cancelled_blocking_append() {
         DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), 2, store.clone())
             .copy_buffer(DuckLakeCopyBufferConfig {
                 enabled: true,
-                target_bytes,
+                target_bytes: NonZeroU64::new(target_bytes).unwrap(),
                 max_total_bytes: target_bytes * 2,
             })
             .build()
@@ -1621,7 +1626,7 @@ async fn buffered_copy_capacity_pressure_waits_for_cancelled_blocking_append() {
     let destination = DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), 1, store)
         .copy_buffer(DuckLakeCopyBufferConfig {
             enabled: true,
-            target_bytes: max_total_bytes,
+            target_bytes: NonZeroU64::new(max_total_bytes).unwrap(),
             max_total_bytes,
         })
         .build()
@@ -1684,7 +1689,7 @@ async fn buffered_copy_continues_while_maintenance_waits_for_session() {
     let destination = DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), 1, store)
         .copy_buffer(DuckLakeCopyBufferConfig {
             enabled: true,
-            target_bytes: 1024 * 1024,
+            target_bytes: NonZeroU64::new(1024 * 1024).unwrap(),
             max_total_bytes: 2 * 1024 * 1024,
         })
         .build()
@@ -1777,7 +1782,7 @@ async fn buffered_copy_expired_maintenance_pause_resumes_watcher() {
     let destination = DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), 1, store)
         .copy_buffer(DuckLakeCopyBufferConfig {
             enabled: true,
-            target_bytes: 1024 * 1024,
+            target_bytes: NonZeroU64::new(1024 * 1024).unwrap(),
             max_total_bytes: 2 * 1024 * 1024,
         })
         .build()
@@ -1894,7 +1899,7 @@ async fn buffered_copy_flushes_when_target_bytes_are_reached() {
     let destination = DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), 1, store)
         .copy_buffer(DuckLakeCopyBufferConfig {
             enabled: true,
-            target_bytes,
+            target_bytes: NonZeroU64::new(target_bytes).unwrap(),
             max_total_bytes: target_bytes * 2,
         })
         .build()
@@ -1950,7 +1955,7 @@ async fn buffered_copy_restart_recopies_without_loss_or_duplicates() {
     store.store_table_schema(schema.clone()).await.unwrap();
     let copy_buffer = DuckLakeCopyBufferConfig {
         enabled: true,
-        target_bytes: 1024 * 1024,
+        target_bytes: NonZeroU64::new(1024 * 1024).unwrap(),
         max_total_bytes: 2 * 1024 * 1024,
     };
     let destination =
@@ -2038,7 +2043,7 @@ async fn buffered_copy_ambiguous_commit_requires_full_recopy() {
         DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), 1, store.clone())
             .copy_buffer(DuckLakeCopyBufferConfig {
                 enabled: true,
-                target_bytes,
+                target_bytes: NonZeroU64::new(target_bytes).unwrap(),
                 max_total_bytes: target_bytes * 2,
             })
             .build()
@@ -6051,7 +6056,7 @@ async fn partition_layout_reconciles_without_rewriting_historical_files() {
         )]),
         Some(vec![DuckLakePartitionColumn::new(
             "id".to_owned(),
-            DuckLakePartitionTransform::Bucket { count: 8 },
+            DuckLakePartitionTransform::Bucket { count: NonZeroU32::new(8).unwrap() },
         )]),
         None,
         None,
@@ -6670,7 +6675,7 @@ async fn periodic_layout_reconciliation_repairs_drift_without_resetting_tables()
                     table.to_owned(),
                     vec![DuckLakePartitionColumn::new(
                         "id".to_owned(),
-                        DuckLakePartitionTransform::Bucket { count: 8 },
+                        DuckLakePartitionTransform::Bucket { count: NonZeroU32::new(8).unwrap() },
                     )],
                 )
             })
@@ -6912,7 +6917,7 @@ async fn catalog_pooler_roundtrip(direct: Url, writer: Url, pooler: Url, test_co
                     "pooler_rows".to_owned(),
                     vec![DuckLakePartitionColumn::new(
                         "id".to_owned(),
-                        DuckLakePartitionTransform::Bucket { count: 8 },
+                        DuckLakePartitionTransform::Bucket { count: NonZeroU32::new(8).unwrap() },
                     )],
                 ),
             ]))

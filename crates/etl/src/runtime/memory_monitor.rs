@@ -41,6 +41,7 @@
 //! Batch governance retains the last sampled capacity until the pipeline exits.
 
 use std::{
+    num::NonZeroU64,
     pin::Pin,
     sync::{
         Arc, PoisonError, RwLock,
@@ -288,7 +289,7 @@ impl MemoryMonitor {
     /// drain.
     pub(crate) fn spawn(
         memory_backpressure_config: Option<MemoryBackpressureConfig>,
-        memory_refresh_interval_ms: u64,
+        memory_refresh_interval_ms: NonZeroU64,
     ) -> (Self, AbortOnDropHandle<()>) {
         // sysinfo docs suggest using a single `System` instance across the
         // program.
@@ -333,7 +334,7 @@ impl MemoryMonitor {
         let memory_monitor_task = spawn_best_effort_task("memory monitor", async move {
             let lifetime_guard = lifetime;
             let monitor = &lifetime_guard.monitor;
-            let refresh_interval = Duration::from_millis(memory_refresh_interval_ms);
+            let refresh_interval = Duration::from_millis(memory_refresh_interval_ms.get());
 
             let mut ticker = tokio::time::interval(refresh_interval);
             ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -650,7 +651,10 @@ impl Stream for MemoryMonitorSubscription {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::{
+        num::NonZeroUsize,
+        sync::{Arc, Mutex},
+    };
 
     use metrics::{
         Counter, Gauge, GaugeFn, Histogram, Key, KeyName, Metadata, Recorder, SharedString, Unit,
@@ -663,7 +667,7 @@ mod tests {
     /// Joining the sampler releases its state even when shared readers remain.
     #[tokio::test(start_paused = true)]
     async fn stopping_sampler_preserves_readings_without_refreshing() {
-        let (monitor, task) = MemoryMonitor::spawn(None, 100);
+        let (monitor, task) = MemoryMonitor::spawn(None, NonZeroU64::new(100).unwrap());
         let reader = monitor.clone();
         drop(monitor);
         // Force a capacity change so a real sample is observable before
@@ -682,40 +686,37 @@ mod tests {
         assert_eq!(Arc::strong_count(&reader.inner), 1);
     }
 
-    /// A sampler panic or early abort releases paused readers and clears gauges
-    /// while preserving the last capacity for batch sizing.
+    /// An early sampler abort releases paused readers and clears gauges while
+    /// preserving the last capacity for batch sizing.
     #[tokio::test]
     async fn sampler_exit_releases_backpressure_and_invalidates_metrics() {
         let metrics = etl_telemetry::metrics::init_metrics_handle().unwrap();
 
-        // A zero interval panics inside the task before its first sample.
-        // The other case aborts before the task is first polled.
-        for interval_ms in [0, 100] {
-            let (monitor, task) =
-                MemoryMonitor::spawn(Some(MemoryBackpressureConfig::default()), interval_ms);
-            let capacity = monitor.capacity_snapshot();
-            monitor.set_backpressure_active(true);
-            let mut subscription = monitor.subscribe().unwrap();
+        let (monitor, task) = MemoryMonitor::spawn(
+            Some(MemoryBackpressureConfig::default()),
+            NonZeroU64::new(100).unwrap(),
+        );
+        let capacity = monitor.capacity_snapshot();
+        monitor.set_backpressure_active(true);
+        let mut subscription = monitor.subscribe().unwrap();
 
-            if interval_ms != 0 {
-                task.abort();
-                assert!(task.await.unwrap_err().is_cancelled());
-            } else {
-                task.await.unwrap();
-            }
+        // Aborting before the task is first polled drops its lifetime guard.
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
 
-            assert!(!monitor.is_backpressure_active());
-            assert!(!subscription.current_backpressure_active());
-            assert_eq!(futures::StreamExt::next(&mut subscription).await, Some(false));
-            assert_eq!(monitor.capacity_snapshot().total_memory_bytes, capacity.total_memory_bytes);
-            assert_eq!(monitor.capacity_revision(), capacity.revision);
+        assert!(!monitor.is_backpressure_active());
+        assert!(!subscription.current_backpressure_active());
+        assert_eq!(futures::StreamExt::next(&mut subscription).await, Some(false));
+        assert_eq!(monitor.capacity_snapshot().total_memory_bytes, capacity.total_memory_bytes);
+        assert_eq!(monitor.capacity_revision(), capacity.revision);
 
-            let rendered = metrics.render();
-            for metric in [ETL_MEMORY_USED_BYTES, ETL_MEMORY_TOTAL_BYTES] {
-                assert!(rendered.lines().any(|line| {
+        let rendered = metrics.render();
+        for metric in [ETL_MEMORY_USED_BYTES, ETL_MEMORY_TOTAL_BYTES] {
+            assert!(
+                rendered.lines().any(|line| {
                     line.starts_with(&format!("{metric}{{")) && line.ends_with(" -1")
-                }));
-            }
+                })
+            );
         }
     }
 
@@ -977,7 +978,12 @@ mod tests {
     fn retained_snapshot_does_not_advance_the_batch_target_revision() {
         let memory_monitor = MemoryMonitor::new_for_test();
         memory_monitor.set_memory_snapshot_for_test(790, 1_000);
-        let governor = BatchMemoryGovernor::new("1".into(), memory_monitor.clone(), 1.0, 1_000);
+        let governor = BatchMemoryGovernor::new(
+            "1".into(),
+            memory_monitor.clone(),
+            1.0,
+            NonZeroUsize::new(1_000).unwrap(),
+        );
         let revision = memory_monitor.capacity_revision();
         let snapshot = memory_monitor.current_snapshot();
 
