@@ -12,6 +12,8 @@
 
 #[cfg(feature = "bigquery")]
 mod bigquery;
+#[cfg(feature = "clickhouse")]
+mod clickhouse;
 mod codec;
 mod counters;
 mod fixtures;
@@ -37,6 +39,8 @@ const SCENARIO_GROUPS: &[&[Scenario]] = &[
     codec::SCENARIOS,
     #[cfg(feature = "bigquery")]
     bigquery::SCENARIOS,
+    #[cfg(feature = "clickhouse")]
+    clickhouse::SCENARIOS,
 ];
 
 /// Command-line arguments for the hot-path benchmark.

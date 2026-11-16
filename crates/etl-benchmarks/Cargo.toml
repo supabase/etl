@@ -26,7 +26,12 @@ bigquery = [
     "etl-destinations/benchmarking",
     "etl-destinations/bigquery",
 ]
-clickhouse = ["dep:clickhouse", "dep:etl-destinations", "etl-destinations/clickhouse"]
+clickhouse = [
+    "dep:clickhouse",
+    "dep:etl-destinations",
+    "etl-destinations/benchmarking",
+    "etl-destinations/clickhouse",
+]
 ducklake = ["dep:etl-destinations", "etl-destinations/ducklake"]
 snowflake = [
     "dep:etl-destinations",

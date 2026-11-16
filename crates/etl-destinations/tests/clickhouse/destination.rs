@@ -2438,6 +2438,50 @@ async fn clickhouse_column_type_drift_reloads_layout_after_large_insert() {
     assert_eq!(error.kind(), ErrorKind::CorruptedTableSchema);
 }
 
+/// A copy that fails to encode a row after several chunks of its INSERT were
+/// already sent commits none of that statement's rows, and retrying the batch
+/// writes each row once.
+#[tokio::test(flavor = "multi_thread")]
+async fn aborted_streaming_insert_commits_zero_rows_and_retry_writes_one_copy() {
+    // GIVEN: about 4 MiB of copy rows, far past the 256 KiB insert chunk, and
+    // a last row whose NULL cannot be encoded into its non-nullable column.
+    init_test_tracing();
+    install_crypto_provider();
+    let database = setup_clickhouse_database().await;
+    let store = MemoryStore::new();
+    let schema = store_amount_schema(
+        &store,
+        TableId::new(4308),
+        "amountabort",
+        test_snapshot_id(100, 100),
+        Type::TEXT,
+        -1,
+    )
+    .await;
+    let destination =
+        database.build_destination_with_engine(store, ClickHouseEngine::MergeTree).await;
+    let good_rows =
+        || (1..1025).map(|id| TableRow::new(vec![Cell::I64(id), Cell::String("x".repeat(4096))]));
+    let mut rows: Vec<TableRow> = good_rows().collect();
+    rows.push(TableRow::new(vec![Cell::I64(1025), Cell::Null]));
+
+    // WHEN: the batch is copied.
+    let error = destination.write_table_rows(&schema, rows).await.unwrap_err();
+
+    // THEN: the statement is aborted and no row is stored.
+    assert_eq!(error.kind(), ErrorKind::ConversionError);
+    assert_eq!(database.query::<u64>("select count() from public_amountabort").await, vec![0]);
+
+    // WHEN: the batch is retried without the bad row.
+    destination.write_table_rows(&schema, good_rows().collect()).await.unwrap();
+
+    // THEN: every row is stored exactly once.
+    assert_eq!(
+        database.query::<(u64, u64)>("select count(), uniqExact(id) from public_amountabort").await,
+        vec![(1024, 1024)]
+    );
+}
+
 /// An insert failure that is not a layout rejection keeps the cached layout,
 /// so a transient failure costs no extra schema query on the next write.
 #[tokio::test(flavor = "multi_thread")]
