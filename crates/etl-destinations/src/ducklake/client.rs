@@ -2144,34 +2144,40 @@ mod tests {
         assert!(delayed_handle.completed());
     }
 
+    /// A blocking `interrupt()` holds the only worker, so no other task runs
+    /// until it returns.
+    ///
+    /// The test body runs on the `block_on` thread, not on the worker. That
+    /// lets it see the interrupt start and spawn the observer while the
+    /// worker is still blocked. The check relies on ordering, not
+    /// wall-clock timers, so a runner stall cannot let the observer run
+    /// before the interrupt.
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn query_watchdog_slow_interrupt_starves_single_worker_runtime_until_it_returns() {
-        let interrupt_delay = Duration::from_millis(100);
-        let (delayed_handle, interrupt_handle) = delayed_interrupt_handle(interrupt_delay);
+        let (delayed_handle, interrupt_handle) =
+            delayed_interrupt_handle(Duration::from_millis(100));
         let mut watchdog = DuckDbQueryWatchdog::spawn(Instant::now() + WATCHDOG_DEADLINE);
         let watchdog_task = watchdog.async_task_handle().expect("failed to extract watchdog task");
-        let (observer_started_tx, observer_started_rx) = oneshot::channel();
-        let started_at = std::time::Instant::now();
-        let observer_task = tokio::spawn(async move {
-            observer_started_tx.send(()).expect("observer start receiver should be open");
-            tokio::time::sleep(WATCHDOG_DEADLINE * 2).await;
-            std::time::Instant::now()
-        });
 
-        observer_started_rx.await.expect("observer should start");
         watchdog.publish_query_interrupt_handle(interrupt_handle);
+        wait_for_delayed_interrupt_to_start(&delayed_handle).await;
+        let observer_task = tokio::spawn({
+            let delayed_handle = Arc::clone(&delayed_handle);
+            async move { delayed_handle.completed() }
+        });
 
         tokio::time::timeout(WATCHDOG_JOIN_TIMEOUT, watchdog_task)
             .await
             .expect("watchdog should not deadlock on a single worker runtime")
             .expect("watchdog task should not panic");
-        let observer_finished_at = observer_task.await.expect("observer task should not panic");
+        let interrupt_completed_before_observer =
+            observer_task.await.expect("observer task should not panic");
 
         assert!(watchdog.timed_out());
         assert_eq!(delayed_handle.calls(), 1);
         assert!(delayed_handle.completed());
         assert!(
-            observer_finished_at.duration_since(started_at) >= interrupt_delay,
+            interrupt_completed_before_observer,
             "single worker runtime should not poll other async tasks while interrupt() blocks"
         );
     }
