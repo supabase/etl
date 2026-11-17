@@ -373,7 +373,9 @@ fn junit_path(profile: &str) -> PathBuf {
 
 /// Where and for which job a run writes its [`TestManifest`].
 struct ManifestOutput<'a> {
+    /// Destination of the manifest JSON.
     path: &'a Path,
+    /// GitHub identity of the job, read before tests run.
     job: TestJob,
     /// Property budget the job exported to the tests, if any.
     property_budget_secs: Option<u32>,
