@@ -31,7 +31,7 @@ The pipeline will automatically:
 
 */
 
-use std::{error::Error, sync::Once};
+use std::{error::Error, num::NonZeroU16, sync::Once};
 
 use clap::{Args, Parser};
 use etl::{
@@ -115,7 +115,7 @@ struct BqArgs {
     /// Maximum number of concurrent table sync workers (higher values = faster
     /// initial sync, more resource usage)
     #[arg(long, default_value = "4")]
-    max_table_sync_workers: u16,
+    max_table_sync_workers: NonZeroU16,
 }
 
 /// Entry point — handles error reporting and process exit.
@@ -196,20 +196,21 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         batch: BatchConfig {
             max_fill_ms: args.bq_args.max_batch_fill_duration_ms,
             memory_budget_ratio: 0.2,
-            max_bytes: 32 * 1024 * 1024,
+            max_bytes: BatchConfig::DEFAULT_MAX_BYTES,
         },
         table_error_retry_delay_ms: 10_000,
-        table_error_retry_max_attempts: 5,
+        table_error_retry_max_attempts: PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS,
         max_table_sync_workers: args.bq_args.max_table_sync_workers,
-        memory_refresh_interval_ms: 100,
-        table_sync_monitor_refresh_interval_ms: 10_000,
+        memory_refresh_interval_ms: PipelineConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS,
+        table_sync_monitor_refresh_interval_ms:
+            PipelineConfig::DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS,
         replication_lag_refresh_interval_ms:
             PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS,
         settle_durable_interval_ms: None,
         memory_backpressure: Some(MemoryBackpressureConfig::default()),
         table_sync_copy: TableSyncCopyConfig::default(),
         invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
-        max_copy_connections_per_table: 2,
+        max_copy_connections_per_table: NonZeroU16::new(2).unwrap(),
     };
 
     // Initialize BigQuery destination with service account authentication
@@ -219,7 +220,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         args.bq_args.bq_dataset_id,
         &args.bq_args.bq_sa_key_file,
         None,
-        1,
+        NonZeroU16::MIN,
         PipelineId::from(&pipeline_config.id),
         store.clone(),
     )

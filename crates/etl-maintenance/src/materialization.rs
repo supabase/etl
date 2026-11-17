@@ -24,9 +24,9 @@ pub struct DuckLakeMaintenancePolicy {
     /// Minimum inlined bytes required before inline flush runs.
     pub min_inlined_bytes: u64,
     /// Maximum number of adjacent files compacted by one merge operation.
-    pub max_compacted_files: u32,
+    pub max_compacted_files: u16,
     /// Maximum number of tables processed by each operation in one run.
-    pub max_tables_per_run: u32,
+    pub max_tables_per_run: u16,
     /// DuckLake target file size used for compaction.
     pub target_file_size: String,
     /// Deleted-row fraction that triggers data file rewrite.

@@ -1,6 +1,7 @@
 use std::{
     cmp::Reverse,
     collections::VecDeque,
+    num::NonZeroU16,
     pin::Pin,
     sync::{
         Arc,
@@ -155,17 +156,18 @@ fn div_ceil_u128(numerator: u128, denominator: u128) -> u128 {
 
 /// Returns how many ctid ranges to target for a table copy.
 fn target_ctid_partition_count(
-    max_copy_connections: u16,
+    max_copy_connections: NonZeroU16,
     total_estimated_rows: Option<u128>,
 ) -> u16 {
     // If we have just one copy connection, we just load everything as one
     // partition.
-    if max_copy_connections == 1 {
+    if max_copy_connections == NonZeroU16::MIN {
         return 1;
     }
 
     // We try to estimate the number of partitions given the worker count.
-    let worker_target = max_copy_connections.saturating_mul(CTID_PARTITIONS_PER_COPY_WORKER).max(1);
+    let worker_target =
+        max_copy_connections.get().saturating_mul(CTID_PARTITIONS_PER_COPY_WORKER).max(1);
 
     // We try to estimate the number of partitions also using the total number
     // of estimated rows for the table(s).
@@ -229,7 +231,7 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
     replicated_table_schema: ReplicatedTableSchema,
     publication_name: Option<&str>,
     slot_name: String,
-    max_copy_connections: u16,
+    max_copy_connections: NonZeroU16,
     replication_lag_monitor: ReplicationLagMonitor,
     table_sync_monitor_interval: Duration,
     batch_config: BatchConfig,
@@ -238,7 +240,6 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
     memory_monitor: MemoryMonitor,
     batch_memory_governor: BatchMemoryGovernor,
 ) -> EtlResult<TableCopyResult> {
-    let max_copy_connections = max_copy_connections.max(1);
     let start_time = Instant::now();
     let ShutdownResult::Ok(copy_partitions) = with_shutdown!(
         plan_table_copy_partitions(replication_transaction, table_id, max_copy_connections),
@@ -247,7 +248,7 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
         return Ok(TableCopyResult::Shutdown);
     };
     let copy_partitions = copy_partitions?;
-    let worker_count = usize::from(max_copy_connections).min(copy_partitions.len());
+    let worker_count = usize::from(max_copy_connections.get()).min(copy_partitions.len());
 
     if copy_partitions.is_empty() {
         info!(table_id = table_id.0, "table is empty, skipping table copy");
@@ -399,7 +400,7 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
 async fn plan_table_copy_partitions(
     replication_transaction: &PgReplicationTransaction<'_>,
     table_id: TableId,
-    max_copy_connections: u16,
+    max_copy_connections: NonZeroU16,
 ) -> EtlResult<Vec<TableCopyPartition>> {
     let source_tables = if replication_transaction.is_partitioned_table(table_id).await? {
         replication_transaction.get_leaf_partitions(table_id).await?
@@ -735,6 +736,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU16;
+
     use super::{
         MAX_CTID_COPY_PARTITIONS, TableCopyBatchIdGenerator, partitions_for_table_weight,
         target_ctid_partition_count,
@@ -765,16 +768,16 @@ mod tests {
 
     #[test]
     fn target_ctid_partition_count_matches_workers() {
-        assert_eq!(target_ctid_partition_count(1, Some(10_000_000)), 1);
-        assert_eq!(target_ctid_partition_count(8, None), 32);
-        assert_eq!(target_ctid_partition_count(8, Some(2_000_000)), 32);
-        assert_eq!(target_ctid_partition_count(8, Some(20_000_000)), 80);
+        assert_eq!(target_ctid_partition_count(NonZeroU16::MIN, Some(10_000_000)), 1);
+        assert_eq!(target_ctid_partition_count(NonZeroU16::new(8).unwrap(), None), 32);
+        assert_eq!(target_ctid_partition_count(NonZeroU16::new(8).unwrap(), Some(2_000_000)), 32);
+        assert_eq!(target_ctid_partition_count(NonZeroU16::new(8).unwrap(), Some(20_000_000)), 80);
     }
 
     #[test]
     fn target_ctid_partition_count_caps_large_values() {
         assert_eq!(
-            target_ctid_partition_count(u16::MAX, Some(i64::MAX as u128)),
+            target_ctid_partition_count(NonZeroU16::MAX, Some(i64::MAX as u128)),
             MAX_CTID_COPY_PARTITIONS
         );
     }
@@ -782,7 +785,7 @@ mod tests {
     #[test]
     fn target_ctid_partition_count_uses_wide_row_estimates() {
         assert_eq!(
-            target_ctid_partition_count(8, Some((i64::MAX as u128) * 2)),
+            target_ctid_partition_count(NonZeroU16::new(8).unwrap(), Some((i64::MAX as u128) * 2)),
             MAX_CTID_COPY_PARTITIONS
         );
     }
