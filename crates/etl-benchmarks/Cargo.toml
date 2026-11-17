@@ -37,9 +37,11 @@ clickhouse = [
     "etl-destinations/clickhouse",
 ]
 ducklake = ["dep:etl-destinations", "etl-destinations/ducklake"]
-# Tokio lock wait profiling. Tokio emits the profiled spans only when built
-# with `--cfg tokio_unstable`; see scripts/lock-contention.sh.
-lock-contention = ["dep:tracing-subscriber", "tokio/tracing"]
+# Tokio lock wait profiling. Tokio emits the profiled spans only with its
+# `tracing` feature and `--cfg tokio_unstable`. scripts/lock-contention.sh
+# enables `tokio/tracing` on the command line instead of here, so
+# `--all-features` builds don't instrument tokio for every workspace crate.
+lock-contention = ["dep:tracing-subscriber"]
 snowflake = [
     "dep:etl-destinations",
     "dep:reqwest",

@@ -3,8 +3,9 @@
 #
 # Starts a throwaway PostgreSQL cluster with logical replication enabled,
 # listening only on 127.0.0.1. Builds the `lock_contention` benchmark with
-# `--cfg tokio_unstable` into target/lock-contention, runs it, prints its
-# report, and stops the cluster. The cluster's data and socket live in a new
+# `--cfg tokio_unstable` and tokio's `tracing` feature into
+# target/lock-contention, runs it, prints its report, and stops the cluster.
+# The cluster's data and socket live in a new
 # /tmp/etl-lc.XXXXXX directory, which the OS cleans up. Its logs are kept in
 # target/lock-contention/postgres-<timestamp>. Nothing else changes.
 #
@@ -77,7 +78,7 @@ run_benchmark() {
     say "building and running the lock_contention benchmark"
     RUSTFLAGS="--cfg tokio_unstable ${RUSTFLAGS:-}" cargo run --locked --quiet \
         --profile bench --target-dir target/lock-contention \
-        -p etl-benchmarks --features lock-contention --bin lock_contention -- \
+        -p etl-benchmarks --features lock-contention,tokio/tracing --bin lock_contention -- \
         --host 127.0.0.1 --port "$_port" --database postgres --username postgres \
         --disable-memory-backpressure "$@"
 }

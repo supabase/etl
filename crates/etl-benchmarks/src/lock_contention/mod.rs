@@ -131,8 +131,8 @@ pub async fn main() -> Result<()> {
 
     ensure!(
         report.acquires() > 0,
-        "tokio reported no lock acquires; the binary was not built with --cfg tokio_unstable and \
-         the `lock-contention` feature"
+        "tokio reported no lock acquires; build with --cfg tokio_unstable and --features \
+         lock-contention,tokio/tracing, as scripts/lock-contention.sh does"
     );
     print_report(&args, &summary, &report);
 
