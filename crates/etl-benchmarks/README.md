@@ -29,6 +29,10 @@ Use the direct benchmark binaries only when developing the benchmark code itself
 - `snowflake`: writes to Snowflake. Use this for end-to-end destination throughput.
 - `clickhouse`: writes to ClickHouse. Use this for end-to-end destination throughput.
 
+Like the replicator, both benchmarks use jemalloc with the replicator's
+options and install the Prometheus recorder, so allocation and metric costs
+match production.
+
 Both benchmarks print a human-readable summary. When `--report-path` is set, they
 also persist a pretty JSON report for automation. `xtask` always sets
 `--report-path` so GitHub CI can compare stable files instead of scraping
