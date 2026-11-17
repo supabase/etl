@@ -15,7 +15,7 @@ use crate::{
 ///
 /// PostgreSQL leaves unchanged TOAST values out of an update's new row unless
 /// the old row image supplies them. ETL emits such updates as
-/// [`crate::event::UpdatedTableRow::Partial`].
+/// [`crate::data::UpdatedTableRow::Partial`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdateRowRequirement {
     /// The destination applies partial update rows.

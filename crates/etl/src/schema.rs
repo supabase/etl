@@ -30,7 +30,6 @@ pub use etl_postgres::{
     },
     type_utils::is_array_type,
 };
-use tokio_postgres::types::Kind;
 pub use tokio_postgres::types::{PgLsn, Type};
 use tracing::warn;
 
@@ -267,35 +266,33 @@ impl IdentityMask {
 
 /// Returns whether PostgreSQL may store values of `typ` out of line (TOAST).
 ///
-/// Fixed-width types are never TOASTed. Variable-width and unrecognized types
-/// are treated as TOASTable, so callers err toward warning.
+/// Only fixed-width built-in types are never TOASTed. Every other type counts
+/// as TOASTable, including enums and domains, which arrive here as `text`
+/// because ETL maps unrecognized OIDs to it. A false warning is acceptable; a
+/// missed one is not.
 fn may_be_toasted(typ: &Type) -> bool {
-    match typ.kind() {
-        Kind::Enum(_) => false,
-        Kind::Domain(base_type) => may_be_toasted(base_type),
-        _ => !matches!(
-            *typ,
-            Type::BOOL
-                | Type::CHAR
-                | Type::INT2
-                | Type::INT4
-                | Type::INT8
-                | Type::OID
-                | Type::FLOAT4
-                | Type::FLOAT8
-                | Type::MONEY
-                | Type::DATE
-                | Type::TIME
-                | Type::TIMETZ
-                | Type::TIMESTAMP
-                | Type::TIMESTAMPTZ
-                | Type::INTERVAL
-                | Type::UUID
-                | Type::MACADDR
-                | Type::MACADDR8
-                | Type::PG_LSN
-        ),
-    }
+    !matches!(
+        *typ,
+        Type::BOOL
+            | Type::CHAR
+            | Type::INT2
+            | Type::INT4
+            | Type::INT8
+            | Type::OID
+            | Type::FLOAT4
+            | Type::FLOAT8
+            | Type::MONEY
+            | Type::DATE
+            | Type::TIME
+            | Type::TIMETZ
+            | Type::TIMESTAMP
+            | Type::TIMESTAMPTZ
+            | Type::INTERVAL
+            | Type::UUID
+            | Type::MACADDR
+            | Type::MACADDR8
+            | Type::PG_LSN
+    )
 }
 
 /// Returns customer-facing remediation for a table that emitted an update whose
@@ -665,7 +662,7 @@ impl ReplicatedTableSchema {
     /// ETL can restore them only from the old row image, which carries every
     /// replicated column with `REPLICA IDENTITY FULL` and only identity columns
     /// otherwise. Updates that omit a returned column become
-    /// [`crate::event::UpdatedTableRow::Partial`].
+    /// [`crate::data::UpdatedTableRow::Partial`].
     pub fn partial_update_column_schemas(&self) -> impl Iterator<Item = &ColumnSchema> + '_ {
         self.table_schema
             .column_schemas
