@@ -19,6 +19,10 @@ name = "hot_paths"
 name = "snowflake_encoder"
 required-features = ["snowflake"]
 
+[[bin]]
+name = "lock_contention"
+required-features = ["lock-contention"]
+
 [features]
 default = []
 bigquery = [
@@ -33,6 +37,9 @@ clickhouse = [
     "etl-destinations/clickhouse",
 ]
 ducklake = ["dep:etl-destinations", "etl-destinations/ducklake"]
+# Tokio lock wait profiling. Tokio emits the profiled spans only when built
+# with `--cfg tokio_unstable`; see scripts/lock-contention.sh.
+lock-contention = ["dep:tracing-subscriber", "tokio/tracing"]
 snowflake = [
     "dep:etl-destinations",
     "dep:reqwest",
@@ -59,6 +66,7 @@ serde_json = { workspace = true }
 sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "migrate"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "signal"] }
 tracing = { workspace = true, features = ["default"] }
+tracing-subscriber = { workspace = true, optional = true, features = ["fmt", "registry", "std"] }
 url = { workspace = true }
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
