@@ -272,6 +272,15 @@ impl TableName {
 
         format!("{quoted_schema}.{quoted_name}")
     }
+
+    /// Returns the statement that sets `REPLICA IDENTITY FULL` on this table.
+    ///
+    /// The statement is shown to users as remediation, so it must run as
+    /// written. PostgreSQL does not cascade it from a partitioned table to its
+    /// partitions.
+    pub fn replica_identity_full_sql(&self) -> String {
+        format!("alter table {} replica identity full;", self.as_quoted_identifier())
+    }
 }
 
 impl fmt::Display for TableName {
