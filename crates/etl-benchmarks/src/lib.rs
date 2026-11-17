@@ -1,3 +1,4 @@
+pub mod allocator;
 pub mod common;
 pub mod hot_paths;
 #[cfg(feature = "snowflake")]
