@@ -858,15 +858,19 @@ where
             // so encoded output never accumulates for the whole copy batch.
             let zero = OffsetToken::zero();
             let mut builder = RowBatchBuilder::new(table_id);
-            for row in &table_rows {
+            for row in table_rows {
                 let completed = builder
                     .push_row(
                         &columns,
-                        row,
+                        &row,
                         CdcMeta::new(CdcOperation::Insert, zero.as_ref()),
                         &zero,
                     )
                     .map_err(EtlError::from)?;
+
+                // Encoded batches own their bytes; release rows before waiting.
+                drop(row);
+
                 for batch in completed {
                     self.writer
                         .client
