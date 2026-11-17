@@ -87,13 +87,23 @@ impl TestManifest {
     }
 }
 
+/// Parses a property budget in whole seconds. An unset budget is `None`; any
+/// set value, including an empty one, must be a valid `u32`.
+fn parse_property_budget(value: Option<&str>) -> Result<Option<u32>> {
+    value
+        .map(|value| {
+            value.parse().with_context(|| {
+                format!("{PROPERTY_TEST_BUDGET_ENV} must be a whole number of seconds")
+            })
+        })
+        .transpose()
+}
+
 /// Reads the property budget the job exported to the tests, if any.
 pub(crate) fn property_budget_from_env() -> Result<Option<u32>> {
     match env::var(PROPERTY_TEST_BUDGET_ENV) {
-        Ok(value) => value.parse().map(Some).with_context(|| {
-            format!("{PROPERTY_TEST_BUDGET_ENV} must be a whole number of seconds")
-        }),
-        Err(env::VarError::NotPresent) => Ok(None),
+        Ok(value) => parse_property_budget(Some(&value)),
+        Err(env::VarError::NotPresent) => parse_property_budget(None),
         Err(error) => Err(error).with_context(|| format!("{PROPERTY_TEST_BUDGET_ENV} is invalid")),
     }
 }
@@ -277,7 +287,7 @@ fn read_case(element: &BytesStart<'_>) -> Result<TestCase> {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_manifest::{TestCase, TestStatus, parse_junit};
+    use crate::test_manifest::{TestCase, TestStatus, parse_junit, parse_property_budget};
 
     fn case(binary: &str, name: &str, status: TestStatus, duration_ms: u32) -> TestCase {
         TestCase { binary: binary.to_owned(), name: name.to_owned(), status, duration_ms }
@@ -332,6 +342,17 @@ mod tests {
             r#"<testsuites><testcase name="a&bogus;" classname="b" time="1"/></testsuites>"#,
         ] {
             assert!(parse_junit(xml).is_err(), "{xml}");
+        }
+    }
+
+    #[test]
+    fn property_budget_is_unset_or_a_whole_number_of_seconds() {
+        assert_eq!(parse_property_budget(None).unwrap(), None);
+        assert_eq!(parse_property_budget(Some("30")).unwrap(), Some(30));
+        assert_eq!(parse_property_budget(Some("4294967295")).unwrap(), Some(u32::MAX));
+
+        for value in ["", "abc", "-1", "1.5", " 30", "4294967296"] {
+            assert!(parse_property_budget(Some(value)).is_err(), "{value:?}");
         }
     }
 }
