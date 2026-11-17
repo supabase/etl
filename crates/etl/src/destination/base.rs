@@ -11,6 +11,20 @@ use crate::{
     schema::ReplicatedTableSchema,
 };
 
+/// Whether a destination can apply updates whose new row omits values.
+///
+/// PostgreSQL leaves unchanged TOAST values out of an update's new row unless
+/// the old row image supplies them. ETL emits such updates as
+/// [`crate::event::UpdatedTableRow::Partial`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateRowRequirement {
+    /// The destination applies partial update rows.
+    AcceptsPartialRows,
+    /// The destination rejects partial update rows, so tables that can emit
+    /// them need `REPLICA IDENTITY FULL`.
+    RequiresFullRows,
+}
+
 /// Trait for systems that can receive replicated data from ETL pipelines.
 ///
 /// [`Destination`] implementations define how replicated data is written to
@@ -28,6 +42,16 @@ use crate::{
 pub trait Destination {
     /// Returns the name of the destination.
     fn name() -> &'static str;
+
+    /// Returns whether this destination can apply partial update rows.
+    ///
+    /// ETL uses this before copying a table to warn when the table's replica
+    /// identity lets PostgreSQL emit updates the destination will reject.
+    /// Callers that configure pipelines can use it to warn earlier. The default
+    /// accepts partial rows.
+    fn update_row_requirement() -> UpdateRowRequirement {
+        UpdateRowRequirement::AcceptsPartialRows
+    }
 
     /// Finishes destination-owned work and releases resources during shutdown.
     ///

@@ -243,6 +243,14 @@ or table resynchronization; deploying a new replicator alone does not rewrite it
   table during its initial copy. A schema change that makes an existing key
   deferrable fails instead, and replication of every table stops until you
   resynchronize this one.
+- Updates must carry every column. With `REPLICA IDENTITY DEFAULT` or `USING
+  INDEX`, PostgreSQL omits unchanged large (TOASTed) values, such as long
+  `text` or `jsonb`, from update rows, and replication stops with a
+  `SourceReplicaIdentityError` instead of losing those values. Before copying
+  a table that can emit such updates, ETL logs a warning with the columns and
+  the `alter table ... replica identity full;` statement to run; on a
+  partitioned table, also run it on each partition. If replication already
+  stopped, run the statement from the error, then resynchronize the table.
 - PostgreSQL arrays containing `NULL` elements are not supported.
 - BigQuery stores a top-level PostgreSQL `NULL` array as an empty array, so the
   two source values are indistinguishable in the destination.
@@ -318,6 +326,14 @@ destination. Drop the conflicting object or use another database.
   rejects published updates and deletes before they reach ETL. A
   primary-key-changing update writes a tombstone for the old key followed by
   the new row.
+- Updates must carry every column. With `REPLICA IDENTITY DEFAULT` or `USING
+  INDEX`, PostgreSQL omits unchanged large (TOASTed) values, such as long
+  `text` or `jsonb`, from update rows, and replication stops with a
+  `SourceReplicaIdentityError` instead of writing `NULL`. Before copying a
+  table that can emit such updates, ETL logs a warning with the columns and
+  the `alter table ... replica identity full;` statement to run; on a
+  partitioned table, also run it on each partition. If replication already
+  stopped, run the statement from the error, then resynchronize the table.
 - `MergeTree` keeps an append-only event log; current state needs a `limit 1 by`
   query over `cdc_lsn` and `cdc_tx_ordinal`.
 - A replicated `TRUNCATE` clears the destination table in either engine,

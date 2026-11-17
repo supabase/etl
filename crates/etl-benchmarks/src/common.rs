@@ -19,7 +19,8 @@ use etl::{
     data::{SizeHint, TableRow},
     destination::{
         Destination, DestinationWriteStatus, DropTableForCopyResult, PipelineDestination,
-        TableCopyBatchId, WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
+        TableCopyBatchId, UpdateRowRequirement, WriteEventsDurability, WriteEventsResult,
+        WriteTableRowsResult,
     },
     error::EtlResult,
     event::Event,
@@ -475,6 +476,10 @@ where
 {
     fn name() -> &'static str {
         D::name()
+    }
+
+    fn update_row_requirement() -> UpdateRowRequirement {
+        D::update_row_requirement()
     }
 
     async fn shutdown(&self) -> EtlResult<()> {

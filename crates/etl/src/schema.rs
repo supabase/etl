@@ -30,6 +30,7 @@ pub use etl_postgres::{
     },
     type_utils::is_array_type,
 };
+use tokio_postgres::types::Kind;
 pub use tokio_postgres::types::{PgLsn, Type};
 use tracing::warn;
 
@@ -262,6 +263,53 @@ impl IdentityMask {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+}
+
+/// Returns whether PostgreSQL may store values of `typ` out of line (TOAST).
+///
+/// Fixed-width types are never TOASTed. Variable-width and unrecognized types
+/// are treated as TOASTable, so callers err toward warning.
+fn may_be_toasted(typ: &Type) -> bool {
+    match typ.kind() {
+        Kind::Enum(_) => false,
+        Kind::Domain(base_type) => may_be_toasted(base_type),
+        _ => !matches!(
+            *typ,
+            Type::BOOL
+                | Type::CHAR
+                | Type::INT2
+                | Type::INT4
+                | Type::INT8
+                | Type::OID
+                | Type::FLOAT4
+                | Type::FLOAT8
+                | Type::MONEY
+                | Type::DATE
+                | Type::TIME
+                | Type::TIMETZ
+                | Type::TIMESTAMP
+                | Type::TIMESTAMPTZ
+                | Type::INTERVAL
+                | Type::UUID
+                | Type::MACADDR
+                | Type::MACADDR8
+                | Type::PG_LSN
+        ),
+    }
+}
+
+/// Returns customer-facing remediation for a table that emitted an update whose
+/// new row omits unchanged TOAST values.
+///
+/// Changing the replica identity only affects later WAL, so the table must be
+/// resynchronized to get past updates already in the replication stream.
+pub fn partial_update_remediation(table_name: &TableName) -> String {
+    format!(
+        "This can be fixed by running `{}` on the source database (and on each partition if the \
+         table is partitioned, because PostgreSQL does not cascade it), then resynchronizing the \
+         table, because changes already in the replication stream still omit these values.",
+        table_name.replica_identity_full_sql()
+    )
 }
 
 /// Semantic classification of the replica identity used for row events.
@@ -608,6 +656,25 @@ impl ReplicatedTableSchema {
             );
 
         SizedIterator::new(inner, self.identity_column_count)
+    }
+
+    /// Returns replicated columns that updates may omit under the current
+    /// replica identity, preserving replicated table-column order.
+    ///
+    /// PostgreSQL leaves unchanged TOAST values out of an update's new row.
+    /// ETL can restore them only from the old row image, which carries every
+    /// replicated column with `REPLICA IDENTITY FULL` and only identity columns
+    /// otherwise. Updates that omit a returned column become
+    /// [`crate::event::UpdatedTableRow::Partial`].
+    pub fn partial_update_column_schemas(&self) -> impl Iterator<Item = &ColumnSchema> + '_ {
+        self.table_schema
+            .column_schemas
+            .iter()
+            .zip(self.replication_mask.as_slice().iter().zip(self.identity_mask.as_slice().iter()))
+            .filter_map(|(column_schema, (&replicated, &identity))| {
+                (replicated == 1 && identity == 0 && may_be_toasted(&column_schema.typ))
+                    .then_some(column_schema)
+            })
     }
 
     /// Returns an iterator over only the replicated primary-key columns,
@@ -2053,6 +2120,36 @@ mod tests {
             ReplicatedTableSchema::from_masks(schema, replication_mask, identity_mask);
 
         assert_eq!(replicated_table_schema.identity_type(), IdentityType::Missing);
+    }
+
+    #[test]
+    fn partial_update_columns_are_replicated_toastable_non_identity_columns() {
+        let schema = Arc::new(create_test_table_schema());
+        let column_names = |replicated_table_schema: &ReplicatedTableSchema| {
+            replicated_table_schema
+                .partial_update_column_schemas()
+                .map(|column_schema| column_schema.name.clone())
+                .collect::<Vec<_>>()
+        };
+
+        // The primary key is the identity, so only the TOASTable `name`
+        // column can be omitted; fixed-width `age` never can.
+        let primary_key =
+            ReplicatedTableSchema::from_mask(Arc::clone(&schema), ReplicationMask::all(&schema));
+        assert_eq!(column_names(&primary_key), ["name"]);
+
+        let full = ReplicatedTableSchema::from_masks(
+            Arc::clone(&schema),
+            ReplicationMask::all(&schema),
+            IdentityMask::from_bytes(vec![1, 1, 1]),
+        );
+        assert!(column_names(&full).is_empty());
+
+        let without_name = ReplicatedTableSchema::from_mask(
+            Arc::clone(&schema),
+            ReplicationMask::from_bytes(vec![1, 0, 1]),
+        );
+        assert!(column_names(&without_name).is_empty());
     }
 
     #[test]
