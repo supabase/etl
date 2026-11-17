@@ -469,17 +469,13 @@ where
     // We mark this worker as `SyncWait` (in memory only) to signal the apply
     // worker that we are ready to start catchup. We pass the snapshot LSN so
     // the apply worker can use max(snapshot_lsn, current_lsn) when setting the
-    // Catchup LSN.
-    {
-        let mut inner = table_sync_worker_state.lock().await;
-        inner.set_and_store(TableState::SyncWait { lsn: start_lsn }, &store).await?;
-    }
-
-    // We also wait to be signaled to catch up with the main apply worker up to
-    // a specific lsn.
-    let result = table_sync_worker_state
-        .wait_for_state_type(&[TableStateType::Catchup], shutdown_token.clone())
-        .await;
+    // Catchup LSN. Then we wait to be signaled to catch up with the main apply
+    // worker up to a specific lsn; the wait releases the state lock so the
+    // apply worker can make that transition.
+    let mut inner = table_sync_worker_state.lock().await;
+    inner.set_and_store(TableState::SyncWait { lsn: start_lsn }, &store).await?;
+    let result =
+        inner.wait_for_state_type(&[TableStateType::Catchup], shutdown_token.clone()).await;
 
     // If we are told to shut down while waiting for a state change, we will
     // signal this to the caller.

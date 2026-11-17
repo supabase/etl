@@ -1,4 +1,10 @@
-use std::{any::Any, ops::Deref, panic::AssertUnwindSafe, sync::Arc, time::Duration};
+use std::{
+    any::Any,
+    ops::{Deref, DerefMut},
+    panic::AssertUnwindSafe,
+    sync::Arc,
+    time::Duration,
+};
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use etl_config::shared::PipelineConfig;
@@ -206,48 +212,69 @@ impl TableSyncWorkerState {
         Self { inner: Arc::new(Mutex::new(inner)) }
     }
 
-    /// Waits for the table to reach a specific table state type.
+    /// Locks the state for reading or changing it.
     ///
-    /// This method blocks until either the table reaches one of the desired
-    /// states or a shutdown signal is received. It uses an efficient
-    /// notification system to avoid polling and provides immediate response to
-    /// state changes.
+    /// Waiting for another worker's transition goes through
+    /// [`TableSyncWorkerStateGuard::wait_for_state_type`], which consumes the
+    /// guard.
+    pub(crate) async fn lock(&self) -> TableSyncWorkerStateGuard<'_> {
+        TableSyncWorkerStateGuard { state: self, inner: self.inner.lock().await }
+    }
+}
+
+/// Exclusive access to one table's synchronization state.
+///
+/// The apply worker and the table sync worker hand a table back and forth by
+/// waiting for each other's transitions on this state, and each needs the lock
+/// to make its transition. Waiting therefore consumes the guard: a task cannot
+/// keep the lock while it waits for a transition that the other task needs
+/// the lock to make.
+#[derive(Debug)]
+pub(crate) struct TableSyncWorkerStateGuard<'a> {
+    /// Handle used to lock the state again after a wait.
+    state: &'a TableSyncWorkerState,
+    /// Held lock on the state.
+    inner: MutexGuard<'a, TableSyncWorkerStateInner>,
+}
+
+impl TableSyncWorkerStateGuard<'_> {
+    /// Releases the lock until the table reaches one of `target_state_types`
+    /// or shutdown is requested, then returns a guard for the reached state.
+    ///
+    /// Returns without waiting when the current state already matches.
     pub(crate) async fn wait_for_state_type(
-        &self,
+        mut self,
         target_state_types: &[TableStateType],
         shutdown_token: CancellationToken,
-    ) -> ShutdownResult<MutexGuard<'_, TableSyncWorkerStateInner>, ()> {
+    ) -> ShutdownResult<Self, ()> {
         loop {
-            let inner = self.inner.lock().await;
-
-            let current_state = inner.table_state.as_type();
+            let current_state = self.inner.table_state.as_type();
             if target_state_types.contains(&current_state) {
                 info!(
-                    table_id = inner.table_id.0,
+                    table_id = self.inner.table_id.0,
                     current_table_state_type = %current_state,
                     "table state reached",
                 );
 
-                return ShutdownResult::Ok(inner);
+                return ShutdownResult::Ok(self);
             }
 
             info!(
-                table_id = inner.table_id.0,
+                table_id = self.inner.table_id.0,
                 current_table_state_type = %current_state,
                 target_table_state_types = %format_state_types(target_state_types),
                 "waiting for table state",
             );
 
-            // We listen for the state change while holding the lock to avoid
-            // the race condition which occurs when we release the lock, the
-            // value changes, and then we wait for a value change, in that case,
-            // we will miss the notification and the system will stall.
-            let state_change = Arc::clone(&inner.state_change);
+            // Subscribe while holding the lock: a change between releasing the
+            // lock and subscribing would otherwise be missed and stall the
+            // wait.
+            let state_change = Arc::clone(&self.inner.state_change);
             let state_change_notified = state_change.notified();
 
-            // We must drop the lock here so that state changes can actually
-            // happen.
-            drop(inner);
+            // Release the lock so the other worker can make the transition.
+            let state = self.state;
+            drop(self);
 
             // A stopping worker may never publish the awaited state. For now,
             // the shared shutdown token is the simplest way to end this wait.
@@ -263,15 +290,23 @@ impl TableSyncWorkerState {
 
                 return ShutdownResult::Shutdown(());
             }
+
+            self = state.lock().await;
         }
     }
 }
 
-impl Deref for TableSyncWorkerState {
-    type Target = Mutex<TableSyncWorkerStateInner>;
+impl Deref for TableSyncWorkerStateGuard<'_> {
+    type Target = TableSyncWorkerStateInner;
 
     fn deref(&self) -> &Self::Target {
         &self.inner
+    }
+}
+
+impl DerefMut for TableSyncWorkerStateGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
     }
 }
 
