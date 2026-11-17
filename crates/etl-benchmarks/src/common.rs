@@ -4,6 +4,7 @@ use std::mem::MaybeUninit;
 use std::sync::Once;
 use std::{
     fs,
+    num::{NonZeroU16, NonZeroU64},
     path::Path,
     sync::{
         Arc,
@@ -209,10 +210,10 @@ pub struct PipelineTuningArgs {
     pub memory_budget_ratio: f32,
     /// Maximum number of table sync workers.
     #[arg(long, default_value_t = PipelineConfig::DEFAULT_MAX_TABLE_SYNC_WORKERS)]
-    pub max_table_sync_workers: u16,
+    pub max_table_sync_workers: NonZeroU16,
     /// Maximum number of parallel copy connections per table.
     #[arg(long, default_value_t = PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE)]
-    pub max_copy_connections_per_table: u16,
+    pub max_copy_connections_per_table: NonZeroU16,
     /// Disable memory backpressure.
     #[arg(long, default_value_t = false)]
     pub disable_memory_backpressure: bool,
@@ -256,8 +257,8 @@ pub struct DestinationArgs {
     #[arg(long)]
     pub bq_max_staleness_mins: Option<u16>,
     /// BigQuery connection pool size.
-    #[arg(long, default_value_t = 32)]
-    pub bq_connection_pool_size: usize,
+    #[arg(long, default_value = "32")]
+    pub bq_connection_pool_size: NonZeroU16,
     /// ClickHouse HTTP URL (for example, `http://localhost:8123`).
     #[arg(long)]
     pub clickhouse_url: Option<String>,
@@ -280,14 +281,14 @@ pub struct DestinationArgs {
     #[arg(long)]
     pub ducklake_data_path: Option<String>,
     /// Size of the DuckDB connection pool.
-    #[arg(long, default_value_t = 4)]
-    pub ducklake_pool_size: u32,
+    #[arg(long, default_value = "4")]
+    pub ducklake_pool_size: NonZeroU16,
     /// Enable deferred initial-copy buffering.
     #[arg(long, default_value_t = false)]
     pub ducklake_copy_buffer_enabled: bool,
     /// Approximate staged row bytes per buffered DuckLake commit.
     #[arg(long, default_value_t = DuckLakeCopyBufferConfig::DEFAULT_TARGET_BYTES)]
-    pub ducklake_copy_buffer_target_bytes: u64,
+    pub ducklake_copy_buffer_target_bytes: NonZeroU64,
     /// Maximum staged row bytes accepted across DuckLake copy sessions.
     #[arg(long, default_value_t = DuckLakeCopyBufferConfig::DEFAULT_MAX_TOTAL_BYTES)]
     pub ducklake_copy_buffer_max_total_bytes: u64,

@@ -1,4 +1,5 @@
 use std::{
+    num::NonZeroU16,
     path::PathBuf,
     process::{Command, Stdio},
     time::{Duration, Instant},
@@ -132,8 +133,8 @@ struct TableStreamingReport {
     /// That CPU time per CDC event, in microseconds.
     #[serde(skip_serializing_if = "Option::is_none")]
     end_to_end_cpu_micros_per_event: Option<f64>,
-    max_table_sync_workers: u16,
-    max_copy_connections_per_table: u16,
+    max_table_sync_workers: NonZeroU16,
+    max_copy_connections_per_table: NonZeroU16,
     batch_max_fill_ms: u64,
     memory_budget_ratio: f32,
     memory_backpressure_enabled: bool,

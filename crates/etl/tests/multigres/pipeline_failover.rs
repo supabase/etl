@@ -26,7 +26,7 @@ use crate::support::Multigres;
 /// Delay before the apply worker reconnects after a primary switch.
 const APPLY_RETRY_DELAY_MS: u64 = 2_000;
 /// Number of apply-worker retries allowed during the failover window.
-const APPLY_RETRY_MAX_ATTEMPTS: u32 = 60;
+const APPLY_RETRY_MAX_ATTEMPTS: u16 = 60;
 
 /// Verifies that an ETL pipeline resumes across a Multigres primary switch.
 #[tokio::test(flavor = "multi_thread")]
