@@ -17,6 +17,7 @@ tls-rustls-aws-lc-rs = ["sqlx/tls-rustls-aws-lc-rs", "etl-postgres/tls-rustls-aw
 test-utils = ["etl-postgres/test-utils", "dep:proptest"]
 failpoints = ["fail/failpoints"]
 egress = []
+benchmarking = []
 fuzzing = []
 
 [dependencies]

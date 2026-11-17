@@ -107,7 +107,7 @@ impl ReplicatorHealth {
     pub(crate) fn new(health_config: ReplicatorHealthConfig) -> Self {
         Self {
             replicator_state: Arc::new(Mutex::new(ReplicatorState::Initializing)),
-            stall_timeout: Duration::from_millis(health_config.stall_timeout_ms),
+            stall_timeout: Duration::from_millis(health_config.stall_timeout_ms.get()),
         }
     }
 

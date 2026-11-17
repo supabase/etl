@@ -3,6 +3,8 @@
 //! These tests use a PostgreSQL-backed DuckLake catalog and verify the final
 //! table contents by querying DuckLake directly through DuckDB.
 
+use std::num::{NonZeroU16, NonZeroU64};
+
 use duckdb::Connection;
 #[cfg(feature = "test-utils")]
 use etl::pipeline::PipelineId;
@@ -357,7 +359,7 @@ async fn build_destination(
     let raw_destination = DuckLakeDestination::new(
         catalog_url.clone(),
         data_url.clone(),
-        1,
+        NonZeroU16::MIN,
         None,
         None,
         None,
@@ -543,7 +545,11 @@ async fn table_copy_preserves_identical_oversized_rows_across_batches() {
         publication_name.to_owned(),
         store.clone(),
         destination.clone(),
-        BatchConfig { max_fill_ms: 1000, memory_budget_ratio: 0.2, max_bytes: 8 * 1024 * 1024 },
+        BatchConfig {
+            max_fill_ms: 1000,
+            memory_budget_ratio: 0.2,
+            max_bytes: NonZeroU64::new(8 * 1024 * 1024).unwrap(),
+        },
     );
     let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
@@ -2027,7 +2033,7 @@ async fn build_shutdown_replay_pipeline(
     let destination = DuckLakeDestination::new(
         catalog.clone(),
         data.clone(),
-        1,
+        NonZeroU16::MIN,
         None,
         None,
         None,

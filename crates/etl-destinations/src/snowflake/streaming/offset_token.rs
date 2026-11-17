@@ -71,15 +71,20 @@ impl FromStr for OffsetToken {
     }
 }
 
+/// Returns whether `s` is exactly what [`OffsetToken::new`] renders.
+///
+/// Uppercase hex is rejected because tokens compare as strings and `A`-`F`
+/// sort below `a`-`f`, which would break WAL order.
 fn is_canonical_offset_token(s: &str) -> bool {
     let Some((lsn_hex, ordinal_hex)) = s.split_once('/') else {
         return false;
     };
+    let is_lower_hex = |byte: u8| matches!(byte, b'0'..=b'9' | b'a'..=b'f');
 
     lsn_hex.len() == 16
         && ordinal_hex.len() == 16
-        && lsn_hex.bytes().all(|byte| byte.is_ascii_hexdigit())
-        && ordinal_hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && lsn_hex.bytes().all(is_lower_hex)
+        && ordinal_hex.bytes().all(is_lower_hex)
 }
 
 #[cfg(test)]
@@ -139,19 +144,15 @@ mod tests {
 
     /// Every accepted string is the canonical rendering of its own position,
     /// so a token read back from Snowflake orders like a locally built one.
-    ///
-    /// Uppercase hex is excluded: ETL renders every token in lowercase and
-    /// Snowflake echoes it back unchanged, so uppercase input does not occur.
     #[test]
     fn only_canonical_tokens_parse() {
-        let near_miss = "[0-9a-f+ x_-]{15,17}/[0-9a-f+ x_-]{15,17}";
+        let near_miss = "[0-9a-fA-F+ x_-]{15,17}/[0-9a-fA-F+ x_-]{15,17}";
         let strategy = prop_oneof![
             3 => "[0-9a-f]{16}/[0-9a-f]{16}",
+            2 => "[0-9a-fA-F]{16}/[0-9a-fA-F]{16}",
             3 => near_miss,
             1 => "[0-9a-f/]{30,36}",
-            1 => "\\PC{0,40}".prop_filter("tokens are always lowercase", |s| {
-                !s.bytes().any(|byte| byte.is_ascii_uppercase())
-            }),
+            1 => "\\PC{0,40}",
         ];
         run_property("only canonical offset tokens parse", &strategy, |input| {
             if let Ok(token) = input.parse::<OffsetToken>() {

@@ -341,7 +341,7 @@ where
                     slot_name.clone(),
                     config.max_copy_connections_per_table,
                     replication_lag_monitor.clone(),
-                    Duration::from_millis(config.table_sync_monitor_refresh_interval_ms),
+                    Duration::from_millis(config.table_sync_monitor_refresh_interval_ms.get()),
                     config.batch.clone(),
                     shutdown_token.clone(),
                     destination.clone(),

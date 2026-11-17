@@ -125,7 +125,7 @@ pub fn parse_text_cell(selector: u8, value: &str) -> EtlResult<Cell> {
 /// row payload.
 pub fn parse_copy_row(data: &[u8]) -> EtlResult<TableRow> {
     let Some((&first, rest)) = data.split_first() else {
-        return codec::parse_table_row_from_postgres_copy_bytes(&[], &[]);
+        return codec::parse_table_row_from_postgres_copy_bytes(&[], &[], &mut String::new());
     };
 
     let column_count = usize::from(first) % 8 + 1;
@@ -146,7 +146,7 @@ pub fn parse_copy_row(data: &[u8]) -> EtlResult<TableRow> {
         })
         .collect();
 
-    codec::parse_table_row_from_postgres_copy_bytes(row, &column_schemas)
+    codec::parse_table_row_from_postgres_copy_bytes(row, &column_schemas, &mut String::new())
 }
 
 /// Checks that the date, time and timestamp fast paths agree with chrono.

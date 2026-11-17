@@ -21,7 +21,7 @@ pub(crate) use event::{
 #[cfg(feature = "fuzzing")]
 pub(crate) use hex::parse_bytea_hex_string as parse_bytea_hex_string_for_fuzzing;
 pub(crate) use table_row::parse_table_row_from_postgres_copy_bytes;
-#[cfg(any(test, feature = "test-utils", feature = "fuzzing"))]
+#[cfg(any(test, feature = "test-utils", feature = "fuzzing", feature = "benchmarking"))]
 pub(crate) use text::parse_cell_from_postgres_text;
 #[cfg(feature = "fuzzing")]
 pub(crate) use time::check_fast_paths_match_chrono;
