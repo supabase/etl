@@ -430,10 +430,12 @@ scripts/lock-contention.sh --tables 16 --writers 8 --duration-seconds 60
 Both start a throwaway PostgreSQL cluster with logical replication on
 `127.0.0.1:5450` (`LOCK_CONTENTION_PG_PORT`). They build the benchmark from the
 working tree with `--cfg tokio_unstable` and the bench profile into
-`target/lock-contention`, run it, and stop the cluster. Each run's cluster data
-and logs stay in `target/lock-contention/postgres-<timestamp>`. The flake app
-runs the script in the minimal `lock-contention` dev shell; run the script
-directly when `cargo`, `initdb`, and `pg_ctl` are already on `PATH`.
+`target/lock-contention`, run it, and stop the cluster. The cluster's data
+lives in `/tmp/etl-lc.XXXXXX`; its logs stay in
+`target/lock-contention/postgres-<timestamp>`. The flake app runs the script in
+the minimal `lock-contention` dev shell; run the script directly when `cargo`,
+`initdb`, and `pg_ctl` are already on `PATH`. In a shallow clone, Nix cannot
+count revisions, so use `nix run 'git+file:.?shallow=1#lock-contention'`.
 
 The workload creates `--tables` tables with `--rows-per-table` rows, then
 starts the pipeline with `PostgresStore` and copies every table while

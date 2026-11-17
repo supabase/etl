@@ -4,9 +4,9 @@
 # Starts a throwaway PostgreSQL cluster with logical replication enabled,
 # listening only on 127.0.0.1. Builds the `lock_contention` benchmark with
 # `--cfg tokio_unstable` into target/lock-contention, runs it, prints its
-# report, and stops the cluster. Nothing outside target/lock-contention and one
-# short socket directory under /tmp changes. Each run's cluster and logs stay in
-# target/lock-contention/postgres-<timestamp> for inspection.
+# report, and stops the cluster. The cluster's data and socket live in a new
+# /tmp/etl-lc.XXXXXX directory, which the OS cleans up. Its logs are kept in
+# target/lock-contention/postgres-<timestamp>. Nothing else changes.
 #
 # Run from the repository, or through the flake: `nix run .#lock-contention`.
 #
@@ -21,7 +21,7 @@
 
 set -u
 
-say() { printf '%s: %s\n' "${0##*/}" "$1" >&2; }
+say() { printf 'lock-contention: %s\n' "$1" >&2; }
 err() { say "error: $1"; exit 1; }
 check_cmd() { command -v "$1" >/dev/null 2>&1; }
 need_cmd() { check_cmd "$1" || err "need '$1' (command not found)"; }
@@ -40,24 +40,26 @@ enter_repository() {
     ensure cd "$_root"
 }
 
-# Creates and starts a cluster with data in $1, its socket in $2, on port $3.
+# Creates and starts a cluster with data and socket in $1, logs in $2, on
+# port $3.
 start_postgres() {
-    _run_dir="$1"
-    _socket_dir="$2"
+    _cluster_dir="$1"
+    _log_dir="$2"
     _port="$3"
-    PG_DATA="$_run_dir/data"
+    PG_DATA="$_cluster_dir/data"
 
-    say "starting PostgreSQL on 127.0.0.1:$_port (logs: $_run_dir)"
-    ensure initdb --pgdata="$PG_DATA" --username=postgres --auth=trust \
-        --encoding=UTF8 --no-sync >"$_run_dir/initdb.log" 2>&1
+    say "starting PostgreSQL on 127.0.0.1:$_port (logs: $_log_dir)"
+    initdb --pgdata="$PG_DATA" --username=postgres --auth=trust \
+        --encoding=UTF8 --no-sync >"$_log_dir/initdb.log" 2>&1 ||
+        err "initdb failed; see $_log_dir/initdb.log"
     # Durability settings are off because the cluster is disposable; the
     # replication settings are what logical replication needs.
-    pg_ctl --pgdata="$PG_DATA" --log="$_run_dir/postgres.log" --wait start \
+    pg_ctl --pgdata="$PG_DATA" --log="$_log_dir/postgres.log" --wait start \
         -o "-c listen_addresses=127.0.0.1 -c port=$_port \
-            -c unix_socket_directories=$_socket_dir -c wal_level=logical \
+            -c unix_socket_directories=$_cluster_dir -c wal_level=logical \
             -c max_replication_slots=64 -c max_wal_senders=64 \
             -c max_connections=200 -c fsync=off -c synchronous_commit=off" \
-        >/dev/null || err "PostgreSQL did not start; see $_run_dir/postgres.log"
+        >/dev/null || err "PostgreSQL did not start; see $_log_dir/postgres.log"
 }
 
 # Stops the temporary cluster if it was started.
@@ -102,22 +104,22 @@ main() {
     done
 
     _port="${LOCK_CONTENTION_PG_PORT:-5450}"
-    _run_dir="$PWD/target/lock-contention/postgres-$(date +%Y%m%d-%H%M%S)"
-    ensure mkdir -p "$_run_dir"
-    # Socket paths are limited to about 100 bytes, so the socket lives in a
-    # short directory instead of next to the data.
-    _socket_dir="$(mktemp -d /tmp/etl-lc.XXXXXX)" ||
-        err "could not create a socket directory"
+    _log_dir="$PWD/target/lock-contention/postgres-$(date +%Y%m%d-%H%M%S)"
+    ensure mkdir -p "$_log_dir"
+    # A short path keeps the socket under the ~100-byte limit, and /tmp keeps
+    # the data of past runs from piling up in target/.
+    _cluster_dir="$(mktemp -d /tmp/etl-lc.XXXXXX)" ||
+        err "could not create a cluster directory"
 
     trap stop_postgres EXIT
     trap 'stop_postgres; exit 130' INT TERM
-    start_postgres "$_run_dir" "$_socket_dir" "$_port"
+    start_postgres "$_cluster_dir" "$_log_dir" "$_port"
 
     run_benchmark "$_port" "$@"
     _status=$?
 
     stop_postgres
-    say "PostgreSQL data and logs kept in $_run_dir"
+    say "PostgreSQL logs kept in $_log_dir"
     return "$_status"
 }
 
