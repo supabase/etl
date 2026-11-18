@@ -51,6 +51,10 @@ jobs:
         run: |
           cargo install --locked kani-verifier --version 0.68.0
           cargo kani setup
+      # cargo-kani has no --locked flag, so fail here on a stale Cargo.lock
+      # instead of letting the proof builds re-resolve dependencies.
+      - name: Check lockfile
+        run: cargo fetch --locked
       # Proofs stub functions Kani cannot model: core's word-at-a-time memchr
       # in the UTC offset proofs, and backtrace capture in proofs that can
       # build an EtlError.
