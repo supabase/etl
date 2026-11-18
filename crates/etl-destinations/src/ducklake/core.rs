@@ -42,6 +42,7 @@ use etl_maintenance::{
         namespace_version_check_sql, namespaced_tables_query, table_namespace_filter,
     },
 };
+use jiff::{Span, SpanRelativeTo};
 use metrics::{counter, gauge};
 use parking_lot::{Mutex, RwLock as ParkingLotRwLock};
 use pg_escape::{quote_identifier as quote_postgres_identifier, quote_literal};
@@ -248,10 +249,17 @@ pub(super) fn is_create_table_conflict(error: &duckdb::Error, table_name: &str) 
 
 /// Parses `expire_snapshots_older_than` into seconds for cheap metadata-only
 /// trigger sampling.
+///
+/// Accepts ISO 8601 and friendly durations such as `7 days` or `2h 30min`.
+/// Months count as 30 days and years as 12 months, matching DuckDB interval
+/// ordering.
 fn expire_snapshots_retention_seconds(value: &str) -> Option<i64> {
-    humantime::parse_duration(value)
-        .ok()
-        .and_then(|duration| i64::try_from(duration.as_secs()).ok())
+    const SECONDS_PER_MONTH: i64 = 30 * 24 * 60 * 60;
+
+    let span: Span = value.parse().ok()?;
+    let months = i64::from(span.get_years()) * 12 + i64::from(span.get_months());
+    let rest = span.years(0).months(0).to_duration(SpanRelativeTo::days_are_24_hours()).ok()?;
+    months.checked_mul(SECONDS_PER_MONTH)?.checked_add(rest.as_secs())
 }
 
 /// Returns why file maintenance should run for a table.
@@ -5177,9 +5185,12 @@ mod tests {
     }
 
     #[test]
-    fn expire_snapshots_retention_seconds_uses_humantime_duration_syntax() {
+    fn expire_snapshots_retention_seconds_matches_duckdb_interval_units() {
         assert_eq!(expire_snapshots_retention_seconds("7 days"), Some(604_800));
         assert_eq!(expire_snapshots_retention_seconds("2h 30min"), Some(9_000));
+        assert_eq!(expire_snapshots_retention_seconds("1 month 1 day"), Some(2_678_400));
+        assert_eq!(expire_snapshots_retention_seconds("1 year"), Some(31_104_000));
+        assert_eq!(expire_snapshots_retention_seconds("P1W"), Some(604_800));
         assert_eq!(expire_snapshots_retention_seconds("bad interval"), None);
     }
 
