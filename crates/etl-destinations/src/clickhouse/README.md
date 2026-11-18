@@ -298,8 +298,8 @@ After the startup version check passes, a background task logs one
   `self_hosted` when it is `0`, and `unknown` when the setting is missing or
   `system.settings` is unreadable.
 - `server_version`: the full `version()` string.
-- `server_uptime_secs`: `uptime()`. A low value right after an outage means the
-  server restarted.
+- `server_uptime_secs`: `uptime()` of the replica that answered. A low value
+  right after an outage means that replica restarted.
 - `round_trip_ms`: wall time of that request, including any connection setup.
 
 Each failed INSERT statement logs `clickhouse insert statement failed` with
@@ -313,5 +313,7 @@ where query_id = '<query_id>'
 order by event_time;
 ```
 
-`system.query_log` is local to each replica. On a multi-replica service such as
-ClickHouse Cloud, read `clusterAllReplicas('default', system.query_log)`.
+`system.query_log` is local to each replica, and on a multi-replica service such
+as ClickHouse Cloud the load balancer picks which one answers. No rows from one
+replica proves nothing, so read every replica there:
+`clusterAllReplicas('default', system.query_log)`.

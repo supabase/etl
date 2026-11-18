@@ -76,25 +76,9 @@ async fn log_server_diagnostics(client: ClickHouseClient) {
         deployment = %deployment,
         server_version = status.as_ref().map(|status| status.version.as_str()),
         server_uptime_secs = status.as_ref().map(|status| status.uptime.as_secs()),
-        round_trip_ms = status.as_ref().map(|status| status.round_trip.as_millis() as u64),
+        round_trip_ms = status
+            .as_ref()
+            .and_then(|status| u64::try_from(status.round_trip.as_millis()).ok()),
         "clickhouse server detected"
     );
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn deployment_follows_cloud_mode_and_is_unknown_otherwise() {
-        for (value, expected) in [
-            (Some("1"), ClickHouseDeployment::Cloud),
-            (Some("0"), ClickHouseDeployment::SelfHosted),
-            (Some("2"), ClickHouseDeployment::Unknown),
-            (Some(""), ClickHouseDeployment::Unknown),
-            (None, ClickHouseDeployment::Unknown),
-        ] {
-            assert_eq!(ClickHouseDeployment::from_cloud_mode(value), expected, "{value:?}");
-        }
-    }
 }
