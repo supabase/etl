@@ -5218,35 +5218,49 @@ mod tests {
 
     /// Trigger sampling must agree with DuckDB's `now() - interval` cutoff for
     /// every interval startup validation accepts, including out-of-order,
-    /// repeated, mixed-sign, and calendar units.
+    /// repeated, mixed-sign, and calendar units at month ends and leap days.
     #[test]
     fn expire_snapshots_retention_matches_duckdb_cutoff() {
         let conn = Connection::open_in_memory().unwrap();
-        let now = date(2026, 3, 31).at(12, 0, 0, 0);
 
-        for value in [
-            "7 days",
-            "12 hours 1 day",
-            "1 day 1 day",
-            "2 days -12 hours",
-            "1 month",
-            "1 year",
-            "1 year 2 months -3 days 04:05:06",
-        ] {
-            let retention: ExpireSnapshotsRetention = conn
-                .query_row(&validate_expire_snapshots_older_than_sql(value), [], |row| row.get(1))
-                .unwrap();
-            let expected: i64 = conn
-                .query_row(
-                    "select cast(epoch(timestamp '2026-03-31 12:00:00') - epoch(timestamp \
-                     '2026-03-31 12:00:00' - cast(? as interval)) as bigint)",
-                    [value],
-                    |row| row.get(0),
-                )
-                .unwrap();
+        for now in [date(2026, 3, 31).at(12, 0, 0, 0), date(2024, 2, 29).at(0, 30, 0, 0)] {
+            for value in [
+                "7 days",
+                "12 hours 1 day",
+                "1 day 02:00:00",
+                "1 day 1 day",
+                "2 days -12 hours",
+                "1 month",
+                "1 month -2 days",
+                "1 year",
+                "1 year 2 months -3 days 04:05:06",
+            ] {
+                let retention: ExpireSnapshotsRetention = conn
+                    .query_row(&validate_expire_snapshots_older_than_sql(value), [], |row| {
+                        row.get(1)
+                    })
+                    .unwrap();
+                let expected: i64 = conn
+                    .query_row(
+                        "select cast(epoch(cast(?1 as timestamp)) - epoch(cast(?1 as timestamp) - \
+                         cast(?2 as interval)) as bigint)",
+                        [now.to_string(), value.to_owned()],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
 
-            assert_eq!(retention.seconds_before(now), Some(expected), "retention: {value}");
+                assert_eq!(retention.seconds_before(now), Some(expected), "{now} - {value}");
+            }
         }
+    }
+
+    #[test]
+    fn probe_iso_interval() {
+        let conn = Connection::open_in_memory().unwrap();
+        let result = conn.query_row(&validate_expire_snapshots_older_than_sql("P7D"), [], |row| {
+            row.get::<_, ExpireSnapshotsRetention>(1)
+        });
+        println!("P7D => {result:?}");
     }
 
     fn make_schema(table_id: u32, schema: &str, table: &str) -> TableSchema {
