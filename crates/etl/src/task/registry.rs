@@ -22,7 +22,7 @@ const TASK_REAP_THRESHOLD: usize = 32;
 /// A failed operation discards the tracked group and requests cancellation.
 /// Reusing the registry does not wait for previously discarded tasks to stop;
 /// resource reuse must account for cancellation and any native or remote work.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TaskRegistry {
     inner: Arc<Mutex<TaskGroup<()>>>,
 }
@@ -43,7 +43,7 @@ pub struct TaskRegistryDrainGuard {
 impl TaskRegistry {
     /// Creates a new task set.
     pub fn new() -> Self {
-        Self { inner: Arc::new(Mutex::new(TaskGroup::new())) }
+        Self::default()
     }
 
     /// Spawns a new tracked background task.
@@ -134,12 +134,6 @@ impl TaskRegistry {
         let mut inner = self.inner.lock().await;
 
         inner.shutdown().await
-    }
-}
-
-impl Default for TaskRegistry {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

@@ -36,7 +36,7 @@ postgres-replication = { workspace = true }
 proptest = { workspace = true, optional = true }
 rand = { workspace = true, features = ["thread_rng"] }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
-serde = { workspace = true, features = ["derive", "alloc"] }
+serde = { workspace = true, features = ["derive", "alloc", "rc"] }
 serde_json = { workspace = true, features = ["arbitrary_precision", "std"] }
 simdutf8 = { workspace = true }
 sqlx = { workspace = true, features = ["runtime-tokio", "postgres", "migrate"] }
