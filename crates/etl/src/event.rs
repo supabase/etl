@@ -417,6 +417,9 @@ impl From<Event> for EventType {
     }
 }
 
+#[cfg(kani)]
+mod verification;
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
