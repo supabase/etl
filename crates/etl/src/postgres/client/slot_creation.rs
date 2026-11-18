@@ -5,7 +5,7 @@
 //! server has stopped executing the command.
 
 use std::{
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::Duration,
 };
 
@@ -83,7 +83,7 @@ impl SlotCreationMonitor {
     pub(super) fn start(&self, worker: WorkerType) -> SlotCreationAttempt {
         let start =
             Arc::new(CreationStart { worker_type: worker.as_str(), started_at: Instant::now() });
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.lock_state();
         state.attempts.push(Arc::clone(&start));
         self.emit(&state);
 
@@ -94,7 +94,7 @@ impl SlotCreationMonitor {
     pub(crate) fn spawn_slot_creation_metrics_task(&self) -> AbortOnDropHandle<()> {
         let lifetime = SlotCreationSamplerLifetime(self.clone());
         {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.lock_state();
             state.observing = true;
             self.emit(&state);
         }
@@ -104,10 +104,15 @@ impl SlotCreationMonitor {
             interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
             loop {
                 interval.tick().await;
-                let state = lifetime.0.state.lock().unwrap();
+                let state = lifetime.0.lock_state();
                 lifetime.0.emit(&state);
             }
         })
+    }
+
+    /// Locks the state; every update leaves it valid, so poisoning is ignored.
+    fn lock_state(&self) -> MutexGuard<'_, CreationState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Publishes both worker categories while holding the registration lock.
@@ -143,7 +148,7 @@ impl SlotCreationAttempt {
 impl Drop for SlotCreationAttempt {
     fn drop(&mut self) {
         let elapsed = self.start.started_at.elapsed().as_secs_f64();
-        let mut state = self.monitor.state.lock().unwrap();
+        let mut state = self.monitor.lock_state();
         state.attempts.retain(|attempt| !Arc::ptr_eq(attempt, &self.start));
         self.monitor.emit(&state);
 
@@ -162,7 +167,7 @@ struct SlotCreationSamplerLifetime(SlotCreationMonitor);
 
 impl Drop for SlotCreationSamplerLifetime {
     fn drop(&mut self) {
-        let mut state = self.0.state.lock().unwrap();
+        let mut state = self.0.lock_state();
         state.observing = false;
         self.0.emit(&state);
     }
