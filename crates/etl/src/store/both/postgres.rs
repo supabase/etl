@@ -20,7 +20,7 @@ use tracing::{debug, info};
 use crate::{
     config::{IntoConnectOptions, PgConnectionConfig, PgConnectionOptions},
     destination::{DestinationTableMetadata, DestinationTableSchema},
-    error::{ErrorKind, EtlError, EtlResult},
+    error::{ErrorKind, EtlResult},
     etl_error,
     observability::{
         ETL_SCHEMA_CLEANUP_SKIPPED_TABLES_TOTAL, ETL_TABLES_TOTAL, POSTGRES_STORE_POOL, STATE_LABEL,
@@ -261,29 +261,35 @@ impl PostgresStore {
         Ok(inner)
     }
 
-    /// Starts a transaction ordered after every earlier store mutation.
+    /// Runs `work` in one committed transaction ordered after every earlier
+    /// store mutation, bounded by [`Self::transaction_timeout`].
     ///
-    /// Acquire the lock before issuing any mutation. Dropping a future can
-    /// leave its statement or COMMIT executing on another pooled connection;
-    /// PostgreSQL holds this lock until that transaction commits or rolls back.
-    /// Read committed ensures queries after the wait see its final outcome.
-    async fn begin_transaction(&self) -> EtlResult<InstrumentedPgTransaction> {
-        let mut tx = self.pool.begin().await?;
+    /// This is the only way to open a store transaction, so every database
+    /// operation is bounded. The advisory lock is taken before `work` runs.
+    /// Dropping a future, including at expiry, can leave its statement or
+    /// COMMIT executing on another pooled connection; PostgreSQL holds this
+    /// lock until that transaction commits or rolls back. Read committed
+    /// ensures queries after the wait see its final outcome. Callers must mark
+    /// the cache unusable first so the next accessor reloads after that
+    /// outcome settles.
+    async fn transaction<T>(
+        &self,
+        work: impl AsyncFnOnce(&mut InstrumentedPgTransaction) -> EtlResult<T>,
+    ) -> EtlResult<T> {
+        let transaction = async {
+            let mut tx = self.pool.begin().await?;
 
-        sqlx::query("select pg_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(format!("{STORE_LOCK_NAMESPACE}{}", self.pipeline_id.as_str()))
-            .execute(tx.executor())
-            .await?;
+            sqlx::query("select pg_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(format!("{STORE_LOCK_NAMESPACE}{}", self.pipeline_id.as_str()))
+                .execute(tx.executor())
+                .await?;
 
-        Ok(tx)
-    }
+            let output = work(&mut tx).await?;
+            tx.commit().await?;
 
-    /// Runs one database transaction under [`Self::transaction_timeout`].
-    ///
-    /// Expiry drops `transaction` mid-flight. Callers must mark the cache
-    /// unusable first so the next accessor reloads after the advisory lock
-    /// settles the abandoned transaction.
-    async fn bounded<T>(&self, transaction: impl Future<Output = EtlResult<T>>) -> EtlResult<T> {
+            Ok(output)
+        };
+
         timeout(self.transaction_timeout, transaction).await.unwrap_or_else(|_| {
             Err(etl_error!(
                 ErrorKind::SourceConnectionFailed,
@@ -299,7 +305,7 @@ impl PostgresStore {
     /// succeed. Failed or cancelled reloads remain eligible for a full retry.
     async fn refresh_cache(&self, inner: &mut Inner) -> EtlResult<()> {
         inner.usable = false;
-        let mut refreshed = self.bounded(self.load_caches()).await?;
+        let mut refreshed = self.transaction(async |tx| self.load_caches(tx).await).await?;
 
         // A reload can remove the last table in a previously emitted state.
         for state in inner.state_counts.keys() {
@@ -313,11 +319,8 @@ impl PostgresStore {
         Ok(())
     }
 
-    /// Reads every cache domain in one transaction under the pipeline's
-    /// advisory lock.
-    async fn load_caches(&self) -> EtlResult<Inner> {
-        let mut tx = self.begin_transaction().await?;
-
+    /// Reads every cache domain within `tx`.
+    async fn load_caches(&self, tx: &mut InstrumentedPgTransaction) -> EtlResult<Inner> {
         let mut refreshed = Inner::default();
 
         let replication_state_rows =
@@ -432,8 +435,6 @@ impl PostgresStore {
         refreshed.destination_tables_metadata = Arc::new(metadata);
         Arc::make_mut(&mut refreshed.table_schemas).replace_all(table_schemas);
 
-        tx.commit().await?;
-
         Ok(refreshed)
     }
 }
@@ -482,9 +483,7 @@ impl StateStore for PostgresStore {
 
         // Perform all database updates in a single transaction.
         inner.usable = false;
-        self.bounded(async {
-            let mut tx = self.begin_transaction().await?;
-
+        self.transaction(async |tx| {
             for (table_id, state_type, metadata) in db_updates {
                 pg_table_state::update_table_state_raw(
                     tx.executor(),
@@ -496,9 +495,7 @@ impl StateStore for PostgresStore {
                 .await?;
             }
 
-            tx.commit().await?;
-
-            Ok::<_, EtlError>(())
+            Ok(())
         })
         .await?;
 
@@ -520,9 +517,7 @@ impl StateStore for PostgresStore {
 
         inner.usable = false;
         let restored_state = self
-            .bounded(async {
-                let mut tx = self.begin_transaction().await?;
-
+            .transaction(async |tx| {
                 let restored_row = pg_table_state::rollback_table_state(
                     tx.executor(),
                     self.pipeline_id.as_str(),
@@ -539,9 +534,7 @@ impl StateStore for PostgresStore {
 
                 let restored_state = TableState::from_state_row(restored_row)?;
 
-                tx.commit().await?;
-
-                Ok::<_, EtlError>(restored_state)
+                Ok(restored_state)
             })
             .await?;
 
@@ -570,9 +563,7 @@ impl StateStore for PostgresStore {
 
         inner.usable = false;
         let persisted_checkpoint = self
-            .bounded(async {
-                let mut tx = self.begin_transaction().await?;
-
+            .transaction(async |tx| {
                 let persisted_checkpoint = checkpoint::upsert_replication_checkpoint(
                     tx.executor(),
                     self.pipeline_id.as_str(),
@@ -589,9 +580,7 @@ impl StateStore for PostgresStore {
                     )
                 })?;
 
-                tx.commit().await?;
-
-                Ok::<_, EtlError>(persisted_checkpoint)
+                Ok(persisted_checkpoint)
             })
             .await?;
 
@@ -605,9 +594,7 @@ impl StateStore for PostgresStore {
         let mut inner = self.lock_cache().await?;
 
         inner.usable = false;
-        self.bounded(async {
-            let mut tx = self.begin_transaction().await?;
-
+        self.transaction(async |tx| {
             checkpoint::delete_replication_checkpoint(
                 tx.executor(),
                 self.pipeline_id.as_str(),
@@ -623,9 +610,7 @@ impl StateStore for PostgresStore {
                 )
             })?;
 
-            tx.commit().await?;
-
-            Ok::<_, EtlError>(())
+            Ok(())
         })
         .await?;
 
@@ -682,9 +667,7 @@ impl StateStore for PostgresStore {
             };
 
         inner.usable = false;
-        self.bounded(async {
-            let mut tx = self.begin_transaction().await?;
-
+        self.transaction(async |tx| {
             pg_destination_table_metadata::store_destination_table_metadata(
                 tx.executor(),
                 self.pipeline_id.as_str(),
@@ -705,9 +688,7 @@ impl StateStore for PostgresStore {
                 )
             })?;
 
-            tx.commit().await?;
-
-            Ok::<_, EtlError>(())
+            Ok(())
         })
         .await?;
 
@@ -753,9 +734,7 @@ impl SchemaStore for PostgresStore {
         );
 
         inner.usable = false;
-        self.bounded(async {
-            let mut tx = self.begin_transaction().await?;
-
+        self.transaction(async |tx| {
             let schema_id = schema::upsert_table_schema(
                 tx.executor(),
                 self.pipeline_id.as_str(),
@@ -767,9 +746,7 @@ impl SchemaStore for PostgresStore {
                 schema::insert_table_columns(tx.executor(), schema_id, columns).await?;
             }
 
-            tx.commit().await?;
-
-            Ok::<_, EtlError>(())
+            Ok(())
         })
         .await?;
 
@@ -807,9 +784,7 @@ impl SchemaStore for PostgresStore {
 
         inner.usable = false;
         let deleted_count = self
-            .bounded(async {
-                let mut tx = self.begin_transaction().await?;
-
+            .transaction(async |tx| {
                 let deleted_count = schema::delete_obsolete_table_schema_versions(
                     tx.executor(),
                     self.pipeline_id.as_str(),
@@ -824,9 +799,7 @@ impl SchemaStore for PostgresStore {
                     )
                 })?;
 
-                tx.commit().await?;
-
-                Ok::<_, EtlError>(deleted_count)
+                Ok(deleted_count)
             })
             .await?;
 
@@ -858,9 +831,7 @@ impl TableStateLifecycleStore for PostgresStore {
             TableStateOperation::PrepareForCopy { table_id } => {
                 let worker_type = WorkerType::TableSync { table_id };
                 inner.usable = false;
-                self.bounded(async {
-                    let mut tx = self.begin_transaction().await?;
-
+                self.transaction(async |tx| {
                     pg_destination_table_metadata::delete_destination_table_metadata(
                         tx.executor(),
                         self.pipeline_id.as_str(),
@@ -903,9 +874,7 @@ impl TableStateLifecycleStore for PostgresStore {
                         )
                     })?;
 
-                    tx.commit().await?;
-
-                    Ok::<_, EtlError>(())
+                    Ok(())
                 })
                 .await?;
 
@@ -924,9 +893,7 @@ impl TableStateLifecycleStore for PostgresStore {
                 let table_ids = inner.table_states.keys().copied().collect::<Vec<_>>();
 
                 inner.usable = false;
-                self.bounded(async {
-                    let mut tx = self.begin_transaction().await?;
-
+                self.transaction(async |tx| {
                     for table_id in &table_ids {
                         pg_table_state::update_table_state_raw(
                             tx.executor(),
@@ -953,9 +920,7 @@ impl TableStateLifecycleStore for PostgresStore {
                         )
                     })?;
 
-                    tx.commit().await?;
-
-                    Ok::<_, EtlError>(())
+                    Ok(())
                 })
                 .await?;
 
@@ -973,9 +938,7 @@ impl TableStateLifecycleStore for PostgresStore {
             TableStateOperation::Delete { table_id } => {
                 let worker_type = WorkerType::TableSync { table_id };
                 inner.usable = false;
-                self.bounded(async {
-                    let mut tx = self.begin_transaction().await?;
-
+                self.transaction(async |tx| {
                     pg_destination_table_metadata::delete_destination_table_metadata(
                         tx.executor(),
                         self.pipeline_id.as_str(),
@@ -1025,9 +988,7 @@ impl TableStateLifecycleStore for PostgresStore {
                         )
                     })?;
 
-                    tx.commit().await?;
-
-                    Ok::<_, EtlError>(())
+                    Ok(())
                 })
                 .await?;
 
