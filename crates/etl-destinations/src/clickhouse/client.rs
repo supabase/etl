@@ -15,8 +15,9 @@ use etl::{
     etl_error,
 };
 use futures::TryFutureExt;
-use tracing::debug;
+use tracing::{debug, warn};
 use url::Url;
+use uuid::Uuid;
 
 use crate::{
     clickhouse::{
@@ -350,6 +351,16 @@ pub(crate) struct ClickHouseTableColumn {
     pub(crate) name: String,
     /// ClickHouse type string, for example `Int32` or `Nullable(String)`.
     pub(crate) type_name: String,
+}
+
+/// Server facts returned by [`ClickHouseClient::server_status`].
+pub(crate) struct ClickHouseServerStatus {
+    /// Full `version()` string, for example `25.8.1.8909`.
+    pub(crate) version: String,
+    /// Time since the server process started.
+    pub(crate) uptime: Duration,
+    /// Wall time of the request, including any connection setup.
+    pub(crate) round_trip: Duration,
 }
 
 /// Column layout sent with every `RowBinaryWithNamesAndTypes` insert into one
@@ -707,6 +718,55 @@ impl ClickHouseClient {
         }
     }
 
+    /// Returns the server version, uptime, and request round trip from one
+    /// `select version(), uptime()` request.
+    ///
+    /// Both functions need no grants. Diagnostics only: the version gate uses
+    /// [`Self::server_version`].
+    pub(crate) async fn server_status(&self) -> EtlResult<ClickHouseServerStatus> {
+        let query = self
+            .inner
+            .query("select version(), uptime()")
+            .with_option("max_execution_time", floor_secs(self.config.connectivity_check_timeout));
+        let start = Instant::now();
+        let result = timeout_call(
+            ClickHouseOperationKind::ConnectivityCheck,
+            &self.config,
+            Some("server status"),
+            query.fetch_one::<(String, u32)>(),
+        )
+        .await;
+        let round_trip = start.elapsed();
+        metrics::histogram!(ETL_CLICKHOUSE_CONNECTIVITY_CHECK_DURATION_SECONDS)
+            .record(round_trip.as_secs_f64());
+        let (version, uptime_secs) = result?;
+
+        Ok(ClickHouseServerStatus {
+            version,
+            uptime: Duration::from_secs(u64::from(uptime_secs)),
+            round_trip,
+        })
+    }
+
+    /// Returns the server's `cloud_mode` setting, or [`None`] when the server
+    /// does not have that setting.
+    ///
+    /// Reading `system.settings` can need a grant the pipeline user lacks, so
+    /// callers must treat an error as an unknown answer, not a failure.
+    pub(crate) async fn cloud_mode(&self) -> EtlResult<Option<String>> {
+        let query = self
+            .inner
+            .query("select value from system.settings where name = 'cloud_mode'")
+            .with_option("max_execution_time", floor_secs(self.config.connectivity_check_timeout));
+        timeout_call(
+            ClickHouseOperationKind::ConnectivityCheck,
+            &self.config,
+            Some("cloud mode"),
+            query.fetch_optional::<String>(),
+        )
+        .await
+    }
+
     /// Executes a DDL statement (e.g. `CREATE TABLE IF NOT EXISTS …`) and
     /// records its duration in the `etl_clickhouse_ddl_duration_seconds`
     /// histogram labelled with the DDL `kind` and `table_name`.
@@ -888,6 +948,10 @@ impl ClickHouseClient {
     /// send no token and ClickHouse deduplicates by content, which only drops
     /// exact replays of change-stream blocks.
     ///
+    /// Each statement sends a fresh random `query_id`. A failed statement logs
+    /// it, so the statement can be found in the server's `system.query_log`,
+    /// which shows whether a timed-out insert committed.
+    ///
     /// The `replication_path` label (`"copy"` or `"cdc"`) is attached to the
     /// `etl_clickhouse_insert_duration_seconds` histogram recorded after each
     /// committed INSERT statement.
@@ -920,6 +984,8 @@ impl ClickHouseClient {
                 insert = insert
                     .with_option("insert_deduplication_token", format!("{batch_id}-{statements}"));
             }
+            let query_id = Uuid::new_v4();
+            let insert = insert.with_option("query_id", query_id.to_string());
             let insert_start = Instant::now();
 
             let summary = self
@@ -931,6 +997,7 @@ impl ClickHouseClient {
                     &mut scratch,
                     table_name,
                     replication_path,
+                    query_id,
                 )
                 .await?;
 
@@ -978,6 +1045,7 @@ impl ClickHouseClient {
         scratch: &mut String,
         table_name: &str,
         replication_path: &'static str,
+        query_id: Uuid,
     ) -> Result<InsertStatementSummary, InsertRowsError> {
         let mut chunk = Vec::with_capacity(INSERT_CHUNK_CAPACITY);
         chunk.extend_from_slice(&layout.header);
@@ -1002,25 +1070,29 @@ impl ClickHouseClient {
                     .insert_network_step(
                         table_name,
                         replication_path,
+                        query_id,
                         send_insert_chunk(insert, full),
                     )
                     .await?;
             }
         }
 
-        self.insert_network_step(table_name, replication_path, end_insert(insert, chunk)).await?;
+        self.insert_network_step(table_name, replication_path, query_id, end_insert(insert, chunk))
+            .await?;
 
         Ok(summary)
     }
 
     /// Runs one network step of an INSERT statement under the insert timeout.
     ///
-    /// A failure increments the insert error counter and records whether
-    /// ClickHouse rejected the statement's layout.
+    /// A failure increments the insert error counter, logs the statement's
+    /// `query_id`, and records whether ClickHouse rejected the statement's
+    /// layout.
     async fn insert_network_step<T>(
         &self,
         table_name: &str,
         replication_path: &'static str,
+        query_id: Uuid,
         step: impl Future<Output = Result<T, clickhouse::error::Error>>,
     ) -> Result<T, InsertRowsError> {
         let mut layout_rejected = false;
@@ -1035,12 +1107,20 @@ impl ClickHouseClient {
         .await;
 
         result.map_err(|error| {
+            let outcome = outcome_label(&error);
             metrics::counter!(
                 ETL_CLICKHOUSE_INSERT_ERRORS_TOTAL,
                 REPLICATION_PATH_LABEL => replication_path,
-                "outcome" => outcome_label(&error),
+                "outcome" => outcome,
             )
             .increment(1);
+            warn!(
+                table_name,
+                replication_path,
+                outcome,
+                query_id = %query_id,
+                "clickhouse insert statement failed"
+            );
 
             InsertRowsError { error, layout_rejected }
         })
