@@ -288,3 +288,30 @@ passing password flags to keep secrets out of process arguments.
 ## Metrics
 
 See [Metrics](./METRICS.md).
+
+## Diagnostic logs
+
+After the startup version check passes, a background task logs one
+`clickhouse server detected` line. Replication does not wait for it. Fields:
+
+- `deployment`: `cloud` when the server's `cloud_mode` setting is `1`,
+  `self_hosted` when it is `0`, and `unknown` when the setting is missing or
+  `system.settings` is unreadable.
+- `server_version`: the full `version()` string.
+- `server_uptime_secs`: `uptime()`. A low value right after an outage means the
+  server restarted.
+- `round_trip_ms`: wall time of that request, including any connection setup.
+
+Each failed INSERT statement logs `clickhouse insert statement failed` with
+its `query_id`. Look that ID up in the server's `system.query_log` to see
+whether a timed-out insert committed:
+
+```sql
+select event_time, type, written_rows, exception_code
+from system.query_log
+where query_id = '<query_id>'
+order by event_time;
+```
+
+`system.query_log` is local to each replica. On a multi-replica service such as
+ClickHouse Cloud, read `clusterAllReplicas('default', system.query_log)`.
