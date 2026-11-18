@@ -3,7 +3,9 @@
 //! RowBinary has no field delimiters, so a wrong length prefix or UUID layout
 //! shifts every later field of the insert.
 
-use super::{ClickHouseValue, rb_encode_value, rb_varint};
+use uuid::Uuid;
+
+use super::{rb_uuid, rb_varint};
 
 /// Marks the buffer contents written before the value under test.
 const SENTINEL: u8 = 0xAA;
@@ -40,19 +42,13 @@ fn varint_is_minimal_leb128() {
 
 /// A UUID in standard big-endian byte order encodes as its high 64 bits, then
 /// its low 64 bits, each little-endian.
-///
-/// `rb_encode_value` can build an `EtlError`, whose backtrace capture and
-/// `Debug` formatting reach code Kani 0.68 cannot compile. The stub captures no
-/// backtrace, and the result is checked with `is_ok` instead of `unwrap`, so
-/// the error is never formatted; no property depends on either.
 #[kani::proof]
-#[kani::stub(std::backtrace::Backtrace::capture, std::backtrace::Backtrace::disabled)]
 #[kani::unwind(17)]
 fn uuid_encodes_as_little_endian_halves() {
     let uuid: [u8; 16] = kani::any();
     let mut buf = Vec::with_capacity(16);
 
-    assert!(rb_encode_value(ClickHouseValue::Uuid(uuid), &mut buf).is_ok());
+    rb_uuid(&Uuid::from_bytes(uuid), &mut buf);
 
     let mut expected = uuid;
     expected[..8].reverse();
