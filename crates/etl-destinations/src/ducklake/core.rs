@@ -42,7 +42,7 @@ use etl_maintenance::{
         namespace_version_check_sql, namespaced_tables_query, table_namespace_filter,
     },
 };
-use jiff::{Span, SpanRelativeTo};
+use jiff::{Span, Timestamp, civil::DateTime, tz::TimeZone};
 use metrics::{counter, gauge};
 use parking_lot::{Mutex, RwLock as ParkingLotRwLock};
 use pg_escape::{quote_identifier as quote_postgres_identifier, quote_literal};
@@ -251,15 +251,12 @@ pub(super) fn is_create_table_conflict(error: &duckdb::Error, table_name: &str) 
 /// trigger sampling.
 ///
 /// Accepts ISO 8601 and friendly durations such as `7 days` or `2h 30min`.
-/// Months count as 30 days and years as 12 months, matching DuckDB interval
-/// ordering.
-fn expire_snapshots_retention_seconds(value: &str) -> Option<i64> {
-    const SECONDS_PER_MONTH: i64 = 30 * 24 * 60 * 60;
-
+/// Calendar units count back from `now`, matching DuckLake's `now() - interval`
+/// expiry cutoff.
+fn expire_snapshots_retention_seconds(value: &str, now: DateTime) -> Option<i64> {
     let span: Span = value.parse().ok()?;
-    let months = i64::from(span.get_years()) * 12 + i64::from(span.get_months());
-    let rest = span.years(0).months(0).to_duration(SpanRelativeTo::days_are_24_hours()).ok()?;
-    months.checked_mul(SECONDS_PER_MONTH)?.checked_add(rest.as_secs())
+    let cutoff = now.checked_sub(span).ok()?;
+    Some(now.duration_since(cutoff).as_secs())
 }
 
 /// Returns why file maintenance should run for a table.
@@ -4610,7 +4607,8 @@ where
         )
         .await?;
 
-        match expire_snapshots_retention_seconds(self.expire_snapshots_older_than.as_ref()) {
+        let now = Timestamp::now().to_zoned(TimeZone::UTC).datetime();
+        match expire_snapshots_retention_seconds(self.expire_snapshots_older_than.as_ref(), now) {
             Some(retention_seconds) => {
                 operations.expire_snapshots = catalog_metrics.snapshots_total > 1
                     && catalog_metrics.oldest_snapshot_age_seconds >= retention_seconds;
@@ -4967,6 +4965,7 @@ mod tests {
         test_utils::{local_tls_config_from_env, test_database_port_from_env},
         tokio::test_utils::PgDatabase,
     };
+    use jiff::civil::date;
     use pg_escape::{quote_identifier, quote_literal};
     use tempfile::TempDir;
     use tokio_postgres::Client;
@@ -5185,13 +5184,16 @@ mod tests {
     }
 
     #[test]
-    fn expire_snapshots_retention_seconds_matches_duckdb_interval_units() {
-        assert_eq!(expire_snapshots_retention_seconds("7 days"), Some(604_800));
-        assert_eq!(expire_snapshots_retention_seconds("2h 30min"), Some(9_000));
-        assert_eq!(expire_snapshots_retention_seconds("1 month 1 day"), Some(2_678_400));
-        assert_eq!(expire_snapshots_retention_seconds("1 year"), Some(31_104_000));
-        assert_eq!(expire_snapshots_retention_seconds("P1W"), Some(604_800));
-        assert_eq!(expire_snapshots_retention_seconds("bad interval"), None);
+    fn expire_snapshots_retention_seconds_counts_calendar_units_back_from_now() {
+        let now = date(2026, 3, 31).at(12, 0, 0, 0);
+
+        assert_eq!(expire_snapshots_retention_seconds("7 days", now), Some(604_800));
+        assert_eq!(expire_snapshots_retention_seconds("2h 30min", now), Some(9_000));
+        assert_eq!(expire_snapshots_retention_seconds("P1W", now), Some(604_800));
+        // March 31 minus one month clamps to February 28, 31 days earlier.
+        assert_eq!(expire_snapshots_retention_seconds("1 month", now), Some(2_678_400));
+        assert_eq!(expire_snapshots_retention_seconds("1 year", now), Some(31_536_000));
+        assert_eq!(expire_snapshots_retention_seconds("bad interval", now), None);
     }
 
     fn make_schema(table_id: u32, schema: &str, table: &str) -> TableSchema {
