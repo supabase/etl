@@ -2,4 +2,5 @@
 version = 2
 ignore = [
     { id = "RUSTSEC-2024-0436", reason = "Disabling because it is not a real vulnerability. The crate paste is just unmaintained." },
+    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained with no patched release; arrow, postgres-types, and our crates depend on it, so replacing it needs upstream migrations first." },
 ]
