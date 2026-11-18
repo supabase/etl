@@ -10,14 +10,17 @@ use etl_postgres::store::{
 };
 use metrics::{counter, gauge};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use tokio::sync::{Mutex, MutexGuard};
+use tokio::{
+    sync::{Mutex, MutexGuard},
+    time::timeout,
+};
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, info};
 
 use crate::{
     config::{IntoConnectOptions, PgConnectionConfig, PgConnectionOptions},
     destination::{DestinationTableMetadata, DestinationTableSchema},
-    error::{ErrorKind, EtlResult},
+    error::{ErrorKind, EtlError, EtlResult},
     etl_error,
     observability::{
         ETL_SCHEMA_CLEANUP_SKIPPED_TABLES_TOTAL, ETL_TABLES_TOTAL, POSTGRES_STORE_POOL, STATE_LABEL,
@@ -44,6 +47,21 @@ const MAX_POOL_CONNECTIONS: u32 = 2;
 /// Duration after which idle connections are closed.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Longest wait for a pooled connection, including connect, TLS, startup,
+/// and SQLx's liveness ping. This is SQLx's default, set explicitly because
+/// [`TRANSACTION_TIMEOUT`] budgets for it.
+const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Client-side bound on one store transaction, from connection acquisition
+/// through COMMIT.
+///
+/// The server's `statement_timeout` (30 s) and `lock_timeout` (10 s) cannot
+/// fire when the server or network stops answering, and SQLx connections have
+/// no TCP keepalive, so without this bound a store call can wait forever while
+/// holding the store mutex. Two minutes covers a full connection acquisition
+/// plus several statements running to their server limits.
+const TRANSACTION_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// Application name for Postgres state store connections.
 const APP_NAME_REPLICATOR_STORE: &str = "supabase_etl_replicator_store";
 
@@ -67,6 +85,7 @@ fn create_database_pool(connection_config: &PgConnectionConfig) -> InstrumentedP
     let pool = PgPoolOptions::new()
         .min_connections(0)
         .max_connections(MAX_POOL_CONNECTIONS)
+        .acquire_timeout(ACQUIRE_TIMEOUT)
         .idle_timeout(Some(IDLE_TIMEOUT))
         .connect_lazy_with(options);
 
@@ -185,6 +204,12 @@ impl Inner {
 /// domain and publishes a complete replacement. Failed reloads return errors
 /// and remain eligible for retry. Reloading clears pruning memoization because
 /// an uncertain schema commit may have invalidated a remembered boundary.
+///
+/// Each database transaction, from connection acquisition through COMMIT, has
+/// a two-minute client-side deadline. Expiry is a cancellation, so the rules
+/// above apply; it returns a retryable
+/// [`ErrorKind::SourceConnectionFailed`] error instead of waiting on a
+/// connection that may never answer.
 #[derive(Debug, Clone)]
 pub struct PostgresStore {
     /// Exact pipeline identity used for all state operations.
@@ -192,6 +217,8 @@ pub struct PostgresStore {
     pool: InstrumentedPgPool,
     /// One serialization point for cache access and database mutations.
     inner: Arc<Mutex<Inner>>,
+    /// Client-side bound on each database transaction.
+    transaction_timeout: Duration,
 }
 
 impl PostgresStore {
@@ -216,7 +243,12 @@ impl PostgresStore {
 
         let pool = create_database_pool(&connection_config);
 
-        Ok(Self { pipeline_id, pool, inner: Arc::new(Mutex::new(Inner::default())) })
+        Ok(Self {
+            pipeline_id,
+            pool,
+            inner: Arc::new(Mutex::new(Inner::default())),
+            transaction_timeout: TRANSACTION_TIMEOUT,
+        })
     }
 
     /// Returns a usable cache, rebuilding every domain after interruption.
@@ -246,12 +278,44 @@ impl PostgresStore {
         Ok(tx)
     }
 
+    /// Runs one database transaction under [`Self::transaction_timeout`].
+    ///
+    /// Expiry drops `transaction` mid-flight. Callers must mark the cache
+    /// unusable first so the next accessor reloads after the advisory lock
+    /// settles the abandoned transaction.
+    async fn bounded<T>(&self, transaction: impl Future<Output = EtlResult<T>>) -> EtlResult<T> {
+        timeout(self.transaction_timeout, transaction).await.unwrap_or_else(|_| {
+            Err(etl_error!(
+                ErrorKind::SourceConnectionFailed,
+                "State store transaction timed out",
+                format!("The store database did not respond within {:?}", self.transaction_timeout)
+            ))
+        })
+    }
+
     /// Atomically replaces every cache after observing settled database state.
     ///
     /// Keep the previous data inaccessible until all queries and conversions
     /// succeed. Failed or cancelled reloads remain eligible for a full retry.
     async fn refresh_cache(&self, inner: &mut Inner) -> EtlResult<()> {
         inner.usable = false;
+        let mut refreshed = self.bounded(self.load_caches()).await?;
+
+        // A reload can remove the last table in a previously emitted state.
+        for state in inner.state_counts.keys() {
+            refreshed.state_counts.entry(*state).or_default();
+        }
+        refreshed.usable = true;
+        *inner = refreshed;
+        emit_table_metrics(&inner.state_counts);
+        info!("loaded postgres store caches");
+
+        Ok(())
+    }
+
+    /// Reads every cache domain in one transaction under the pipeline's
+    /// advisory lock.
+    async fn load_caches(&self) -> EtlResult<Inner> {
         let mut tx = self.begin_transaction().await?;
 
         let mut refreshed = Inner::default();
@@ -370,16 +434,7 @@ impl PostgresStore {
 
         tx.commit().await?;
 
-        // A reload can remove the last table in a previously emitted state.
-        for state in inner.state_counts.keys() {
-            refreshed.state_counts.entry(*state).or_default();
-        }
-        refreshed.usable = true;
-        *inner = refreshed;
-        emit_table_metrics(&inner.state_counts);
-        info!("loaded postgres store caches");
-
-        Ok(())
+        Ok(refreshed)
     }
 }
 
@@ -427,20 +482,25 @@ impl StateStore for PostgresStore {
 
         // Perform all database updates in a single transaction.
         inner.usable = false;
-        let mut tx = self.begin_transaction().await?;
+        self.bounded(async {
+            let mut tx = self.begin_transaction().await?;
 
-        for (table_id, state_type, metadata) in db_updates {
-            pg_table_state::update_table_state_raw(
-                tx.executor(),
-                self.pipeline_id.as_str(),
-                table_id,
-                state_type,
-                metadata,
-            )
-            .await?;
-        }
+            for (table_id, state_type, metadata) in db_updates {
+                pg_table_state::update_table_state_raw(
+                    tx.executor(),
+                    self.pipeline_id.as_str(),
+                    table_id,
+                    state_type,
+                    metadata,
+                )
+                .await?;
+            }
 
-        tx.commit().await?;
+            tx.commit().await?;
+
+            Ok::<_, EtlError>(())
+        })
+        .await?;
 
         // Update the cache.
         for (table_id, state) in updates {
@@ -459,25 +519,31 @@ impl StateStore for PostgresStore {
         let mut inner = self.lock_cache().await?;
 
         inner.usable = false;
-        let mut tx = self.begin_transaction().await?;
+        let restored_state = self
+            .bounded(async {
+                let mut tx = self.begin_transaction().await?;
 
-        let restored_row = pg_table_state::rollback_table_state(
-            tx.executor(),
-            self.pipeline_id.as_str(),
-            table_id,
-        )
-        .await?
-        .ok_or_else(|| {
-            etl_error!(
-                ErrorKind::StateRollbackError,
-                "Previous table state not found",
-                "No previous state available to roll back to for this table"
-            )
-        })?;
+                let restored_row = pg_table_state::rollback_table_state(
+                    tx.executor(),
+                    self.pipeline_id.as_str(),
+                    table_id,
+                )
+                .await?
+                .ok_or_else(|| {
+                    etl_error!(
+                        ErrorKind::StateRollbackError,
+                        "Previous table state not found",
+                        "No previous state available to roll back to for this table"
+                    )
+                })?;
 
-        let restored_state = TableState::from_state_row(restored_row)?;
+                let restored_state = TableState::from_state_row(restored_row)?;
 
-        tx.commit().await?;
+                tx.commit().await?;
+
+                Ok::<_, EtlError>(restored_state)
+            })
+            .await?;
 
         inner.set_table_state(table_id, restored_state.clone());
         emit_table_metrics(&inner.state_counts);
@@ -503,25 +569,31 @@ impl StateStore for PostgresStore {
         let mut inner = self.lock_cache().await?;
 
         inner.usable = false;
-        let mut tx = self.begin_transaction().await?;
+        let persisted_checkpoint = self
+            .bounded(async {
+                let mut tx = self.begin_transaction().await?;
 
-        let persisted_checkpoint = checkpoint::upsert_replication_checkpoint(
-            tx.executor(),
-            self.pipeline_id.as_str(),
-            worker_type.as_str(),
-            worker_type.checkpoint_table_id(),
-            checkpoint_lsn,
-        )
-        .await
-        .map_err(|err| {
-            etl_error!(
-                ErrorKind::SourceQueryFailed,
-                "Replication checkpoint storage failed",
-                source: err
-            )
-        })?;
+                let persisted_checkpoint = checkpoint::upsert_replication_checkpoint(
+                    tx.executor(),
+                    self.pipeline_id.as_str(),
+                    worker_type.as_str(),
+                    worker_type.checkpoint_table_id(),
+                    checkpoint_lsn,
+                )
+                .await
+                .map_err(|err| {
+                    etl_error!(
+                        ErrorKind::SourceQueryFailed,
+                        "Replication checkpoint storage failed",
+                        source: err
+                    )
+                })?;
 
-        tx.commit().await?;
+                tx.commit().await?;
+
+                Ok::<_, EtlError>(persisted_checkpoint)
+            })
+            .await?;
 
         inner.replication_checkpoints.insert(worker_type, persisted_checkpoint);
         inner.usable = true;
@@ -533,24 +605,29 @@ impl StateStore for PostgresStore {
         let mut inner = self.lock_cache().await?;
 
         inner.usable = false;
-        let mut tx = self.begin_transaction().await?;
+        self.bounded(async {
+            let mut tx = self.begin_transaction().await?;
 
-        checkpoint::delete_replication_checkpoint(
-            tx.executor(),
-            self.pipeline_id.as_str(),
-            worker_type.as_str(),
-            worker_type.checkpoint_table_id(),
-        )
-        .await
-        .map_err(|err| {
-            etl_error!(
-                ErrorKind::SourceQueryFailed,
-                "Replication checkpoint deletion failed",
-                source: err
+            checkpoint::delete_replication_checkpoint(
+                tx.executor(),
+                self.pipeline_id.as_str(),
+                worker_type.as_str(),
+                worker_type.checkpoint_table_id(),
             )
-        })?;
+            .await
+            .map_err(|err| {
+                etl_error!(
+                    ErrorKind::SourceQueryFailed,
+                    "Replication checkpoint deletion failed",
+                    source: err
+                )
+            })?;
 
-        tx.commit().await?;
+            tx.commit().await?;
+
+            Ok::<_, EtlError>(())
+        })
+        .await?;
 
         inner.replication_checkpoints.remove(&worker_type);
         inner.usable = true;
@@ -605,29 +682,34 @@ impl StateStore for PostgresStore {
             };
 
         inner.usable = false;
-        let mut tx = self.begin_transaction().await?;
+        self.bounded(async {
+            let mut tx = self.begin_transaction().await?;
 
-        pg_destination_table_metadata::store_destination_table_metadata(
-            tx.executor(),
-            self.pipeline_id.as_str(),
-            table_id,
-            metadata.table_id(),
-            metadata.snapshot_id(),
-            metadata.replication_mask().as_slice(),
-            previous_snapshot_id,
-            previous_replication_mask,
-            schema_status,
-        )
-        .await
-        .map_err(|err| {
-            etl_error!(
-                ErrorKind::SourceQueryFailed,
-                "Destination table metadata storage failed",
-                source: err
+            pg_destination_table_metadata::store_destination_table_metadata(
+                tx.executor(),
+                self.pipeline_id.as_str(),
+                table_id,
+                metadata.table_id(),
+                metadata.snapshot_id(),
+                metadata.replication_mask().as_slice(),
+                previous_snapshot_id,
+                previous_replication_mask,
+                schema_status,
             )
-        })?;
+            .await
+            .map_err(|err| {
+                etl_error!(
+                    ErrorKind::SourceQueryFailed,
+                    "Destination table metadata storage failed",
+                    source: err
+                )
+            })?;
 
-        tx.commit().await?;
+            tx.commit().await?;
+
+            Ok::<_, EtlError>(())
+        })
+        .await?;
 
         Arc::make_mut(&mut inner.destination_tables_metadata).insert(table_id, metadata);
         inner.usable = true;
@@ -671,17 +753,25 @@ impl SchemaStore for PostgresStore {
         );
 
         inner.usable = false;
-        let mut tx = self.begin_transaction().await?;
+        self.bounded(async {
+            let mut tx = self.begin_transaction().await?;
 
-        let schema_id =
-            schema::upsert_table_schema(tx.executor(), self.pipeline_id.as_str(), &table_schema)
-                .await?;
-        schema::delete_table_columns(tx.executor(), schema_id).await?;
-        for columns in table_schema.column_schemas.chunks(schema::MAX_COLUMNS_PER_INSERT) {
-            schema::insert_table_columns(tx.executor(), schema_id, columns).await?;
-        }
+            let schema_id = schema::upsert_table_schema(
+                tx.executor(),
+                self.pipeline_id.as_str(),
+                &table_schema,
+            )
+            .await?;
+            schema::delete_table_columns(tx.executor(), schema_id).await?;
+            for columns in table_schema.column_schemas.chunks(schema::MAX_COLUMNS_PER_INSERT) {
+                schema::insert_table_columns(tx.executor(), schema_id, columns).await?;
+            }
 
-        tx.commit().await?;
+            tx.commit().await?;
+
+            Ok::<_, EtlError>(())
+        })
+        .await?;
 
         if inner
             .schema_prune_boundaries
@@ -716,23 +806,29 @@ impl SchemaStore for PostgresStore {
         }
 
         inner.usable = false;
-        let mut tx = self.begin_transaction().await?;
+        let deleted_count = self
+            .bounded(async {
+                let mut tx = self.begin_transaction().await?;
 
-        let deleted_count = schema::delete_obsolete_table_schema_versions(
-            tx.executor(),
-            self.pipeline_id.as_str(),
-            &retention_snapshot_ids,
-        )
-        .await
-        .map_err(|err| {
-            etl_error!(
-                ErrorKind::SourceQueryFailed,
-                "Obsolete table schema deletion failed",
-                source: err
-            )
-        })?;
+                let deleted_count = schema::delete_obsolete_table_schema_versions(
+                    tx.executor(),
+                    self.pipeline_id.as_str(),
+                    &retention_snapshot_ids,
+                )
+                .await
+                .map_err(|err| {
+                    etl_error!(
+                        ErrorKind::SourceQueryFailed,
+                        "Obsolete table schema deletion failed",
+                        source: err
+                    )
+                })?;
 
-        tx.commit().await?;
+                tx.commit().await?;
+
+                Ok::<_, EtlError>(deleted_count)
+            })
+            .await?;
 
         let cached_count = Arc::make_mut(&mut inner.table_schemas).prune(&retention_snapshot_ids);
 
@@ -762,51 +858,56 @@ impl TableStateLifecycleStore for PostgresStore {
             TableStateOperation::PrepareForCopy { table_id } => {
                 let worker_type = WorkerType::TableSync { table_id };
                 inner.usable = false;
-                let mut tx = self.begin_transaction().await?;
+                self.bounded(async {
+                    let mut tx = self.begin_transaction().await?;
 
-                pg_destination_table_metadata::delete_destination_table_metadata(
-                    tx.executor(),
-                    self.pipeline_id.as_str(),
-                    table_id,
-                )
-                .await
-                .map_err(|err| {
-                    etl_error!(
-                        ErrorKind::SourceQueryFailed,
-                        "Destination table metadata deletion failed",
-                        source: err
+                    pg_destination_table_metadata::delete_destination_table_metadata(
+                        tx.executor(),
+                        self.pipeline_id.as_str(),
+                        table_id,
                     )
-                })?;
+                    .await
+                    .map_err(|err| {
+                        etl_error!(
+                            ErrorKind::SourceQueryFailed,
+                            "Destination table metadata deletion failed",
+                            source: err
+                        )
+                    })?;
 
-                schema::delete_table_schema_for_table(
-                    tx.executor(),
-                    self.pipeline_id.as_str(),
-                    table_id,
-                )
-                .await
-                .map_err(|err| {
-                    etl_error!(
-                        ErrorKind::SourceQueryFailed,
-                        "Table schema deletion failed",
-                        source: err
+                    schema::delete_table_schema_for_table(
+                        tx.executor(),
+                        self.pipeline_id.as_str(),
+                        table_id,
                     )
-                })?;
+                    .await
+                    .map_err(|err| {
+                        etl_error!(
+                            ErrorKind::SourceQueryFailed,
+                            "Table schema deletion failed",
+                            source: err
+                        )
+                    })?;
 
-                checkpoint::delete_replication_checkpoint_for_table(
-                    tx.executor(),
-                    self.pipeline_id.as_str(),
-                    table_id,
-                )
-                .await
-                .map_err(|err| {
-                    etl_error!(
-                        ErrorKind::SourceQueryFailed,
-                        "Replication checkpoint deletion failed",
-                        source: err
+                    checkpoint::delete_replication_checkpoint_for_table(
+                        tx.executor(),
+                        self.pipeline_id.as_str(),
+                        table_id,
                     )
-                })?;
+                    .await
+                    .map_err(|err| {
+                        etl_error!(
+                            ErrorKind::SourceQueryFailed,
+                            "Replication checkpoint deletion failed",
+                            source: err
+                        )
+                    })?;
 
-                tx.commit().await?;
+                    tx.commit().await?;
+
+                    Ok::<_, EtlError>(())
+                })
+                .await?;
 
                 inner.schema_prune_boundaries.remove(&table_id);
                 inner.replication_checkpoints.remove(&worker_type);
@@ -823,35 +924,40 @@ impl TableStateLifecycleStore for PostgresStore {
                 let table_ids = inner.table_states.keys().copied().collect::<Vec<_>>();
 
                 inner.usable = false;
-                let mut tx = self.begin_transaction().await?;
+                self.bounded(async {
+                    let mut tx = self.begin_transaction().await?;
 
-                for table_id in &table_ids {
-                    pg_table_state::update_table_state_raw(
+                    for table_id in &table_ids {
+                        pg_table_state::update_table_state_raw(
+                            tx.executor(),
+                            self.pipeline_id.as_str(),
+                            *table_id,
+                            state_type,
+                            metadata.clone(),
+                        )
+                        .await?;
+                    }
+
+                    checkpoint::delete_replication_checkpoint(
                         tx.executor(),
                         self.pipeline_id.as_str(),
-                        *table_id,
-                        state_type,
-                        metadata.clone(),
+                        WorkerType::Apply.as_str(),
+                        WorkerType::Apply.checkpoint_table_id(),
                     )
-                    .await?;
-                }
+                    .await
+                    .map_err(|err| {
+                        etl_error!(
+                            ErrorKind::SourceQueryFailed,
+                            "Replication checkpoint deletion failed",
+                            source: err
+                        )
+                    })?;
 
-                checkpoint::delete_replication_checkpoint(
-                    tx.executor(),
-                    self.pipeline_id.as_str(),
-                    WorkerType::Apply.as_str(),
-                    WorkerType::Apply.checkpoint_table_id(),
-                )
-                .await
-                .map_err(|err| {
-                    etl_error!(
-                        ErrorKind::SourceQueryFailed,
-                        "Replication checkpoint deletion failed",
-                        source: err
-                    )
-                })?;
+                    tx.commit().await?;
 
-                tx.commit().await?;
+                    Ok::<_, EtlError>(())
+                })
+                .await?;
 
                 inner.schema_prune_boundaries.clear();
                 inner.replication_checkpoints.remove(&WorkerType::Apply);
@@ -867,58 +973,63 @@ impl TableStateLifecycleStore for PostgresStore {
             TableStateOperation::Delete { table_id } => {
                 let worker_type = WorkerType::TableSync { table_id };
                 inner.usable = false;
-                let mut tx = self.begin_transaction().await?;
+                self.bounded(async {
+                    let mut tx = self.begin_transaction().await?;
 
-                pg_destination_table_metadata::delete_destination_table_metadata(
-                    tx.executor(),
-                    self.pipeline_id.as_str(),
-                    table_id,
-                )
-                .await
-                .map_err(|err| {
-                    etl_error!(
-                        ErrorKind::SourceQueryFailed,
-                        "Destination table metadata deletion failed",
-                        source: err
+                    pg_destination_table_metadata::delete_destination_table_metadata(
+                        tx.executor(),
+                        self.pipeline_id.as_str(),
+                        table_id,
                     )
-                })?;
+                    .await
+                    .map_err(|err| {
+                        etl_error!(
+                            ErrorKind::SourceQueryFailed,
+                            "Destination table metadata deletion failed",
+                            source: err
+                        )
+                    })?;
 
-                schema::delete_table_schema_for_table(
-                    tx.executor(),
-                    self.pipeline_id.as_str(),
-                    table_id,
-                )
-                .await
-                .map_err(|err| {
-                    etl_error!(
-                        ErrorKind::SourceQueryFailed,
-                        "Table schema deletion failed",
-                        source: err
+                    schema::delete_table_schema_for_table(
+                        tx.executor(),
+                        self.pipeline_id.as_str(),
+                        table_id,
                     )
-                })?;
+                    .await
+                    .map_err(|err| {
+                        etl_error!(
+                            ErrorKind::SourceQueryFailed,
+                            "Table schema deletion failed",
+                            source: err
+                        )
+                    })?;
 
-                pg_table_state::delete_table_state(
-                    tx.executor(),
-                    self.pipeline_id.as_str(),
-                    table_id,
-                )
+                    pg_table_state::delete_table_state(
+                        tx.executor(),
+                        self.pipeline_id.as_str(),
+                        table_id,
+                    )
+                    .await?;
+
+                    checkpoint::delete_replication_checkpoint_for_table(
+                        tx.executor(),
+                        self.pipeline_id.as_str(),
+                        table_id,
+                    )
+                    .await
+                    .map_err(|err| {
+                        etl_error!(
+                            ErrorKind::SourceQueryFailed,
+                            "Replication checkpoint deletion failed",
+                            source: err
+                        )
+                    })?;
+
+                    tx.commit().await?;
+
+                    Ok::<_, EtlError>(())
+                })
                 .await?;
-
-                checkpoint::delete_replication_checkpoint_for_table(
-                    tx.executor(),
-                    self.pipeline_id.as_str(),
-                    table_id,
-                )
-                .await
-                .map_err(|err| {
-                    etl_error!(
-                        ErrorKind::SourceQueryFailed,
-                        "Replication checkpoint deletion failed",
-                        source: err
-                    )
-                })?;
-
-                tx.commit().await?;
 
                 inner.schema_prune_boundaries.remove(&table_id);
                 inner.replication_checkpoints.remove(&worker_type);
@@ -932,5 +1043,147 @@ impl TableStateLifecycleStore for PostgresStore {
                 Ok(())
             }
         }
+    }
+}
+
+#[cfg(all(test, feature = "test-utils"))]
+mod tests {
+    use std::{
+        net::{IpAddr, Ipv4Addr},
+        sync::Arc,
+        time::Duration,
+    };
+
+    use tokio::{
+        io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+        net::{TcpListener, TcpStream},
+        sync::watch,
+        time::timeout,
+    };
+    use tokio_postgres::types::PgLsn;
+
+    use super::{PostgresStore, TRANSACTION_TIMEOUT};
+    use crate::{
+        config::PgConnectionConfig,
+        error::{ErrorKind, Retryability},
+        replication::WorkerType,
+        store::StateStore,
+        test_utils::database::spawn_source_database,
+    };
+
+    /// Short deadline for the stalled transaction.
+    const TEST_TRANSACTION_TIMEOUT: Duration = Duration::from_secs(1);
+
+    /// Longer than [`TEST_TRANSACTION_TIMEOUT`]; reaching it means the stalled
+    /// transaction was never bounded.
+    const STALL_LIMIT: Duration = Duration::from_secs(10);
+
+    /// Delivery state shared by every proxied connection.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Link {
+        /// Bytes flow in both directions.
+        Open,
+        /// The next client `BEGIN` reaches the server, then delivery stops.
+        StallAfterBegin,
+        /// Bytes are held in both directions while sockets stay open.
+        Stalled,
+    }
+
+    /// Forwards bytes in one direction, holding them while the link is
+    /// stalled.
+    ///
+    /// Only the client-to-server direction arms the stall, before forwarding
+    /// `BEGIN`, so the server's reply is already held. The stall therefore
+    /// starts after connection acquisition, inside the transaction.
+    async fn pump(
+        mut from: impl AsyncRead + Unpin,
+        mut to: impl AsyncWrite + Unpin,
+        link: Arc<watch::Sender<Link>>,
+        arms_stall: bool,
+    ) {
+        let mut state = link.subscribe();
+        let mut buffer = [0; 8192];
+        loop {
+            let Ok(read) = from.read(&mut buffer).await else { return };
+            if read == 0 || state.wait_for(|link| *link != Link::Stalled).await.is_err() {
+                return;
+            }
+
+            let chunk = &buffer[..read];
+            if arms_stall && chunk.windows(5).any(|window| window == b"BEGIN") {
+                link.send_if_modified(|link| {
+                    let stall = *link == Link::StallAfterBegin;
+                    if stall {
+                        *link = Link::Stalled;
+                    }
+
+                    stall
+                });
+            }
+
+            if to.write_all(chunk).await.is_err() {
+                return;
+            }
+        }
+    }
+
+    /// Starts a TCP proxy to `upstream` whose delivery follows `link`.
+    async fn spawn_proxy(
+        upstream: &PgConnectionConfig,
+        link: Arc<watch::Sender<Link>>,
+    ) -> PgConnectionConfig {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let mut proxied = upstream.clone();
+        // Keep the original host for TLS verification and dial the proxy.
+        proxied.hostaddr = Some(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        proxied.port = listener.local_addr().unwrap().port();
+
+        let upstream_address = (upstream.host.clone(), upstream.port);
+        tokio::spawn(async move {
+            while let Ok((client, _)) = listener.accept().await {
+                let server = TcpStream::connect(upstream_address.clone()).await.unwrap();
+                let (client_read, client_write) = client.into_split();
+                let (server_read, server_write) = server.into_split();
+                tokio::spawn(pump(client_read, server_write, Arc::clone(&link), true));
+                tokio::spawn(pump(server_read, client_write, Arc::clone(&link), false));
+            }
+        });
+
+        proxied
+    }
+
+    /// A store transaction whose database stops answering after `BEGIN`
+    /// fails with a retryable connection error, and the store recovers once
+    /// replies resume.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unresponsive_database_fails_transaction_and_store_recovers() {
+        let database = spawn_source_database().await;
+        let link = Arc::new(watch::Sender::new(Link::Open));
+        let config = spawn_proxy(&database.config, Arc::clone(&link)).await;
+        let mut store = PostgresStore::new("1", config).await.unwrap();
+        store.upsert_replication_checkpoint(WorkerType::Apply, PgLsn::from(100)).await.unwrap();
+
+        link.send_replace(Link::StallAfterBegin);
+        store.transaction_timeout = TEST_TRANSACTION_TIMEOUT;
+        let error = timeout(
+            STALL_LIMIT,
+            store.upsert_replication_checkpoint(WorkerType::Apply, PgLsn::from(200)),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+
+        assert_eq!(*link.borrow(), Link::Stalled);
+        assert_eq!(error.kind(), ErrorKind::SourceConnectionFailed);
+        assert_eq!(error.retryability(), Retryability::Retryable);
+
+        link.send_replace(Link::Open);
+        store.transaction_timeout = TRANSACTION_TIMEOUT;
+        store.upsert_replication_checkpoint(WorkerType::Apply, PgLsn::from(300)).await.unwrap();
+
+        assert_eq!(
+            store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(),
+            Some(PgLsn::from(300))
+        );
     }
 }
