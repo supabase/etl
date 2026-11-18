@@ -14,7 +14,8 @@ use crate::{
     data::TableRow,
     destination::{
         ApplyLoopAsyncResultMetadata, Destination, DropTableForCopyResult, PipelineDestination,
-        TableCopyBatchId, WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
+        TableCopyBatchId, UpdateRowRequirement, WriteEventsDurability, WriteEventsResult,
+        WriteTableRowsResult,
     },
     error::EtlResult,
     event::Event,
@@ -260,6 +261,10 @@ where
 {
     fn name() -> &'static str {
         "wrapper"
+    }
+
+    fn update_row_requirement() -> UpdateRowRequirement {
+        D::update_row_requirement()
     }
 
     async fn startup(&self) -> EtlResult<()> {

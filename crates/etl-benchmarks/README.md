@@ -20,6 +20,8 @@ Use the direct benchmark binaries only when developing the benchmark code itself
 - `hot_paths`: instructions and allocations per row or cell for decoding,
   formatting, and metric hot paths, without Postgres or a destination. See
   [Hot-Path Instruction Benchmark](#hot-path-instruction-benchmark).
+- `lock_contention`: how long tasks wait for each tokio lock while tables copy
+  and CDC streams. See [Lock Contention Profile](#lock-contention-profile).
 
 `table_copy` and `table_streaming` support:
 
@@ -411,6 +413,46 @@ Cachegrind instead, and subtract a `--repeat 1` run to remove setup.
 Scenarios isolate one code path with synthetic fixtures. They rank and confirm
 local changes; confirm a result that matters with `table_copy` or
 `table_streaming` before relying on it.
+
+## Lock Contention Profile
+
+`lock_contention` measures how long tasks wait for tokio `Mutex`, `RwLock`, and
+`Semaphore` acquires during a pipeline run. A task waiting on a tokio lock does
+not block a thread, so thread profilers such as `perf` cannot see this time.
+
+Run it with the flake app or the script it wraps:
+
+```bash
+nix run .#lock-contention
+scripts/lock-contention.sh --tables 16 --writers 8 --duration-seconds 60
+```
+
+Both start a throwaway PostgreSQL cluster with logical replication on
+`127.0.0.1:5450` (`LOCK_CONTENTION_PG_PORT`). They build the benchmark from the
+working tree with `--cfg tokio_unstable`, tokio's `tracing` feature, and the
+bench profile into `target/lock-contention`, run it, and stop the cluster. The
+cluster's data lives in `/tmp/etl-lc.XXXXXX`; its logs stay in
+`target/lock-contention/postgres-<timestamp>`. The flake app runs the script in
+the minimal `lock-contention` dev shell; run the script directly when `cargo`,
+`initdb`, and `pg_ctl` are already on `PATH`. In a shallow clone, Nix cannot
+count revisions, so use `nix run 'git+file:.?shallow=1#lock-contention'`.
+
+The workload creates `--tables` tables with `--rows-per-table` rows, then
+starts the pipeline with `PostgresStore` and copies every table while
+`--writers` connections update and insert rows for `--duration-seconds`. The
+writers start with the pipeline, so CDC runs during and after the copy. The
+pipeline tuning options of the other benchmarks apply.
+
+The report lists each lock by where it was created and by operation, sorted by
+total wait. For each it shows acquires, how many had to wait, total wait,
+approximate p50 and p99 (power-of-two upper bounds), and the longest wait. For
+up to 16 waits per lock and thread it records which workspace code was waiting,
+shown as the two innermost workspace frames. Semaphores are listed separately
+because many of their waits are intended concurrency limits.
+
+The tracing hooks add overhead to every acquire, so compare runs of the same
+workload instead of reading absolute times. Waits on `std` and `parking_lot`
+locks are not measured.
 
 ## Comparing Two Commits On One Machine
 

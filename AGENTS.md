@@ -260,6 +260,11 @@ uppercase letter (`thiserror` included).
 - Panics only for programmer errors or broken invariants. `debug_assert!` /
   `unreachable!` for internal invariants; typed errors for external input or
   system state. Document `# Panics` only when the function can panic.
+- Sync locks: recover poisoned locks with
+  `unwrap_or_else(PoisonError::into_inner)` when every critical section leaves
+  the data valid (`parking_lot` never poisons). When a panic can leave the
+  guarded resource unusable, such as a native DuckDB connection, return a typed
+  `InvalidState` error. Never `unwrap` or `expect` a lock outside tests.
 
 Parser entrypoints must not panic on malformed input: typed parse error,
 `EtlError`, `None`, or an explicit failure. Unexpected EOF, bad tokens, invalid

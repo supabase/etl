@@ -246,43 +246,6 @@ impl ClassifiedError for Error {
 
 impl From<Error> for EtlError {
     fn from(err: Error) -> Self {
-        if matches!(&err, Error::MissingTableColumn { .. } | Error::UnexpectedTableColumn { .. }) {
-            return classified_error(
-                ErrorKind::CorruptedTableSchema,
-                "Snowflake table schema is incompatible",
-                err,
-            );
-        }
-        if matches!(&err, Error::UnsupportedIdentity(_)) {
-            return classified_error(
-                ErrorKind::SourceReplicaIdentityError,
-                "Snowflake source identity is unsupported",
-                err,
-            );
-        }
-        if matches!(&err, Error::UnsupportedLayout(_)) {
-            return classified_error(
-                ErrorKind::DestinationLayoutUnsupported,
-                "Snowflake CDC layout is unsupported",
-                err,
-            );
-        }
-        if matches!(&err, Error::RowTooLarge { .. }) {
-            return classified_error(
-                ErrorKind::UnsupportedValueInDestination,
-                "Snowflake cannot accept a row of this size",
-                err,
-            );
-        }
-
-        if matches!(&err, Error::NullJsonArrayElement { .. }) {
-            return classified_error(
-                ErrorKind::NullValuesNotSupportedInArrayInDestination,
-                "Snowflake cannot preserve SQL NULL elements in JSON arrays",
-                err,
-            );
-        }
-
         let (kind, description) = match &err {
             Error::HttpTransport(_) => {
                 (ErrorKind::DestinationError, "Snowflake HTTP transport error")
@@ -309,17 +272,27 @@ impl From<Error> for EtlError {
             Error::CompanionViewUnsupported { .. } => {
                 (ErrorKind::ConfigError, "Snowflake companion view no longer supports the schema")
             }
-            Error::MissingTableColumn { .. }
-            | Error::UnexpectedTableColumn { .. }
-            | Error::UnsupportedIdentity(_)
-            | Error::UnsupportedLayout(_)
-            | Error::RowTooLarge { .. }
-            | Error::NullJsonArrayElement { .. } => {
-                unreachable!("schema and unsupported value errors return above")
+            Error::MissingTableColumn { .. } | Error::UnexpectedTableColumn { .. } => {
+                (ErrorKind::CorruptedTableSchema, "Snowflake table schema is incompatible")
             }
+            Error::UnsupportedIdentity(_) => {
+                (ErrorKind::SourceReplicaIdentityError, "Snowflake source identity is unsupported")
+            }
+            Error::UnsupportedLayout(_) => {
+                (ErrorKind::DestinationLayoutUnsupported, "Snowflake CDC layout is unsupported")
+            }
+            Error::RowTooLarge { .. } => (
+                ErrorKind::UnsupportedValueInDestination,
+                "Snowflake cannot accept a row of this size",
+            ),
+            Error::NullJsonArrayElement { .. } => (
+                ErrorKind::NullValuesNotSupportedInArrayInDestination,
+                "Snowflake cannot preserve SQL NULL elements in JSON arrays",
+            ),
             Error::DatabaseNotFound(_) => (ErrorKind::ConfigError, "Snowflake database not found"),
             Error::SchemaNotFound { .. } => (ErrorKind::ConfigError, "Snowflake schema not found"),
         };
+
         classified_error(kind, description, err)
     }
 }
@@ -445,23 +418,51 @@ mod tests {
         let error =
             Error::NullJsonArrayElement { column_name: "payload".to_owned(), element_index: 2 };
         assert_eq!(error.append_failure_type(), AppendFailureType::Encoding);
+
         let error = EtlError::from(error);
+
         assert_eq!(error.kind(), ErrorKind::NullValuesNotSupportedInArrayInDestination);
-        assert!(std::error::Error::source(&error).is_some());
+        assert_eq!(
+            error.description(),
+            Some("Snowflake cannot preserve SQL NULL elements in JSON arrays")
+        );
+        assert_eq!(error.retryability(), Retryability::Permanent);
+        let source = error.source().unwrap().downcast_ref::<Error>().unwrap();
+        assert!(matches!(
+            source,
+            Error::NullJsonArrayElement { column_name, element_index }
+                if column_name == "payload" && *element_index == 2
+        ));
     }
 
+    /// Missing and unexpected columns retain their typed cause and
+    /// classification.
     #[test]
     fn table_schema_error_is_preserved() {
-        let error = Error::MissingTableColumn {
-            table_name: "events".to_owned(),
-            column_name: "id".to_owned(),
-        };
+        for (source, expected_source) in [
+            (
+                Error::MissingTableColumn {
+                    table_name: "events".to_owned(),
+                    column_name: "id".to_owned(),
+                },
+                "Snowflake table 'events' is missing column 'id'",
+            ),
+            (
+                Error::UnexpectedTableColumn {
+                    table_name: "events".to_owned(),
+                    column_name: "extra".to_owned(),
+                },
+                "Snowflake table 'events' has unexpected column 'extra'",
+            ),
+        ] {
+            let error = EtlError::from(source);
 
-        let error = EtlError::from(error);
-        let source = error.source().expect("Snowflake error should be preserved");
-
-        assert_eq!(error.kind(), ErrorKind::CorruptedTableSchema);
-        assert_eq!(source.to_string(), "Snowflake table 'events' is missing column 'id'");
+            assert_eq!(error.kind(), ErrorKind::CorruptedTableSchema);
+            assert_eq!(error.description(), Some("Snowflake table schema is incompatible"));
+            assert_eq!(error.retryability(), Retryability::Permanent);
+            let source = error.source().unwrap().downcast_ref::<Error>().unwrap();
+            assert_eq!(source.to_string(), expected_source);
+        }
     }
 
     #[test]
@@ -479,17 +480,21 @@ mod tests {
             request_limit: 4_194_304,
         };
         assert_eq!(error.append_failure_type(), AppendFailureType::RowTooLarge);
+        let source_description = error.to_string();
         assert_eq!(
-            error.to_string(),
+            source_description,
             "Row for table 42 (update, 3 columns, 13613900 B serialized, largest column payload \
              13613000 B) compresses to at least 5452596 B, over the 4194304 B Snowflake request \
              limit"
         );
 
         let error = EtlError::from(error);
+
         assert_eq!(error.kind(), ErrorKind::UnsupportedValueInDestination);
-        let source = error.source().unwrap();
-        assert!(source.to_string().starts_with("Row for table 42"));
+        assert_eq!(error.description(), Some("Snowflake cannot accept a row of this size"));
+        assert_eq!(error.retryability(), Retryability::Permanent);
+        let source = error.source().unwrap().downcast_ref::<Error>().unwrap();
+        assert_eq!(source.to_string(), source_description);
     }
 
     #[test]
@@ -633,21 +638,29 @@ mod tests {
         assert_eq!(unavailable.retryability(), Retryability::Retryable);
         assert!(unavailable.source().is_some());
         assert_eq!(unauthorized.retryability(), Retryability::Permanent);
-        for (source, kind) in [
+
+        for (source, kind, description) in [
             (
                 Error::UnsupportedIdentity("invalid key".into()),
                 ErrorKind::SourceReplicaIdentityError,
+                "Snowflake source identity is unsupported",
             ),
             (
                 Error::UnsupportedLayout("invalid layout".into()),
                 ErrorKind::DestinationLayoutUnsupported,
+                "Snowflake CDC layout is unsupported",
             ),
         ] {
             assert_eq!(source.retryability(), Retryability::Permanent);
+            let source_description = source.to_string();
+
             let error = EtlError::from(source);
+
             assert_eq!(error.kind(), kind);
+            assert_eq!(error.description(), Some(description));
             assert_eq!(error.retryability(), Retryability::Permanent);
-            assert!(error.source().is_some());
+            let source = error.source().unwrap().downcast_ref::<Error>().unwrap();
+            assert_eq!(source.to_string(), source_description);
         }
     }
 

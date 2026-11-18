@@ -8,8 +8,8 @@ use etl::{
     data::{Cell, Date, OldTableRow, TableRow, Timestamp, UpdatedTableRow},
     destination::{
         Destination, DestinationTableMetadata, DestinationTableSchema, DestinationWriteStatus,
-        DropTableForCopyResult, TableCopyBatchId, WriteEventsDurability, WriteEventsResult,
-        WriteTableRowsResult,
+        DropTableForCopyResult, TableCopyBatchId, UpdateRowRequirement, WriteEventsDurability,
+        WriteEventsResult, WriteTableRowsResult,
     },
     error::{ErrorKind, EtlError, EtlResult, Retryability},
     etl_error,
@@ -17,7 +17,7 @@ use etl::{
     schema::{
         ColumnAlterationKind, ColumnMetadataChange, ColumnPresenceChangeReason, ColumnSchema,
         IdentityType, PgLsn, ReplicatedTableSchema, SchemaDiff, SchemaOperation, SchemaPlan,
-        TableId, TableName, Type, is_array_type,
+        TableId, TableName, Type, is_array_type, partial_update_remediation,
     },
     store::{SchemaStore, StateStore},
     task::{TaskGroup, TaskRegistry},
@@ -2405,8 +2405,9 @@ fn clickhouse_full_update_row(
             format!(
                 "Table '{}' emitted a partial update row: some column values could not be \
                  reconstructed. Writing it would record NULL for the missing columns and \
-                 misrepresent the source.",
-                replicated_table_schema.name()
+                 misrepresent the source. {}",
+                replicated_table_schema.name(),
+                partial_update_remediation(replicated_table_schema.name())
             )
         ));
     };
@@ -2739,6 +2740,12 @@ where
 {
     fn name() -> &'static str {
         etl_config::shared::DestinationKind::ClickHouse.as_str()
+    }
+
+    fn update_row_requirement() -> UpdateRowRequirement {
+        // Every engine stores an update as a complete new row, so the update
+        // must carry every column.
+        UpdateRowRequirement::RequiresFullRows
     }
 
     async fn shutdown(&self) -> EtlResult<()> {
@@ -3552,6 +3559,8 @@ mod tests {
         // THEN: The partial-row error precedes replica identity validation.
         assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
         assert!(error.to_string().contains("partial update row"));
+        // AND: It tells the user the statement that fixes the source table.
+        assert!(error.to_string().contains("`alter table public.users replica identity full;`"));
     }
 
     /// A full update row carrying a NULL array encodes as an empty array.
