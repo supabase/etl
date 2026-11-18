@@ -26,6 +26,7 @@ use etl::{
     schema::{ReplicatedTableSchema, SnapshotId, TableId, TableName, TableSchema},
     store::{StateStore, TableRetryPolicy, TableState, TableStateType, WorkerType},
     test_utils::{
+        cdc_workload::notify_on_commit,
         database::{
             replication_slot_state, spawn_source_database, test_table_name,
             wait_for_replication_slot_flush_lsn,
@@ -714,27 +715,42 @@ async fn table_sync_handover_preserves_decoder_across_post_handoff_noop_ddl() {
 
     finished_copy_notify.notified().await;
 
-    let apply_commits_notify = destination
-        .wait_for_events(vec![EventCondition::AnyCount(
-            EventType::Commit,
-            u64::try_from(catchup_rows).unwrap(),
-        )])
-        .await;
-
     // Rows inserted while the worker is paused after copy must be replayed by
     // table-sync streaming. Both replication connections receive these WAL
     // records: table sync processes its Relation and rows, while apply skips
     // the table-owned messages but still writes each transaction's commit.
     // Acknowledging the apply commits proves that its pgoutput connection has
-    // already sent and cached the table's Relation before handoff.
-    insert_users_data(
-        &mut database,
-        &users_schema.name,
-        copied_rows + 1..=copied_rows + catchup_rows,
-    )
-    .await;
+    // already sent and cached the table's Relation before handoff. Wait for
+    // these transactions by xid: PostgreSQL 14 also streams empty transactions
+    // such as autovacuum's catalog ANALYZE, so a global commit count can skip
+    // past its target within one batch.
+    let mut catchup_commit_notifies = Vec::with_capacity(catchup_rows);
+    for i in copied_rows + 1..=copied_rows + catchup_rows {
+        let transaction = database.begin_transaction().await;
+        transaction
+            .insert_values(
+                users_schema.name.clone(),
+                &["name", "age"],
+                &[&format!("user_{i}"), &i32::try_from(i).unwrap()],
+            )
+            .await
+            .unwrap();
+        let xid: i64 = transaction
+            .client
+            .as_ref()
+            .unwrap()
+            .query_one("select (pg_current_xact_id()::text::bigint % 4294967296)::bigint", &[])
+            .await
+            .unwrap()
+            .get(0);
+        catchup_commit_notifies
+            .push(notify_on_commit(&destination, u32::try_from(xid).unwrap()).await);
+        transaction.commit_transaction().await;
+    }
 
-    apply_commits_notify.notified().await;
+    for catchup_commit_notify in catchup_commit_notifies {
+        catchup_commit_notify.notified().await;
+    }
 
     let all_rows_notify = destination
         .wait_for_all_events(vec![EventCondition::TableCount(
