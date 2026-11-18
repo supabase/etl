@@ -1025,7 +1025,7 @@ mod tests {
 
     use super::{PostgresStore, TRANSACTION_TIMEOUT};
     use crate::{
-        config::PgConnectionConfig,
+        config::{PgConnectionConfig, TlsConfig},
         error::{ErrorKind, Retryability},
         replication::WorkerType,
         store::StateStore,
@@ -1038,6 +1038,9 @@ mod tests {
     /// Longer than [`TEST_TRANSACTION_TIMEOUT`]; reaching it means the stalled
     /// transaction was never bounded.
     const STALL_LIMIT: Duration = Duration::from_secs(10);
+
+    /// PostgreSQL `SSLRequest`: length 8 followed by code 80877103.
+    const SSL_REQUEST: [u8; 8] = [0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f];
 
     /// Delivery state shared by every proxied connection.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1089,20 +1092,32 @@ mod tests {
     }
 
     /// Starts a TCP proxy to `upstream` whose delivery follows `link`.
+    ///
+    /// The proxy matches `BEGIN` in the byte stream, so it declines TLS
+    /// itself and the client, preferring but not requiring TLS, continues in
+    /// plaintext. Upstream test servers accept plaintext even with TLS on.
     async fn spawn_proxy(
         upstream: &PgConnectionConfig,
         link: Arc<watch::Sender<Link>>,
     ) -> PgConnectionConfig {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let mut proxied = upstream.clone();
-        // Keep the original host for TLS verification and dial the proxy.
+        proxied.tls = TlsConfig::disabled();
         proxied.hostaddr = Some(IpAddr::V4(Ipv4Addr::LOCALHOST));
         proxied.port = listener.local_addr().unwrap().port();
 
         let upstream_address = (upstream.host.clone(), upstream.port);
         tokio::spawn(async move {
-            while let Ok((client, _)) = listener.accept().await {
-                let server = TcpStream::connect(upstream_address.clone()).await.unwrap();
+            while let Ok((mut client, _)) = listener.accept().await {
+                let mut server = TcpStream::connect(upstream_address.clone()).await.unwrap();
+                let mut first = [0; 8];
+                client.read_exact(&mut first).await.unwrap();
+                if first == SSL_REQUEST {
+                    client.write_all(b"N").await.unwrap();
+                } else {
+                    server.write_all(&first).await.unwrap();
+                }
+
                 let (client_read, client_write) = client.into_split();
                 let (server_read, server_write) = server.into_split();
                 tokio::spawn(pump(client_read, server_write, Arc::clone(&link), true));
@@ -1117,7 +1132,7 @@ mod tests {
     /// fails with a retryable connection error, and the store recovers once
     /// replies resume.
     #[tokio::test(flavor = "multi_thread")]
-    async fn unresponsive_database_fails_transaction_and_store_recovers() {
+    async fn exclusive_unresponsive_database_fails_transaction_and_store_recovers() {
         let database = spawn_source_database().await;
         let link = Arc::new(watch::Sender::new(Link::Open));
         let config = spawn_proxy(&database.config, Arc::clone(&link)).await;
