@@ -5254,15 +5254,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn probe_iso_interval() {
-        let conn = Connection::open_in_memory().unwrap();
-        let result = conn.query_row(&validate_expire_snapshots_older_than_sql("P7D"), [], |row| {
-            row.get::<_, ExpireSnapshotsRetention>(1)
-        });
-        println!("P7D => {result:?}");
-    }
-
     fn make_schema(table_id: u32, schema: &str, table: &str) -> TableSchema {
         TableSchema::new(
             TableId::new(table_id),
