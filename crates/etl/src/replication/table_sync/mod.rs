@@ -474,6 +474,7 @@ where
     // apply worker can make that transition.
     let mut inner = table_sync_worker_state.lock().await;
     inner.set_and_store(TableState::SyncWait { lsn: start_lsn }, &store).await?;
+
     let result =
         inner.wait_for_state_type(&[TableStateType::Catchup], shutdown_token.clone()).await;
 
