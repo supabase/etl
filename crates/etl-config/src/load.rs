@@ -440,6 +440,7 @@ mod tests {
         assert_eq!(loaded_config, original_config);
     }
 
+    /// Also verifies fallback to ./configuration when APP_CONFIG_DIR is unset.
     #[test]
     fn roundtrip_json() {
         test_roundtrip_with_extension("json");
@@ -511,37 +512,5 @@ mod tests {
         unsafe {
             std::env::remove_var("APP_CONFIG_DIR");
         }
-    }
-
-    #[test]
-    fn fallback_to_current_dir_when_app_config_dir_not_set() {
-        let _guard = env_lock().lock().unwrap();
-
-        let temp_dir = TempDir::new().unwrap();
-        let config_dir = temp_dir.path().join("configuration");
-        fs::create_dir(&config_dir).unwrap();
-
-        let original_config = create_mock_config();
-
-        // Write base and environment files
-        let base_file = config_dir.join("base.json");
-        fs::write(&base_file, "{}").unwrap();
-
-        let env_file = config_dir.join("prod.json");
-        let env_content = serde_json::to_string_pretty(&original_config).unwrap();
-        fs::write(&env_file, env_content).unwrap();
-
-        // Ensure APP_CONFIG_DIR is not set
-        unsafe {
-            std::env::remove_var("APP_CONFIG_DIR");
-            std::env::set_var("APP_ENVIRONMENT", "prod");
-        }
-        std::env::set_current_dir(temp_dir.path()).unwrap();
-
-        // Load config - should fallback to current_dir/configuration
-        let loaded_config: ApplicationConfig = load_config().unwrap();
-
-        // Verify the loaded config matches the original
-        assert_eq!(loaded_config, original_config);
     }
 }

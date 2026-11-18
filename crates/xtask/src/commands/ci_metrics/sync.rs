@@ -53,6 +53,9 @@ const MAX_RETRY_WAIT: Duration = Duration::from_secs(60);
 const BENCHMARK_WORKFLOW: &str = ".github/workflows/benchmark.yml";
 /// Workflow whose runs upload test manifests, from its reusable test jobs.
 const TEST_WORKFLOW: &str = ".github/workflows/ci.yml";
+/// Workflow whose nightly runs upload test manifests of the full suite with a
+/// raised property budget, from the same reusable test job.
+const PROPERTY_TEST_WORKFLOW: &str = ".github/workflows/property-tests.yml";
 /// Workflow whose runs upload dependency audit manifests.
 const AUDIT_WORKFLOW: &str = ".github/workflows/dependency-audit.yml";
 /// Code-scanning alert states listed separately, which does not rely on the
@@ -884,11 +887,12 @@ impl TestScope {
 /// set comparison baselines and come only from the benchmark workflow as
 /// committed to `main` (scheduled, or dispatched or pushed on `main`). Audit
 /// manifests report the state of `main`'s dependencies and come only from the
-/// dependency audit workflow on `main`, the same way. Test manifests come from
-/// CI runs on `main` and from same-repository pull requests and merge queue
+/// dependency audit workflow on `main`, the same way. CI test manifests come
+/// from runs on `main` and from same-repository pull requests and merge queue
 /// runs, where re-run flakes happen; a forged one can only distort flaky-test
-/// statistics, and only its failures are stored. Forks are never trusted, and
-/// runs are read once completed.
+/// statistics, and only its failures are stored. Property-test manifests come
+/// only from the property-test workflow on `main`, so their history describes
+/// `main`'s code. Forks are never trusted, and runs are read once completed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ManifestTrust {
     benchmarks: bool,
@@ -907,14 +911,12 @@ impl ManifestTrust {
             "workflow_dispatch" | "push" => run.head_branch.as_deref() == Some("main"),
             _ => false,
         };
-        let tests = if run.workflow_path() != TEST_WORKFLOW {
-            None
-        } else if from_main {
-            Some(TestScope::All)
-        } else if matches!(run.event.as_str(), "pull_request" | "merge_group") {
-            Some(TestScope::Failures)
-        } else {
-            None
+        let tests = match run.workflow_path() {
+            TEST_WORKFLOW | PROPERTY_TEST_WORKFLOW if from_main => Some(TestScope::All),
+            TEST_WORKFLOW if matches!(run.event.as_str(), "pull_request" | "merge_group") => {
+                Some(TestScope::Failures)
+            }
+            _ => None,
         };
         Self {
             benchmarks: from_main && run.workflow_path() == BENCHMARK_WORKFLOW,
@@ -1071,6 +1073,7 @@ fn test_row(
     }
 
     let coverage = parsed.coverage();
+    let property_budget_secs = parsed.property_budget_secs();
     let mut tests = parsed.into_tests();
     let total = tests.len();
     let failed = tests.iter().filter(|test| test.status() == TestStatus::Failed).count();
@@ -1087,6 +1090,7 @@ fn test_row(
         commit_sha: run.head_sha.clone(),
         payload: json!({
             "coverage": coverage,
+            "property_budget_secs": property_budget_secs,
             "tests": total,
             "failed": failed,
             "stored": scope.as_str(),
@@ -1289,6 +1293,7 @@ mod tests {
         let ci = TEST_WORKFLOW;
         let bench = BENCHMARK_WORKFLOW;
         let audit = AUDIT_WORKFLOW;
+        let property = PROPERTY_TEST_WORKFLOW;
 
         assert_eq!(trust(&run(ci, "push", "main", same)), (false, Some(TestScope::All), false));
         assert_eq!(
@@ -1324,6 +1329,20 @@ mod tests {
         assert_eq!(trust(&run(audit, "workflow_dispatch", "main", same)), (false, None, true));
         assert_eq!(trust(&run(audit, "pull_request", "feature", same)), (false, None, false));
         assert_eq!(trust(&run(audit, "workflow_dispatch", "feature", same)), (false, None, false));
+
+        assert_eq!(
+            trust(&run(property, "schedule", "main", same)),
+            (false, Some(TestScope::All), false)
+        );
+        assert_eq!(
+            trust(&run(property, "workflow_dispatch", "main", same)),
+            (false, Some(TestScope::All), false)
+        );
+        assert_eq!(
+            trust(&run(property, "workflow_dispatch", "feature", same)),
+            (false, None, false)
+        );
+        assert_eq!(trust(&run(property, "pull_request", "feature", same)), (false, None, false));
 
         let mut running = run(ci, "push", "main", same);
         running.status = "in_progress".to_owned();

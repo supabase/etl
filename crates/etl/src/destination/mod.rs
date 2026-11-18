@@ -22,7 +22,7 @@ pub use async_result::{
     DestinationWriteStatus, DropTableForCopyResult, WriteEventsDurability, WriteEventsResult,
     WriteTableRowsResult,
 };
-pub use base::Destination;
+pub use base::{Destination, UpdateRowRequirement};
 pub use capabilities::PipelineDestination;
 pub use metadata::{DestinationTableMetadata, DestinationTableSchema};
 pub use table_copy::{TableCopyAttemptId, TableCopyBatchId};

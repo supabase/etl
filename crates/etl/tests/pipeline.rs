@@ -1999,9 +1999,23 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
         database.create_table(table_2.clone(), true, &[("value", "int4 not null")]).await.unwrap();
     database.insert_values(table_2.clone(), &["value"], &[&1_i32]).await.unwrap();
 
-    // Wait for the events to come in from the new table to make sure the
-    // pipeline reacts to them gracefully even if they are not replicated.
-    sleep(Duration::from_secs(2)).await;
+    // A later marker on the ready table proves apply consumed the new table's
+    // WAL.
+    let marker_name = "apply_progress_marker";
+    let marker_notify = destination
+        .notify_on_events(move |events| {
+            events.iter().any(|event| {
+                matches!(event, Event::Insert(insert)
+                    if insert.replicated_table_schema.id() == table_1_id
+                        && matches!(insert.table_row.values().get(1), Some(Cell::String(name))
+                            if name == marker_name))
+            })
+        })
+        .await;
+
+    database.insert_values(table_1.clone(), &["name"], &[&marker_name]).await.unwrap();
+
+    marker_notify.notified().await;
 
     // Shutdown and verify no errors occurred.
     pipeline.shutdown_and_wait().await.unwrap();
@@ -2018,7 +2032,7 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
     let events = destination.get_events().await;
     let grouped_events = group_events_by_type_and_table_id(&events);
     let insert_events = grouped_events.get(&(EventType::Insert, table_1_id)).unwrap();
-    assert_eq!(insert_events.len(), 1);
+    assert_eq!(insert_events.len(), 2);
 
     // We restart the pipeline and verify that the new table is now processed.
     let mut pipeline = create_pipeline(

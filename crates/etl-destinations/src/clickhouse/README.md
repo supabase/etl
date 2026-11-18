@@ -189,7 +189,11 @@ identity.
 Postgres omits unchanged TOASTed (large) values from update rows. ETL fills
 them from the old row image, which only `REPLICA IDENTITY FULL` guarantees;
 when it cannot, it rejects the update instead of writing `NULL`. Use `FULL` for
-tables with large columns.
+tables with large columns. Before copying such a table, ETL logs a warning with
+the `alter table ... replica identity full;` statement, and the rejection error
+repeats it. PostgreSQL does not cascade the statement to partitions, so run it
+on each partition of a partitioned table. Changing the identity only affects
+later changes, so after a rejection, resynchronize the table.
 
 ## Upgrading existing tables
 
