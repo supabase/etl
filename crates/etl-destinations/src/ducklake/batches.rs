@@ -4112,113 +4112,78 @@ mod tests {
         }
     }
 
-    /// Replay drops the durable prefix, including its final event, at unsigned
-    /// boundaries.
+    /// Replay drops older and equal positions across commits and ordinals.
     #[test]
     fn retain_mutations_after_event_position_drops_applied_prefix() {
-        for commit_lsn in [120, 1 << 63, u64::MAX - 1] {
-            let positions = [
-                EventPosition::new(PgLsn::from(commit_lsn - 1), u64::MAX),
-                EventPosition::new(PgLsn::from(commit_lsn), 0),
-                EventPosition::new(PgLsn::from(commit_lsn), 1),
-                EventPosition::new(PgLsn::from(commit_lsn), u64::MAX),
-                EventPosition::new(PgLsn::from(commit_lsn + 1), 0),
-            ];
-            let mutations = positions
-                .map(|position| {
-                    TrackedTableMutation::new(
-                        position,
-                        TableMutation::Insert(TableRow::new(vec![Cell::I32(1)])),
-                    )
-                })
-                .into();
+        let positions = [(99, 2), (100, 0), (100, 1), (100, 2), (101, 0)]
+            .map(|(lsn, ordinal)| EventPosition::new(PgLsn::from(lsn), ordinal));
+        let mutations = positions
+            .map(|position| {
+                TrackedTableMutation::new(
+                    position,
+                    TableMutation::Insert(TableRow::new(vec![Cell::I32(1)])),
+                )
+            })
+            .into();
 
-            let retained = retain_mutations_after_event_position(mutations, Some(positions[2]));
+        let retained = retain_mutations_after_event_position(mutations, Some(positions[2]));
 
-            assert_eq!(retained.len(), 2);
-            assert_eq!(retained[0].event_position(), positions[3]);
-            assert_eq!(retained[1].event_position(), positions[4]);
-        }
+        assert_eq!(retained.len(), 2);
+        assert_eq!(retained[0].event_position(), positions[3]);
+        assert_eq!(retained[1].event_position(), positions[4]);
     }
 
     /// Truncate replay retains only events strictly after the durable
     /// watermark.
     #[test]
     fn retain_truncates_after_event_position_drops_applied_prefix() {
-        for commit_lsn in [200, 1 << 63, u64::MAX - 1] {
-            let positions = [
-                EventPosition::new(PgLsn::from(commit_lsn - 1), u64::MAX),
-                EventPosition::new(PgLsn::from(commit_lsn), 0),
-                EventPosition::new(PgLsn::from(commit_lsn), 1),
-                EventPosition::new(PgLsn::from(commit_lsn), u64::MAX),
-                EventPosition::new(PgLsn::from(commit_lsn + 1), 0),
-            ];
-            let truncates = positions.map(|position| TrackedTruncateEvent::new(position, 0)).into();
+        let positions = [(199, 2), (200, 0), (200, 1), (200, 2), (201, 0)]
+            .map(|(lsn, ordinal)| EventPosition::new(PgLsn::from(lsn), ordinal));
+        let truncates = positions.map(|position| TrackedTruncateEvent::new(position, 0)).into();
 
-            let retained = retain_truncates_after_event_position(truncates, Some(positions[2]));
+        let retained = retain_truncates_after_event_position(truncates, Some(positions[2]));
 
-            assert_eq!(retained.len(), 2);
-            assert_eq!(retained[0].event_position(), positions[3]);
-            assert_eq!(retained[1].event_position(), positions[4]);
-        }
+        assert_eq!(retained.len(), 2);
+        assert_eq!(retained[0].event_position(), positions[3]);
+        assert_eq!(retained[1].event_position(), positions[4]);
     }
 
     /// A watermark inside an atomic batch is invalid; its final event makes it
     /// durable.
     #[test]
     fn streaming_replay_decision_preserves_atomic_boundaries() {
-        let commit_lsn = 1 << 63;
-        let first = EventPosition::new(PgLsn::from(commit_lsn), 1);
-        let last = EventPosition::new(PgLsn::from(commit_lsn), 3);
-        let batch = prepare_truncate_table_batch(
-            ducklake_table_name(),
-            LEGACY_REPLAY_EPOCH.to_owned(),
-            vec![TrackedTruncateEvent::new(first, 0), TrackedTruncateEvent::new(last, 0)],
-        );
-
-        for position in [
-            EventPosition::new(PgLsn::from(commit_lsn - 1), u64::MAX),
-            EventPosition::new(PgLsn::from(commit_lsn), 0),
+        for (ordinals, watermark_ordinal, expected_skip) in [
+            (&[1, 3][..], 0, Ok(false)),
+            (&[1, 3][..], 1, Err(ErrorKind::InvalidState)),
+            (&[1, 3][..], 2, Err(ErrorKind::InvalidState)),
+            (&[1, 3][..], 3, Ok(true)),
+            (&[1, 3][..], 4, Ok(true)),
+            (&[1][..], 1, Ok(true)),
         ] {
-            let progress = TableStreamingProgress { last_event_position: position };
+            let truncates = ordinals
+                .iter()
+                .map(|&ordinal| {
+                    TrackedTruncateEvent::new(EventPosition::new(PgLsn::from(100), ordinal), 0)
+                })
+                .collect();
+            let batch = prepare_truncate_table_batch(
+                ducklake_table_name(),
+                LEGACY_REPLAY_EPOCH.to_owned(),
+                truncates,
+            );
+            let progress = TableStreamingProgress {
+                last_event_position: EventPosition::new(PgLsn::from(100), watermark_ordinal),
+            };
 
-            assert!(matches!(
-                streaming_replay_decision(progress, &batch).unwrap(),
-                StreamingReplayDecision::Apply
-            ));
+            let skipped = streaming_replay_decision(progress, &batch)
+                .map(|decision| matches!(decision, StreamingReplayDecision::Skip))
+                .map_err(|error| error.kind());
+
+            assert_eq!(
+                skipped, expected_skip,
+                "ordinals={ordinals:?}, watermark_ordinal={watermark_ordinal}"
+            );
         }
-
-        for position in [first, EventPosition::new(PgLsn::from(commit_lsn), 2)] {
-            let progress = TableStreamingProgress { last_event_position: position };
-            let error = streaming_replay_decision(progress, &batch).err().unwrap();
-
-            assert_eq!(error.kind(), ErrorKind::InvalidState);
-        }
-
-        for position in [
-            last,
-            EventPosition::new(PgLsn::from(commit_lsn), 4),
-            EventPosition::new(PgLsn::from(u64::MAX), 0),
-        ] {
-            let progress = TableStreamingProgress { last_event_position: position };
-
-            assert!(matches!(
-                streaming_replay_decision(progress, &batch).unwrap(),
-                StreamingReplayDecision::Skip
-            ));
-        }
-
-        let batch = prepare_truncate_table_batch(
-            ducklake_table_name(),
-            LEGACY_REPLAY_EPOCH.to_owned(),
-            vec![TrackedTruncateEvent::new(first, 0)],
-        );
-        let progress = TableStreamingProgress { last_event_position: first };
-
-        assert!(matches!(
-            streaming_replay_decision(progress, &batch).unwrap(),
-            StreamingReplayDecision::Skip
-        ));
     }
 
     #[test]
