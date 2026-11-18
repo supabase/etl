@@ -38,7 +38,7 @@ use crate::{
     schema::{ReplicatedTableSchema, TableId, TableName},
     store::PipelineStore,
     test_utils::{
-        database::{replication_slot_state, test_table_name},
+        database::{current_xid as query_current_xid, replication_slot_state, test_table_name},
         materialize::{FromTableRow, materialize_events},
         notify::TimedNotify,
         pipeline::PipelineBuilder,
@@ -859,13 +859,9 @@ pub async fn wait_for_sync_slot_removal(
 
 /// Returns the current transaction ID truncated to pgoutput's 32 bits.
 async fn current_xid(client: &Client) -> Result<u32, TestCaseError> {
-    let row = client
-        .query_one("select (pg_current_xact_id()::text::bigint % 4294967296)::bigint", &[])
+    query_current_xid(client)
         .await
-        .map_err(|error| TestCaseError::fail(format!("failed to read xid: {error}")))?;
-    let xid: i64 = row.get(0);
-
-    Ok(u32::try_from(xid).expect("xid modulo 2^32 should fit in u32"))
+        .map_err(|error| TestCaseError::fail(format!("failed to read xid: {error}")))
 }
 
 /// Executes one SQL batch and maps failures.

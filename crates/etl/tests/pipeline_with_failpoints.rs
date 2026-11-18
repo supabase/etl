@@ -28,7 +28,7 @@ use etl::{
     test_utils::{
         cdc_workload::notify_on_commit,
         database::{
-            replication_slot_state, spawn_source_database, test_table_name,
+            current_xid, replication_slot_state, spawn_source_database, test_table_name,
             wait_for_replication_slot_flush_lsn,
         },
         event::{EventCondition, group_events_by_type_and_table_id},
@@ -735,16 +735,8 @@ async fn table_sync_handover_preserves_decoder_across_post_handoff_noop_ddl() {
             )
             .await
             .unwrap();
-        let xid: i64 = transaction
-            .client
-            .as_ref()
-            .unwrap()
-            .query_one("select (pg_current_xact_id()::text::bigint % 4294967296)::bigint", &[])
-            .await
-            .unwrap()
-            .get(0);
-        catchup_commit_notifies
-            .push(notify_on_commit(&destination, u32::try_from(xid).unwrap()).await);
+        let xid = current_xid(transaction.client.as_ref().unwrap()).await.unwrap();
+        catchup_commit_notifies.push(notify_on_commit(&destination, xid).await);
         transaction.commit_transaction().await;
     }
 
