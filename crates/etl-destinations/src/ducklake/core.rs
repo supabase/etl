@@ -8,6 +8,7 @@ use std::{
     time::Duration,
 };
 
+use duckdb::types::{FromSql, FromSqlError, FromSqlResult, ValueRef};
 use etl::{
     data::{OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
     destination::{
@@ -42,7 +43,7 @@ use etl_maintenance::{
         namespace_version_check_sql, namespaced_tables_query, table_namespace_filter,
     },
 };
-use jiff::{Span, Timestamp, civil::DateTime, tz::TimeZone};
+use jiff::{SignedDuration, Span, Timestamp, civil::DateTime, tz::TimeZone};
 use metrics::{counter, gauge};
 use parking_lot::{Mutex, RwLock as ParkingLotRwLock};
 use pg_escape::{quote_identifier as quote_postgres_identifier, quote_literal};
@@ -247,16 +248,43 @@ pub(super) fn is_create_table_conflict(error: &duckdb::Error, table_name: &str) 
         && message.contains(table_name)
 }
 
-/// Parses `expire_snapshots_older_than` into seconds for cheap metadata-only
-/// trigger sampling.
+/// Snapshot-retention interval as parsed by DuckDB's interval cast.
 ///
-/// Accepts ISO 8601 and friendly durations such as `7 days` or `2h 30min`.
-/// Calendar units count back from `now`, matching DuckLake's `now() - interval`
+/// DuckDB accepts units in any order, repeated units, and mixed signs, so
+/// DuckDB is the only parser that agrees with startup validation and the
 /// expiry cutoff.
-fn expire_snapshots_retention_seconds(value: &str, now: DateTime) -> Option<i64> {
-    let span: Span = value.parse().ok()?;
-    let cutoff = now.checked_sub(span).ok()?;
-    Some(now.duration_since(cutoff).as_secs())
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExpireSnapshotsRetention {
+    months: i32,
+    days: i32,
+    nanos: i64,
+}
+
+impl ExpireSnapshotsRetention {
+    /// Returns the seconds between `now` and DuckLake's `now() - interval`
+    /// expiry cutoff, or `None` if the cutoff is outside the supported range.
+    ///
+    /// Subtracts months, then days, then time, like DuckDB timestamp
+    /// arithmetic, so calendar months and years keep their real length.
+    fn seconds_before(self, now: DateTime) -> Option<i64> {
+        let cutoff = now
+            .checked_sub(Span::new().try_months(self.months).ok()?)
+            .ok()?
+            .checked_sub(Span::new().try_days(self.days).ok()?)
+            .ok()?
+            .checked_sub(SignedDuration::from_nanos(self.nanos))
+            .ok()?;
+        Some(now.duration_since(cutoff).as_secs())
+    }
+}
+
+impl FromSql for ExpireSnapshotsRetention {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        match value {
+            ValueRef::Interval { months, days, nanos } => Ok(Self { months, days, nanos }),
+            _ => Err(FromSqlError::InvalidType),
+        }
+    }
 }
 
 /// Returns why file maintenance should run for a table.
@@ -621,6 +649,8 @@ pub struct DuckLakeDestination<S> {
     /// Immutable source namespace for this destination.
     table_namespace: Option<String>,
     expire_snapshots_older_than: Arc<str>,
+    /// Parsed `expire_snapshots_older_than` used for trigger sampling.
+    expire_snapshots_retention: ExpireSnapshotsRetention,
     /// Direct connection shared by foreground catalog queries and Postgres
     /// coordination.
     direct_pg_pool: PgPool,
@@ -2104,12 +2134,14 @@ where
         let expire_snapshots_validation_sql =
             validate_expire_snapshots_older_than_sql(expire_snapshots_older_than.as_ref());
         let expire_snapshots_older_than_for_error = Arc::clone(&expire_snapshots_older_than);
-        run_duckdb_blocking(
+        let expire_snapshots_retention = run_duckdb_blocking(
             Arc::clone(&pool),
             Arc::clone(&blocking_slots),
-            move |conn| -> EtlResult<()> {
-                let retention_is_safe: bool = conn
-                    .query_row(&expire_snapshots_validation_sql, [], |row| row.get(0))
+            move |conn| -> EtlResult<ExpireSnapshotsRetention> {
+                let (retention_is_safe, retention): (bool, ExpireSnapshotsRetention) = conn
+                    .query_row(&expire_snapshots_validation_sql, [], |row| {
+                        Ok((row.get(0)?, row.get(1)?))
+                    })
                     .map_err(|source| {
                         classified_error_with_detail(
                             ErrorKind::ConfigError,
@@ -2131,7 +2163,7 @@ where
                         )
                     ));
                 }
-                Ok(())
+                Ok(retention)
             },
         )
         .await?;
@@ -2214,6 +2246,7 @@ where
             metadata_schema: Arc::clone(&metadata_schema),
             table_namespace,
             expire_snapshots_older_than: Arc::clone(&expire_snapshots_older_than),
+            expire_snapshots_retention,
             direct_pg_pool: direct_pg_pool.clone(),
             metadata_pg_pool: metadata_pg_pool.clone(),
             table_sorting,
@@ -4608,7 +4641,7 @@ where
         .await?;
 
         let now = Timestamp::now().to_zoned(TimeZone::UTC).datetime();
-        match expire_snapshots_retention_seconds(self.expire_snapshots_older_than.as_ref(), now) {
+        match self.expire_snapshots_retention.seconds_before(now) {
             Some(retention_seconds) => {
                 operations.expire_snapshots = catalog_metrics.snapshots_total > 1
                     && catalog_metrics.oldest_snapshot_age_seconds >= retention_seconds;
@@ -4634,8 +4667,8 @@ where
                 warn!(
                     metadata_schema = %self.metadata_schema,
                     expire_snapshots_older_than = %self.expire_snapshots_older_than,
-                    "ducklake could not parse expire_snapshots_older_than for external maintenance \
-                     trigger sampling: metadata_schema={}, expire_snapshots_older_than={}",
+                    "ducklake could not compute expire_snapshots_older_than cutoff for external \
+                     maintenance trigger sampling: metadata_schema={}, expire_snapshots_older_than={}",
                     self.metadata_schema,
                     self.expire_snapshots_older_than
                 );
@@ -5183,17 +5216,37 @@ mod tests {
         }
     }
 
+    /// Trigger sampling must agree with DuckDB's `now() - interval` cutoff for
+    /// every interval startup validation accepts, including out-of-order,
+    /// repeated, mixed-sign, and calendar units.
     #[test]
-    fn expire_snapshots_retention_seconds_counts_calendar_units_back_from_now() {
+    fn expire_snapshots_retention_matches_duckdb_cutoff() {
+        let conn = Connection::open_in_memory().unwrap();
         let now = date(2026, 3, 31).at(12, 0, 0, 0);
 
-        assert_eq!(expire_snapshots_retention_seconds("7 days", now), Some(604_800));
-        assert_eq!(expire_snapshots_retention_seconds("2h 30min", now), Some(9_000));
-        assert_eq!(expire_snapshots_retention_seconds("P1W", now), Some(604_800));
-        // March 31 minus one month clamps to February 28, 31 days earlier.
-        assert_eq!(expire_snapshots_retention_seconds("1 month", now), Some(2_678_400));
-        assert_eq!(expire_snapshots_retention_seconds("1 year", now), Some(31_536_000));
-        assert_eq!(expire_snapshots_retention_seconds("bad interval", now), None);
+        for value in [
+            "7 days",
+            "12 hours 1 day",
+            "1 day 1 day",
+            "2 days -12 hours",
+            "1 month",
+            "1 year",
+            "1 year 2 months -3 days 04:05:06",
+        ] {
+            let retention: ExpireSnapshotsRetention = conn
+                .query_row(&validate_expire_snapshots_older_than_sql(value), [], |row| row.get(1))
+                .unwrap();
+            let expected: i64 = conn
+                .query_row(
+                    "select cast(epoch(timestamp '2026-03-31 12:00:00') - epoch(timestamp \
+                     '2026-03-31 12:00:00' - cast(? as interval)) as bigint)",
+                    [value],
+                    |row| row.get(0),
+                )
+                .unwrap();
+
+            assert_eq!(retention.seconds_before(now), Some(expected), "retention: {value}");
+        }
     }
 
     fn make_schema(table_id: u32, schema: &str, table: &str) -> TableSchema {
