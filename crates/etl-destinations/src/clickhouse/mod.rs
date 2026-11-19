@@ -3,6 +3,7 @@
 pub mod benchmarking;
 pub mod client;
 mod core;
+mod diagnostics;
 mod encoding;
 mod metrics;
 mod network;

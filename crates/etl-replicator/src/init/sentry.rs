@@ -34,6 +34,12 @@ pub(crate) fn init(config: &ReplicatorConfig) -> ReplicatorResult<Option<ClientI
 
     sentry::configure_scope(|scope| {
         scope.set_tag("service", "replicator");
+        scope.set_tag("pipeline_id", &config.pipeline.id);
+
+        // Not `project`, which clashes with Sentry's `project` search key.
+        if let Some(project_ref) = config.project_ref() {
+            scope.set_tag("project_ref", project_ref);
+        }
 
         let version = std::env::var(APP_VERSION_ENV_NAME);
         if let Ok(version) = version {

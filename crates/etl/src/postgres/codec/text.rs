@@ -396,6 +396,9 @@ where
     Ok(Cell::Array(m(res)))
 }
 
+#[cfg(kani)]
+mod verification;
+
 #[cfg(test)]
 mod tests {
     use chrono::{Datelike, NaiveDateTime, NaiveTime, Timelike};

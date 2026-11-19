@@ -10,10 +10,11 @@ The metrics fall into three groups:
 - DDL metrics: latency and failure counts for `CREATE` / `ALTER` /
   `DROP` / `RENAME` / `TRUNCATE` statements.
 - probe metrics: latency of cheap server round-trips (`SELECT 1`, database
-  existence) and schema lookups against `system.columns`.
+  existence, the startup server status query) and schema lookups against
+  `system.columns`.
 
-All labels are intentionally low-cardinality. `source` is bounded to `copy`
-(initial table sync) and `streaming` (CDC events). `kind` is bounded to the
+All labels are intentionally low-cardinality. `replication_path` is bounded to
+`copy` (initial table sync) and `cdc` (CDC events). `kind` is bounded to the
 fixed set of DDL operation types. `outcome` is bounded to `timeout` and
 `failed`.
 
@@ -53,7 +54,7 @@ committed for a single logical write batch. It exceeds 1 only when
 points to oversized incoming batches that should be split upstream or to a
 `max_bytes_per_insert` that is too low.
 
-All write-path metrics carry the `source` label.
+All write-path metrics carry the `replication_path` label.
 
 How to read them:
 
@@ -90,8 +91,9 @@ Both metrics carry a `kind` label with one of:
 - `etl_clickhouse_connectivity_check_duration_seconds`
 - `etl_clickhouse_schema_query_duration_seconds`
 
-`etl_clickhouse_connectivity_check_duration_seconds` captures `SELECT 1` and
-the `system.databases` existence query. Recorded regardless of outcome.
+`etl_clickhouse_connectivity_check_duration_seconds` captures `SELECT 1`, the
+`system.databases` existence query, and the startup server status query.
+Recorded regardless of outcome.
 Connectivity slowdowns usually lead INSERT slowdowns, so this is a useful
 leading indicator on dashboards.
 

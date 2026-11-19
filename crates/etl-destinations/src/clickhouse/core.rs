@@ -20,11 +20,12 @@ use etl::{
         TableId, TableName, Type, is_array_type, partial_update_remediation,
     },
     store::{SchemaStore, StateStore},
-    task::{TaskGroup, TaskRegistry},
+    task::{TaskGroup, TaskRegistry, abort_and_join},
 };
 use etl_config::shared::ClickHouseEngine;
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::OwnedMutexGuard;
+use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, warn};
 use url::Url;
 
@@ -34,6 +35,7 @@ use crate::{
         client::{
             ClickHouseClient, ClickHouseTableColumn, DdlKind, InsertRowsError, RowBinaryLayout,
         },
+        diagnostics::spawn_server_diagnostics,
         encoding::{CdcColumns, ClickHouseRow, ensure_finite_temporals},
         metrics::{CDC_REPLICATION_PATH, COPY_REPLICATION_PATH, register_metrics},
         schema::{
@@ -808,6 +810,12 @@ pub struct ClickHouseDestination<S> {
     tasks: TaskRegistry,
     /// Per-table ordering of event batches; see [`EventBatchFences`].
     fences: Arc<EventBatchFences>,
+    /// One-shot server diagnostics started by
+    /// [`ClickHouseDestination::start_server_diagnostics`].
+    ///
+    /// Kept apart from `tasks` so diagnostics never fail writes or delay
+    /// table resets. Aborted on shutdown or when the last clone drops.
+    diagnostics: Arc<Mutex<Option<AbortOnDropHandle<()>>>>,
 }
 
 // Manual impl: `S` sits behind `Arc`, so cloning must not require `S: Clone`.
@@ -817,6 +825,7 @@ impl<S> Clone for ClickHouseDestination<S> {
             writer: self.writer.clone(),
             tasks: self.tasks.clone(),
             fences: Arc::clone(&self.fences),
+            diagnostics: Arc::clone(&self.diagnostics),
         }
     }
 }
@@ -1064,6 +1073,7 @@ where
             },
             tasks: TaskRegistry::new(),
             fences: Arc::new(EventBatchFences::new()),
+            diagnostics: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -1090,6 +1100,17 @@ where
         )
         .await?;
         ensure_engine_supported(self.writer.inserter_config.engine, server_version)
+    }
+
+    /// Starts a background task that logs the server's version, uptime,
+    /// request round trip, and deployment kind.
+    ///
+    /// Returns at once: replication does not wait for the task, and its
+    /// failures are logged only. Calling it again replaces and aborts the
+    /// previous task.
+    pub fn start_server_diagnostics(&self) {
+        let diagnostics = spawn_server_diagnostics(self.writer.client.clone());
+        *self.diagnostics.lock() = Some(diagnostics);
     }
 
     /// Writes an initial-copy batch directly to the destination table,
@@ -2749,7 +2770,14 @@ where
     }
 
     async fn shutdown(&self) -> EtlResult<()> {
-        self.tasks.shutdown().await
+        self.tasks.shutdown().await?;
+
+        let diagnostics = self.diagnostics.lock().take();
+        if let Some(diagnostics) = diagnostics {
+            abort_and_join(diagnostics).await?;
+        }
+
+        Ok(())
     }
 
     // The trait methods below use `?` only for lifecycle failures raised
