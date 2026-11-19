@@ -205,7 +205,7 @@ pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<
         // `;` instead of `,`, because its text output itself contains commas.
         Type::BOX_ARRAY => parse_cell_from_postgres_text_array_with_delimiter(
             str,
-            ';',
+            b';',
             |str| Ok(Some(str.to_owned())),
             ArrayCell::String,
         ),
@@ -298,7 +298,7 @@ where
     P: FnMut(&str) -> EtlResult<Option<T>>,
     M: FnOnce(Vec<Option<T>>) -> ArrayCell,
 {
-    parse_cell_from_postgres_text_array_with_delimiter(str, ',', parse, m)
+    parse_cell_from_postgres_text_array_with_delimiter(str, b',', parse, m)
 }
 
 /// Parses Postgres array literal syntax whose elements are separated by
@@ -306,9 +306,12 @@ where
 ///
 /// Postgres separates array elements with the element type's
 /// `pg_type.typdelim`, which is `,` for every built-in type except `box`.
+///
+/// Elements without quotes or escapes are passed to `parse` as slices of
+/// `str`; only quoted or escaped elements are decoded into a scratch buffer.
 fn parse_cell_from_postgres_text_array_with_delimiter<P, M, T>(
     str: &str,
-    delimiter: char,
+    delimiter: u8,
     mut parse: P,
     m: M,
 ) -> EtlResult<Cell>
@@ -326,71 +329,99 @@ where
         bail!(ErrorKind::ConversionError, "Array input missing braces");
     }
 
+    let body = &str[1..(str.len() - 1)];
+    let bytes = body.as_bytes();
     let mut res = vec![];
-    let str = &str[1..(str.len() - 1)];
-    let mut val_str = String::with_capacity(10);
-    let mut in_quotes = false;
-    let mut in_escape = false;
-    let mut val_quoted = false;
-    let mut chars = str.chars();
-    let mut done = str.is_empty();
 
-    while !done {
-        loop {
-            match chars.next() {
-                Some(c) => match c {
-                    c if in_escape => {
-                        val_str.push(c);
-                        in_escape = false;
+    if body.is_empty() {
+        return Ok(Cell::Array(m(res)));
+    }
+
+    // Scratch value for quoted or escaped elements; plain elements borrow from
+    // `body`.
+    let mut element_buffer = String::new();
+    let mut pos = 0;
+
+    loop {
+        let element_start = pos;
+        // First unbuffered byte after the last quote or escape. Quotes,
+        // escapes, and delimiters are ASCII, so these offsets stay on
+        // UTF-8 boundaries.
+        let mut literal_start = element_start;
+        let mut buffered = false;
+        let mut in_quotes = false;
+        let mut quoted = false;
+        let mut unterminated_escape = false;
+
+        let element_end = loop {
+            let Some(&byte) = bytes.get(pos) else {
+                break pos;
+            };
+
+            match byte {
+                b'"' | b'\\' => {
+                    if !buffered {
+                        element_buffer.clear();
+                        buffered = true;
                     }
-                    '"' => {
-                        if !in_quotes {
-                            val_quoted = true;
-                        }
+                    element_buffer.push_str(&body[literal_start..pos]);
+                    pos += 1;
+
+                    if byte == b'"' {
+                        quoted |= !in_quotes;
                         in_quotes = !in_quotes;
+                    } else {
+                        // The escaped character is kept as is, even when it is
+                        // a quote, a delimiter, or a
+                        // non-ASCII character.
+                        let Some(escaped) = body[pos..].chars().next() else {
+                            unterminated_escape = true;
+                            break pos;
+                        };
+                        element_buffer.push(escaped);
+                        pos += escaped.len_utf8();
                     }
-                    '\\' => in_escape = true,
-                    // The outer braces are stripped before the loop, so an unquoted brace in the
-                    // body can only come from a nested array, which `ArrayCell` cannot represent.
-                    '{' | '}' if !in_quotes => {
-                        bail!(
-                            ErrorKind::ConversionError,
-                            "Multidimensional array input is not supported"
-                        );
-                    }
-                    c if c == delimiter && !in_quotes => {
-                        break;
-                    }
-                    c => {
-                        val_str.push(c);
-                    }
-                },
-                None => {
-                    done = true;
-                    break;
+
+                    literal_start = pos;
                 }
+                // The outer braces are stripped before the loop, so an unquoted brace in the
+                // body can only come from a nested array, which `ArrayCell` cannot represent.
+                b'{' | b'}' if !in_quotes => {
+                    bail!(
+                        ErrorKind::ConversionError,
+                        "Multidimensional array input is not supported"
+                    );
+                }
+                byte if byte == delimiter && !in_quotes => break pos,
+                _ => pos += 1,
             }
-        }
+        };
 
         if in_quotes {
             bail!(ErrorKind::ConversionError, "Array input contains an unterminated quote");
         }
 
-        if in_escape {
+        if unterminated_escape {
             bail!(ErrorKind::ConversionError, "Array input contains an unterminated escape");
         }
 
-        // PostgreSQL treats unquoted `NULL` as a null array element, while
-        // quoted `"NULL"` is just the literal string. Keep that distinction.
-        let val = if !val_quoted && val_str.eq_ignore_ascii_case("null") {
-            None
+        let element = if buffered {
+            element_buffer.push_str(&body[literal_start..element_end]);
+            element_buffer.as_str()
         } else {
-            parse(&val_str)?
+            &body[element_start..element_end]
         };
 
+        // PostgreSQL treats unquoted `NULL` as a null array element, while
+        // quoted `"NULL"` is just the literal string. Keep that distinction.
+        let val =
+            if !quoted && element.eq_ignore_ascii_case("null") { None } else { parse(element)? };
         res.push(val);
-        val_str.clear();
-        val_quoted = false;
+
+        if element_end == bytes.len() {
+            break;
+        }
+        pos = element_end + 1;
     }
 
     Ok(Cell::Array(m(res)))
@@ -1067,6 +1098,24 @@ mod tests {
                 Some("(1,1),(0,0)".to_owned()),
                 None,
                 Some("(3,3),(2,2)".to_owned()),
+            ]))
+        );
+    }
+
+    #[test]
+    fn parse_array_mixes_borrowed_and_decoded_elements() {
+        let cell =
+            parse_cell_from_postgres_text(&Type::TEXT_ARRAY, r#"{plain,a\,b,"c,d",é,"",NULL}"#)
+                .unwrap();
+        assert_eq!(
+            cell,
+            Cell::Array(ArrayCell::String(vec![
+                Some("plain".to_owned()),
+                Some("a,b".to_owned()),
+                Some("c,d".to_owned()),
+                Some("é".to_owned()),
+                Some(String::new()),
+                None,
             ]))
         );
     }
