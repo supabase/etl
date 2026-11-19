@@ -1010,15 +1010,18 @@ impl TableStateLifecycleStore for PostgresStore {
 #[cfg(all(test, feature = "test-utils"))]
 mod tests {
     use std::{
+        future::pending,
         net::{IpAddr, Ipv4Addr},
-        sync::Arc,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
         time::Duration,
     };
 
     use tokio::{
         io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
         net::{TcpListener, TcpStream},
-        sync::watch,
         time::timeout,
     };
     use tokio_postgres::types::PgLsn;
@@ -1035,54 +1038,55 @@ mod tests {
     /// Short deadline for the stalled transaction.
     const TEST_TRANSACTION_TIMEOUT: Duration = Duration::from_secs(1);
 
-    /// Longer than [`TEST_TRANSACTION_TIMEOUT`]; reaching it means the stalled
-    /// transaction was never bounded.
+    /// Longer than [`TEST_TRANSACTION_TIMEOUT`] plus SQLx's close timeout and
+    /// shorter than the pool's acquire timeout; reaching it means a stalled
+    /// transaction was never bounded or its connection still holds a pool
+    /// slot.
     const STALL_LIMIT: Duration = Duration::from_secs(10);
 
     /// PostgreSQL `SSLRequest`: length 8 followed by code 80877103.
     const SSL_REQUEST: [u8; 8] = [0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f];
 
-    /// Delivery state shared by every proxied connection.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum Link {
-        /// Bytes flow in both directions.
-        Open,
-        /// The next client `BEGIN` reaches the server, then delivery stops.
-        StallAfterBegin,
-        /// Bytes are held in both directions while sockets stay open.
-        Stalled,
+    /// Stall control shared by every proxied connection.
+    #[derive(Debug, Default)]
+    struct Stalls {
+        /// The next connection to send `BEGIN` stalls after forwarding it.
+        armed: AtomicBool,
+        /// Number of connections stalled so far.
+        count: AtomicUsize,
     }
 
-    /// Forwards bytes in one direction, holding them while the link is
-    /// stalled.
+    /// Forwards bytes in one direction until the connection stalls, then
+    /// holds them forever while the sockets stay open.
     ///
-    /// Only the client-to-server direction arms the stall, before forwarding
-    /// `BEGIN`, so the server's reply is already held. The stall therefore
-    /// starts after connection acquisition, inside the transaction.
+    /// Only the client-to-server direction, given `stalls`, arms a stall. It
+    /// forwards that `BEGIN` and holds everything after, including the
+    /// server's reply, so the stall starts after connection acquisition,
+    /// inside the transaction. Other connections keep flowing.
     async fn pump(
         mut from: impl AsyncRead + Unpin,
         mut to: impl AsyncWrite + Unpin,
-        link: Arc<watch::Sender<Link>>,
-        arms_stall: bool,
+        stalled: Arc<AtomicBool>,
+        stalls: Option<Arc<Stalls>>,
     ) {
-        let mut state = link.subscribe();
         let mut buffer = [0; 8192];
         loop {
             let Ok(read) = from.read(&mut buffer).await else { return };
-            if read == 0 || state.wait_for(|link| *link != Link::Stalled).await.is_err() {
+            if read == 0 {
                 return;
             }
 
-            let chunk = &buffer[..read];
-            if arms_stall && chunk.windows(5).any(|window| window == b"BEGIN") {
-                link.send_if_modified(|link| {
-                    let stall = *link == Link::StallAfterBegin;
-                    if stall {
-                        *link = Link::Stalled;
-                    }
+            if stalled.load(Ordering::SeqCst) {
+                pending::<()>().await;
+            }
 
-                    stall
-                });
+            let chunk = &buffer[..read];
+            if let Some(stalls) = &stalls
+                && chunk.windows(5).any(|window| window.eq_ignore_ascii_case(b"begin"))
+                && stalls.armed.swap(false, Ordering::SeqCst)
+            {
+                stalled.store(true, Ordering::SeqCst);
+                stalls.count.fetch_add(1, Ordering::SeqCst);
             }
 
             if to.write_all(chunk).await.is_err() {
@@ -1091,15 +1095,12 @@ mod tests {
         }
     }
 
-    /// Starts a TCP proxy to `upstream` whose delivery follows `link`.
+    /// Starts a TCP proxy to `upstream` whose connections stall per `stalls`.
     ///
     /// The proxy matches `BEGIN` in the byte stream, so it declines TLS
     /// itself and the client, preferring but not requiring TLS, continues in
     /// plaintext. Upstream test servers accept plaintext even with TLS on.
-    async fn spawn_proxy(
-        upstream: &PgConnectionConfig,
-        link: Arc<watch::Sender<Link>>,
-    ) -> PgConnectionConfig {
+    async fn spawn_proxy(upstream: &PgConnectionConfig, stalls: Arc<Stalls>) -> PgConnectionConfig {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let mut proxied = upstream.clone();
         proxied.tls = TlsConfig::disabled();
@@ -1118,44 +1119,58 @@ mod tests {
                     server.write_all(&first).await.unwrap();
                 }
 
+                let stalled = Arc::new(AtomicBool::new(false));
                 let (client_read, client_write) = client.into_split();
                 let (server_read, server_write) = server.into_split();
-                tokio::spawn(pump(client_read, server_write, Arc::clone(&link), true));
-                tokio::spawn(pump(server_read, client_write, Arc::clone(&link), false));
+                tokio::spawn(pump(
+                    client_read,
+                    server_write,
+                    Arc::clone(&stalled),
+                    Some(Arc::clone(&stalls)),
+                ));
+                tokio::spawn(pump(server_read, client_write, stalled, None));
             }
         });
 
         proxied
     }
 
-    /// A store transaction whose database stops answering after `BEGIN`
-    /// fails with a retryable connection error, and the store recovers once
-    /// replies resume.
+    /// Store transactions whose connections stop answering after `BEGIN` fail
+    /// with a retryable connection error. Stalling more connections than the
+    /// pool holds proves abandoned connections free their pool slots, so the
+    /// store recovers on a fresh connection while the old ones stay stalled.
     #[tokio::test(flavor = "multi_thread")]
     async fn exclusive_unresponsive_database_fails_transaction_and_store_recovers() {
         let database = spawn_source_database().await;
-        let link = Arc::new(watch::Sender::new(Link::Open));
-        let config = spawn_proxy(&database.config, Arc::clone(&link)).await;
+        let stalls = Arc::new(Stalls::default());
+        let config = spawn_proxy(&database.config, Arc::clone(&stalls)).await;
         let mut store = PostgresStore::new("1", config).await.unwrap();
         store.upsert_replication_checkpoint(WorkerType::Apply, PgLsn::from(100)).await.unwrap();
 
-        link.send_replace(Link::StallAfterBegin);
         store.transaction_timeout = TEST_TRANSACTION_TIMEOUT;
-        let error = timeout(
+        for lsn in [200, 250] {
+            stalls.armed.store(true, Ordering::SeqCst);
+            let error = timeout(
+                STALL_LIMIT,
+                store.upsert_replication_checkpoint(WorkerType::Apply, PgLsn::from(lsn)),
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+
+            assert_eq!(error.kind(), ErrorKind::SourceConnectionFailed);
+            assert_eq!(error.retryability(), Retryability::Retryable);
+        }
+        assert_eq!(stalls.count.load(Ordering::SeqCst), 2);
+
+        store.transaction_timeout = TRANSACTION_TIMEOUT;
+        timeout(
             STALL_LIMIT,
-            store.upsert_replication_checkpoint(WorkerType::Apply, PgLsn::from(200)),
+            store.upsert_replication_checkpoint(WorkerType::Apply, PgLsn::from(300)),
         )
         .await
         .unwrap()
-        .unwrap_err();
-
-        assert_eq!(*link.borrow(), Link::Stalled);
-        assert_eq!(error.kind(), ErrorKind::SourceConnectionFailed);
-        assert_eq!(error.retryability(), Retryability::Retryable);
-
-        link.send_replace(Link::Open);
-        store.transaction_timeout = TRANSACTION_TIMEOUT;
-        store.upsert_replication_checkpoint(WorkerType::Apply, PgLsn::from(300)).await.unwrap();
+        .unwrap();
 
         assert_eq!(
             store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(),
