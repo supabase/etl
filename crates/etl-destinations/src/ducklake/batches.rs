@@ -420,8 +420,8 @@ struct DuckLakeBatchIdentity {
 /// Returns destination-visible column names in replicated write order.
 fn replicated_column_names(replicated_table_schema: &ReplicatedTableSchema) -> Vec<String> {
     replicated_table_schema
-        .destination_column_schemas(DUCKLAKE_COLUMN_NAME_MAPPING)
-        .map(|column| column.name)
+        .column_schemas()
+        .map(|column| DUCKLAKE_COLUMN_NAME_MAPPING.map_name(&column.name))
         .collect()
 }
 
@@ -3181,12 +3181,21 @@ mod tests {
 
     #[test]
     fn replicated_column_names_use_ducklake_mapping() {
-        let schema = make_replicated_schema_with_columns(vec![
-            ColumnSchema::new("ID".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
-            ColumnSchema::new("Display_Name".to_owned(), PgType::TEXT, -1, 2, true),
-        ]);
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![
+                ColumnSchema::new("ID".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("Ignored".to_owned(), PgType::TEXT, -1, 2, true),
+                ColumnSchema::new("Display_État".to_owned(), PgType::TEXT, -1, 3, true),
+            ],
+        ));
+        let schema = ReplicatedTableSchema::from_mask(
+            table_schema,
+            ReplicationMask::from_bytes(vec![1, 0, 1]),
+        );
 
-        assert_eq!(replicated_column_names(&schema), ["id", "display_name"]);
+        assert_eq!(replicated_column_names(&schema), ["id", "display_État"]);
     }
 
     fn ducklake_table_name() -> DuckLakeTableName {
