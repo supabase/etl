@@ -30,7 +30,7 @@ use gcp_bigquery_client::{
 };
 use metrics::counter;
 use prost::Message;
-use rand::random;
+use rand::{random, random_range};
 use serde::{
     Deserialize, Deserializer,
     de::{self, MapAccess, Visitor},
@@ -406,22 +406,7 @@ fn storage_api_config(connection_pool_size: NonZeroU16) -> StorageApiConfig {
 
 /// Adds equal jitter to a retry delay.
 fn retry_delay_with_jitter(delay: Duration) -> Duration {
-    if delay.is_zero() {
-        return delay;
-    }
-
-    let half_delay = delay / 2;
-    let jitter_range = delay.saturating_sub(half_delay);
-    let jitter_range_nanos = jitter_range.as_nanos();
-
-    if jitter_range_nanos == 0 {
-        return delay;
-    }
-
-    let jitter_nanos = u128::from(random::<u64>()) % (jitter_range_nanos + 1);
-    let jitter = Duration::from_nanos(jitter_nanos as u64);
-
-    half_delay + jitter
+    random_range((delay / 2)..=delay)
 }
 
 /// Processes one append result and determines its success or failure mode.
@@ -2251,15 +2236,28 @@ mod tests {
         assert!(retryable_storage_write_schema_update_detail(&error).is_none());
     }
 
+    /// Keeps equal jitter within bounds for zero, fractional, and capped
+    /// delays.
     #[test]
     fn retry_jitter_stays_within_delay_bounds() {
-        let delay = Duration::from_secs(10);
+        for delay in [
+            Duration::ZERO,
+            Duration::from_nanos(1),
+            Duration::from_nanos(2),
+            Duration::from_nanos(3),
+            Duration::from_nanos(999_999_999),
+            STORAGE_WRITE_RETRY_DELAY,
+            Duration::new(1, 1),
+            Duration::from_secs(10),
+            STORAGE_WRITE_MAX_RETRY_DELAY - Duration::from_nanos(1),
+            STORAGE_WRITE_MAX_RETRY_DELAY,
+        ] {
+            for _ in 0..100 {
+                let jittered_delay = retry_delay_with_jitter(delay);
 
-        for _ in 0..100 {
-            let jittered_delay = retry_delay_with_jitter(delay);
-
-            assert!(jittered_delay >= Duration::from_secs(5));
-            assert!(jittered_delay <= delay);
+                assert!(jittered_delay >= delay / 2);
+                assert!(jittered_delay <= delay);
+            }
         }
     }
 
