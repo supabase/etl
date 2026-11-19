@@ -344,8 +344,9 @@ where
 
     loop {
         let element_start = pos;
-        // First unbuffered byte after the last quote or escape. Quotes, escapes,
-        // and delimiters are ASCII, so these offsets stay on UTF-8 boundaries.
+        // First unbuffered byte after the last quote or escape. Quotes,
+        // escapes, and delimiters are ASCII, so these offsets stay on
+        // UTF-8 boundaries.
         let mut literal_start = element_start;
         let mut buffered = false;
         let mut in_quotes = false;
@@ -370,8 +371,9 @@ where
                         quoted |= !in_quotes;
                         in_quotes = !in_quotes;
                     } else {
-                        // The escaped character is kept as is, even when it is a
-                        // quote, a delimiter, or a non-ASCII character.
+                        // The escaped character is kept as is, even when it is
+                        // a quote, a delimiter, or a
+                        // non-ASCII character.
                         let Some(escaped) = body[pos..].chars().next() else {
                             unterminated_escape = true;
                             break pos;
