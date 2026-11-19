@@ -2,16 +2,17 @@
 //!
 //! Each polled request records one sample on completion or cancellation,
 //! including pool wait and result consumption. Explicit BEGIN and COMMIT
-//! requests count separately; implicit SQLx operations, including rollback on
-//! drop, do not. Raw SQL batches count once, and unpolled requests do not
-//! count. Labels contain only the fixed pool name.
+//! requests count separately; closing an uncommitted transaction's connection
+//! does not. Raw SQL batches count once, and unpolled requests do not count.
+//! Labels contain only the fixed pool name.
 
 use std::{task::Poll, time::Instant};
 
 use futures::{FutureExt, StreamExt, future::BoxFuture, stream::BoxStream};
 use metrics::{Histogram, histogram};
 use sqlx::{
-    Describe, Either, Execute, Executor, PgConnection, PgPool, Postgres, SqlStr, Transaction,
+    Describe, Either, Execute, Executor, PgConnection, PgPool, Postgres, SqlStr,
+    pool::PoolConnection,
     postgres::{PgQueryResult, PgRow, PgStatement, PgTypeInfo},
 };
 
@@ -151,17 +152,33 @@ impl InstrumentedPgPool {
     /// Begins a transaction whose statements retain this pool's metric name.
     pub(crate) async fn begin(&self) -> Result<InstrumentedPgTransaction, sqlx::Error> {
         let _timer = QueryTimer::new(self.duration.clone());
-        let inner = self.inner.begin().await?;
+        let connection = self.inner.acquire().await?;
+        // Own the connection before BEGIN, so a cancelled BEGIN also closes it.
+        let mut transaction = InstrumentedPgTransaction {
+            connection,
+            committed: false,
+            duration: self.duration.clone(),
+        };
+        // Uppercase matches SQLx's own statement text, which tests observe.
+        sqlx::raw_sql("BEGIN").execute(&mut *transaction.connection).await?;
 
-        Ok(InstrumentedPgTransaction { inner, duration: self.duration.clone() })
+        Ok(transaction)
     }
 }
 
 /// A transaction that retains its originating pool's query instrumentation.
+///
+/// Dropping it before [`Self::commit`] succeeds closes the connection instead
+/// of returning it to the pool, which rolls the transaction back server-side.
+/// SQLx pings a returned connection before reuse without a deadline, so a
+/// connection abandoned mid-request on an unresponsive server would otherwise
+/// hold its pool slot indefinitely; SQLx bounds the close instead.
 #[derive(Debug)]
 pub(crate) struct InstrumentedPgTransaction {
-    /// SQLx transaction, including its normal rollback-on-drop behavior.
-    inner: Transaction<'static, Postgres>,
+    /// Pooled connection with this transaction open.
+    connection: PoolConnection<Postgres>,
+    /// Whether COMMIT succeeded, so the connection can return to the pool.
+    committed: bool,
     /// Registered histogram inherited from the pool.
     duration: Histogram,
 }
@@ -169,14 +186,24 @@ pub(crate) struct InstrumentedPgTransaction {
 impl InstrumentedPgTransaction {
     /// Returns an instrumented executor borrowing this transaction.
     pub(crate) fn executor(&mut self) -> InstrumentedPgExecutor<&mut PgConnection> {
-        InstrumentedPgExecutor { inner: &mut self.inner, duration: self.duration.clone() }
+        InstrumentedPgExecutor { inner: &mut *self.connection, duration: self.duration.clone() }
     }
 
     /// Commits the transaction and records its duration.
-    pub(crate) async fn commit(self) -> Result<(), sqlx::Error> {
-        let _timer = QueryTimer::new(self.duration);
+    pub(crate) async fn commit(mut self) -> Result<(), sqlx::Error> {
+        let _timer = QueryTimer::new(self.duration.clone());
+        sqlx::raw_sql("COMMIT").execute(&mut *self.connection).await?;
+        self.committed = true;
 
-        self.inner.commit().await
+        Ok(())
+    }
+}
+
+impl Drop for InstrumentedPgTransaction {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.connection.close_on_drop();
+        }
     }
 }
 
@@ -273,7 +300,8 @@ mod tests {
         sqlx::query("delete from test.query_metrics").execute(tx.executor()).await.unwrap();
         drop(tx);
 
-        // With one connection, this also waits for SQLx's queued rollback.
+        // With one connection, this also waits for the dropped transaction's
+        // connection to close.
         let count: i64 = sqlx::query_scalar("select count(*) from test.query_metrics")
             .fetch_one(pool.executor())
             .await
