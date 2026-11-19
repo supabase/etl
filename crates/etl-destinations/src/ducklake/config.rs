@@ -44,10 +44,14 @@ fn configure_writer_session_sql() -> String {
 }
 
 /// Builds the SQL that configures DuckLake's global Parquet writer settings.
+///
+/// Each `set_option` call outside a transaction commits to the catalog on its
+/// own, and every connection setup runs these calls. One transaction writes
+/// all four options in a single catalog commit.
 fn configure_parquet_settings_sql(writer_config: &DuckLakeWriterConfig) -> String {
     format!(
-        "CALL {LAKE_CATALOG}.set_option({}, {}); CALL {LAKE_CATALOG}.set_option({}, {}); CALL \
-         {LAKE_CATALOG}.set_option({}, {}); CALL {LAKE_CATALOG}.set_option({}, {});",
+        "BEGIN; CALL {LAKE_CATALOG}.set_option({}, {}); CALL {LAKE_CATALOG}.set_option({}, {}); \
+         CALL {LAKE_CATALOG}.set_option({}, {}); CALL {LAKE_CATALOG}.set_option({}, {}); COMMIT;",
         quote_literal(PARQUET_COMPRESSION_OPTION_NAME),
         quote_literal(PARQUET_COMPRESSION_OPTION_VALUE),
         quote_literal(PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_NAME),
