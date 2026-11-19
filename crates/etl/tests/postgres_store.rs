@@ -2060,6 +2060,10 @@ async fn reset_table_states_for_resync_resets_states_and_apply_checkpoint_only()
             .unwrap()
             .is_some()
     );
+
+    // The reset chains each table to its own previous state.
+    assert_eq!(new_store.rollback_table_state(table_1_id).await.unwrap(), TableState::Ready);
+    assert_eq!(new_store.rollback_table_state(table_2_id).await.unwrap(), TableState::DataSync);
 }
 
 #[tokio::test(flavor = "multi_thread")]

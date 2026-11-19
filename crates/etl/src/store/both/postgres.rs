@@ -894,16 +894,14 @@ impl TableStateLifecycleStore for PostgresStore {
 
                 inner.usable = false;
                 self.transaction(async |tx| {
-                    for table_id in &table_ids {
-                        pg_table_state::update_table_state_raw(
-                            tx.executor(),
-                            self.pipeline_id.as_str(),
-                            *table_id,
-                            state_type,
-                            metadata.clone(),
-                        )
-                        .await?;
-                    }
+                    pg_table_state::update_table_states_raw(
+                        tx.executor(),
+                        self.pipeline_id.as_str(),
+                        &table_ids,
+                        state_type,
+                        metadata,
+                    )
+                    .await?;
 
                     checkpoint::delete_replication_checkpoint(
                         tx.executor(),

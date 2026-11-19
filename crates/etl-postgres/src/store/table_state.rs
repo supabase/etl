@@ -113,6 +113,50 @@ where
     Ok(())
 }
 
+/// Sets every table in `table_ids` to the same state in one statement.
+///
+/// Chains each table's history like [`update_table_state_raw`], with one round
+/// trip regardless of table count.
+pub async fn update_table_states_raw<'c, E>(
+    executor: E,
+    pipeline_id: &str,
+    table_ids: &[TableId],
+    state: StoredTableStateType,
+    metadata: serde_json::Value,
+) -> sqlx::Result<()>
+where
+    E: PgExecutor<'c>,
+{
+    let table_ids: Vec<SqlxTableId> =
+        table_ids.iter().map(|table_id| SqlxTableId(table_id.into_inner())).collect();
+
+    // Each inserted row joins its own table's mark_old row, so that table's
+    // old row is marked before its new row is inserted under any join order.
+    sqlx::query(
+        r#"
+        with mark_old as (
+            update etl.replication_state
+            set is_current = false, updated_at = now()
+            where pipeline_id_v2 = $1 and table_id = any($2::oid[]) and is_current = true
+            returning id, table_id
+        )
+        insert into etl.replication_state
+            (pipeline_id_v2, table_id, state, metadata, prev, is_current)
+        select $1, tables.table_id, $3, $4, mark_old.id, true
+        from unnest($2::oid[]) as tables(table_id)
+        left join mark_old on mark_old.table_id = tables.table_id
+        "#,
+    )
+    .bind(pipeline_id)
+    .bind(table_ids)
+    .bind(state)
+    .bind(metadata)
+    .execute(executor)
+    .await?;
+
+    Ok(())
+}
+
 /// Rolls back table state to the previous entry in the history chain.
 ///
 /// Restores the previous state by updating the current flags in the database,
