@@ -30,7 +30,7 @@ use etl_postgres::{
     tokio::test_utils::PgDatabase,
 };
 use pg_escape::quote_identifier;
-use tokio_postgres::{Client, types::PgLsn};
+use tokio_postgres::{Client, GenericClient, types::PgLsn};
 use uuid::Uuid;
 
 use crate::{
@@ -216,6 +216,20 @@ pub async fn replication_slot_state(client: &Client, slot_name: &str) -> (PgLsn,
     try_replication_slot_state(client, slot_name)
         .await
         .expect("Failed to query replication slot state")
+}
+
+/// Returns the current transaction ID truncated to pgoutput's 32 bits.
+///
+/// # Errors
+///
+/// Returns an error if PostgreSQL cannot run the xid query.
+pub async fn current_xid(client: &impl GenericClient) -> Result<u32, tokio_postgres::Error> {
+    let row = client
+        .query_one("select (pg_current_xact_id()::text::bigint % 4294967296)::bigint", &[])
+        .await?;
+    let xid: i64 = row.get(0);
+
+    Ok(u32::try_from(xid).expect("xid modulo 2^32 should fit in u32"))
 }
 
 /// Result of trying to terminate the active walsender for a replication slot.
