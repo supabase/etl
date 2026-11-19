@@ -333,9 +333,13 @@ impl SizeHint for Event {
 /// which identifies work within one snapshot attempt and does not order row
 /// versions.
 ///
+/// Positions order by commit LSN first, then transaction-local ordinal. This
+/// ordering is meaningful within the same replication stream and replay epoch;
+/// it does not establish comparability across unrelated pipelines or epochs.
+///
 /// Destinations choose their own storage and wire representation instead of
 /// relying on a generic string encoding for this domain value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct EventPosition {
     /// Commit LSN identifying transaction order across transactions.
     pub commit_lsn: PgLsn,
@@ -441,6 +445,32 @@ mod tests {
         );
 
         ReplicatedTableSchema::all(Arc::new(table_schema))
+    }
+
+    /// Native ordering and packed CDC versions agree at unsigned boundaries.
+    #[test]
+    fn event_position_order_matches_packed_cdc_version() {
+        let positions = [
+            (0, 0),
+            (0, 1),
+            (0, u64::MAX),
+            (1, 0),
+            ((1 << 63) - 1, u64::MAX),
+            (1 << 63, 0),
+            (1 << 63, u64::MAX),
+            (u64::MAX, 0),
+            (u64::MAX, u64::MAX),
+        ]
+        .map(|(lsn, ordinal)| EventPosition::new(PgLsn::from(lsn), ordinal));
+
+        for (left_index, left) in positions.iter().enumerate() {
+            for (right_index, right) in positions.iter().enumerate() {
+                let expected = left_index.cmp(&right_index);
+
+                assert_eq!(left.cmp(right), expected);
+                assert_eq!(left.as_u128().cmp(&right.as_u128()), expected);
+            }
+        }
     }
 
     #[test]
