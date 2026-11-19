@@ -463,12 +463,10 @@ fn convert_to_base_10000(
         return Ok(PgNumeric::Value { sign: Sign::Positive, weight: 0, scale, digits: vec![] });
     }
 
-    // Calculate weight in base-10000 terms. Each base-10000 digit represents 4
-    // decimal digits.
-    let weight = if dweight >= 0 { (dweight + 4) / 4 - 1 } else { -((-dweight - 1) / 4 + 1) };
+    // Floor division keeps negative weights aligned to four-digit groups.
+    let weight = dweight.div_euclid(4);
+    let offset = 3 - dweight.rem_euclid(4);
 
-    // Calculate offset for proper alignment.
-    let offset = (weight + 1) * 4 - (dweight + 1);
     let Some(first_nonzero_decimal_index) = decimal_digits.iter().position(|&digit| digit != 0)
     else {
         return Ok(PgNumeric::Value { sign: Sign::Positive, weight: 0, scale, digits: vec![] });
