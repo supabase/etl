@@ -405,8 +405,9 @@ rows or cells per pass, `--seed <n>` to change the generated fixtures, and
 change often moves only one.
 
 Destination scenarios are compiled only with the destination's feature:
-`bigquery_row_encode` needs `--features bigquery`, and `clickhouse_row_encode`
-needs `--features clickhouse`.
+`bigquery_row_encode` needs `--features bigquery`, `clickhouse_row_encode`
+needs `--features clickhouse`, and `snowflake_row_encode` needs
+`--features snowflake`.
 
 The binary uses jemalloc, as the replicator does, and installs the Prometheus
 recorder so metric calls pay the real registry cost. Instruction counts come

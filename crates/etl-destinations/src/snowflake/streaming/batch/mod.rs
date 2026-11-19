@@ -54,7 +54,7 @@ impl OffsetRangeExt for Option<OffsetRange> {
         match self {
             Some(range) => {
                 debug_assert!(offset >= &range.end);
-                range.end = offset.clone();
+                range.end.clone_from(offset);
             }
             None => {
                 *self = Some(OffsetRange { start: offset.clone(), end: offset.clone() });

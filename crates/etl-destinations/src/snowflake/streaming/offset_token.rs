@@ -7,7 +7,7 @@ use crate::snowflake::{Error, Result};
 /// An offset token encoding a WAL position as a hex string.
 ///
 /// Format: `{commit_lsn:016x}/{tx_ordinal:016x}`.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct OffsetToken(String);
 
 impl OffsetToken {
@@ -36,6 +36,18 @@ impl OffsetToken {
             .map_err(|e| Error::Channel(format!("invalid ordinal hex in offset token: {e}")))?;
 
         Ok((PgLsn::from(lsn), ord))
+    }
+}
+
+/// Written out so [`Clone::clone_from`] reuses the existing buffer, which a
+/// derived implementation would replace with a new allocation.
+impl Clone for OffsetToken {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+
+    fn clone_from(&mut self, source: &Self) {
+        self.0.clone_from(&source.0);
     }
 }
 
