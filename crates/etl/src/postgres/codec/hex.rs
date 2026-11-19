@@ -51,6 +51,9 @@ fn parse_hex_digit(byte: u8) -> EtlResult<u8> {
     }
 }
 
+#[cfg(kani)]
+mod verification;
+
 #[cfg(test)]
 mod tests {
     use super::*;

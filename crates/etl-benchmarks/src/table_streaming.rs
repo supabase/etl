@@ -12,6 +12,7 @@ use etl::{
     test_utils::notifying_store::NotifyingStore,
 };
 use etl_config::shared::{TableSyncCopyConfig, Validate};
+use etl_telemetry::metrics::init_metrics_handle;
 use serde::Serialize;
 use tokio::task::JoinSet;
 use tracing::info;
@@ -165,6 +166,8 @@ struct StreamingPhaseTimings {
 pub async fn main() -> Result<()> {
     let args = Args::parse();
     let _log_flusher = crate::common::init_benchmark_tracing(args.log_target, "table_streaming")?;
+    // Metric calls pay the registry cost they pay in the replicator.
+    init_metrics_handle()?;
 
     match args.command {
         Commands::Run(args) => run(args).await,

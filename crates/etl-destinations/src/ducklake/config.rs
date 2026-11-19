@@ -77,14 +77,15 @@ pub(super) fn resolve_expire_snapshots_older_than(
     expire_snapshots_older_than.unwrap_or(EXPIRE_SNAPSHOTS_OLDER_THAN)
 }
 
-/// Builds the SQL used to validate the configured snapshot-retention window.
+/// Builds the SQL that checks the configured snapshot-retention window against
+/// the minimum and returns it as a DuckDB interval.
 pub(super) fn validate_expire_snapshots_older_than_sql(
     expire_snapshots_older_than: &str,
 ) -> String {
     // Interval ordering treats months as 30 days, unlike timestamp arithmetic.
     format!(
-        "select cast(now() as timestamp) - cast({} as interval) <= cast(now() as timestamp) - \
-         cast({} as interval);",
+        "select cast(now() as timestamp) - cast({0} as interval) <= cast(now() as timestamp) - \
+         cast({1} as interval), cast({0} as interval);",
         quote_literal(expire_snapshots_older_than),
         quote_literal(MIN_EXPIRE_SNAPSHOTS_OLDER_THAN),
     )

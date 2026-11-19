@@ -22,6 +22,7 @@ use etl_destinations::ducklake::{
     InlineFlushMaintenanceConfig, MergeAdjacentFilesMaintenanceConfig,
     RewriteDataFilesMaintenanceConfig, run_maintenance_once,
 };
+use etl_telemetry::metrics::init_metrics_handle;
 use serde::Serialize;
 #[cfg(feature = "ducklake")]
 use sqlx::{AssertSqlSafe, postgres::PgPoolOptions};
@@ -165,6 +166,8 @@ struct DuckLakeFileStats {
 pub async fn main() -> Result<()> {
     let args = Args::parse();
     let _log_flusher = init_benchmark_tracing(args.log_target, "table_copy")?;
+    // Metric calls pay the registry cost they pay in the replicator.
+    init_metrics_handle()?;
 
     match args.command {
         Commands::Run(args) => run(args).await,

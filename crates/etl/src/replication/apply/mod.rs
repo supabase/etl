@@ -3559,7 +3559,8 @@ mod apply_worker {
             state::{TableState, TableStateType},
         },
         runtime::{
-            TableSyncWorker, TableSyncWorkerPool, TableSyncWorkerState, concurrency::ShutdownResult,
+            TableSyncWorker, TableSyncWorkerPool, TableSyncWorkerStateGuard,
+            concurrency::ShutdownResult,
         },
         schema::TableId,
         store::{PipelineStore, SchemaStore, SharedStateStore},
@@ -3682,11 +3683,14 @@ mod apply_worker {
     }
 
     /// Waits for a table-sync worker in catchup to hand the table back.
+    ///
+    /// Takes the table's state guard by value: the table-sync worker needs that
+    /// lock to reach `SyncDone`, so the wait releases it.
     async fn wait_for_table_sync_worker_catchup<S, D>(
         ctx: &ApplyWorkerContext<S, D>,
         activity_handle: &ActivityHandle,
         table_id: TableId,
-        worker_state: &TableSyncWorkerState,
+        worker_state_guard: TableSyncWorkerStateGuard<'_>,
         catchup_lsn: PgLsn,
         wait_reason: CatchupWaitReason,
     ) -> Option<ExitIntent>
@@ -3713,7 +3717,7 @@ mod apply_worker {
         // We wait for both states since if the table sync worker errors, we
         // don't want to stall forever.
         let _activity_suspension = activity_handle.suspend();
-        let result = worker_state
+        let result = worker_state_guard
             .wait_for_state_type(
                 &[TableStateType::SyncDone, TableStateType::Errored],
                 ctx.shutdown_token.clone(),
@@ -3806,15 +3810,11 @@ mod apply_worker {
                         .set_and_store(TableState::Catchup { lsn: catchup_lsn }, &ctx.store)
                         .await?;
 
-                    // It's important to drop the state guard before waiting,
-                    // otherwise we deadlock.
-                    drop(worker_state_guard);
-
                     if let Some(exit_intent) = wait_for_table_sync_worker_catchup(
                         ctx,
                         activity_handle,
                         table_id,
-                        &worker_state,
+                        worker_state_guard,
                         catchup_lsn,
                         CatchupWaitReason::EnteredCatchup,
                     )
@@ -3832,13 +3832,11 @@ mod apply_worker {
                     );
                 }
                 TableState::Catchup { lsn: catchup_lsn } => {
-                    drop(worker_state_guard);
-
                     if let Some(exit_intent) = wait_for_table_sync_worker_catchup(
                         ctx,
                         activity_handle,
                         table_id,
-                        &worker_state,
+                        worker_state_guard,
                         catchup_lsn,
                         CatchupWaitReason::AlreadyInCatchup,
                     )
@@ -4196,15 +4194,11 @@ mod apply_worker {
                         .set_and_store(TableState::Catchup { lsn: catchup_lsn }, &ctx.store)
                         .await?;
 
-                    // It's important to drop the state guard before waiting,
-                    // otherwise we deadlock.
-                    drop(worker_state_guard);
-
                     if let Some(exit_intent) = wait_for_table_sync_worker_catchup(
                         ctx,
                         activity_handle,
                         table_id,
-                        &worker_state,
+                        worker_state_guard,
                         catchup_lsn,
                         CatchupWaitReason::EnteredCatchup,
                     )
@@ -4245,13 +4239,11 @@ mod apply_worker {
                     );
                 }
                 TableState::Catchup { lsn: catchup_lsn } => {
-                    drop(worker_state_guard);
-
                     if let Some(exit_intent) = wait_for_table_sync_worker_catchup(
                         ctx,
                         activity_handle,
                         table_id,
-                        &worker_state,
+                        worker_state_guard,
                         catchup_lsn,
                         CatchupWaitReason::AlreadyInCatchup,
                     )

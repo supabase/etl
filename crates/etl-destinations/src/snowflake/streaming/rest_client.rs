@@ -135,8 +135,6 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
         let host = self.get_or_discover_host().await?;
         let url = channel_url(host, database, schema, table, channel)?;
 
-        let auth = Arc::clone(&self.auth);
-        let http = self.http.clone();
         let request_body = ChannelLifecycleRequest::new(offset_token);
 
         retry_with_backoff(
@@ -152,44 +150,36 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                     "retrying open_channel"
                 );
             },
-            || {
-                let url = url.clone();
-                let auth = Arc::clone(&auth);
-                let http = http.clone();
-                let body = &request_body;
+            || async {
+                let resp = send_authenticated(self.auth.as_ref(), |token| {
+                    self.http
+                        .put(&url)
+                        .bearer_auth(token)
+                        .header("User-Agent", USER_AGENT)
+                        .header("Content-Type", "application/json")
+                        .json(&request_body)
+                })
+                .await?;
 
-                async move {
-                    let resp = send_authenticated(auth.as_ref(), |token| {
-                        http.put(&url)
-                            .bearer_auth(token)
-                            .header("User-Agent", USER_AGENT)
-                            .header("Content-Type", "application/json")
-                            .json(body)
-                    })
-                    .await?;
+                let response: OpenChannelApiResponse = resp.json().await.map_err(|e| {
+                    Error::Encoding(format!("failed to parse open_channel response: {e}"))
+                })?;
 
-                    let response: OpenChannelApiResponse = resp.json().await.map_err(|e| {
-                        Error::Encoding(format!("failed to parse open_channel response: {e}"))
-                    })?;
+                let status = response.channel_status;
 
-                    let status = response.channel_status;
-
-                    let code = &status.channel_status_code;
-                    let is_ok = code == "SUCCESS" || code == "ACTIVE" || code == "0";
-                    if !is_ok {
-                        let msg = format!("open_channel returned unexpected status: {code}");
-                        return Err(
-                            SnowpipeError::ApiStatus { status_code: 1, message: msg }.into()
-                        );
-                    }
-
-                    let status = status.into_channel_status(channel)?;
-                    Ok(OpenChannelResponse {
-                        continuation_token: response.next_continuation_token,
-                        offset_token: status.offset_token.clone(),
-                        status,
-                    })
+                let code = &status.channel_status_code;
+                let is_ok = code == "SUCCESS" || code == "ACTIVE" || code == "0";
+                if !is_ok {
+                    let msg = format!("open_channel returned unexpected status: {code}");
+                    return Err(SnowpipeError::ApiStatus { status_code: 1, message: msg }.into());
                 }
+
+                let status = status.into_channel_status(channel)?;
+                Ok(OpenChannelResponse {
+                    continuation_token: response.next_continuation_token,
+                    offset_token: status.offset_token.clone(),
+                    status,
+                })
             },
         )
         .await
@@ -207,11 +197,7 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
         let host = self.get_or_discover_host().await?;
         let base_url = insert_url(host, database, schema, table, channel)?;
 
-        let compressed = batch.bytes().clone();
         let query_params = insert_query_params(batch, continuation_token);
-
-        let auth = Arc::clone(&self.auth);
-        let http = self.http.clone();
 
         retry_with_backoff(
             SNOWPIPE_RETRY_POLICY,
@@ -226,30 +212,24 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                     "retrying insert_rows"
                 );
             },
-            || {
-                let base_url = base_url.clone();
-                let query_params = query_params.clone();
-                let auth = Arc::clone(&auth);
-                let http = http.clone();
-                let compressed = compressed.clone();
-                async move {
-                    let resp = send_authenticated(auth.as_ref(), |token| {
-                        http.post(&base_url)
-                            .query(&query_params)
-                            .bearer_auth(token)
-                            .header("User-Agent", USER_AGENT)
-                            .header("Content-Type", "application/x-ndjson")
-                            .header("Content-Encoding", "zstd")
-                            .body(compressed.clone())
-                    })
-                    .await?;
+            || async {
+                let resp = send_authenticated(self.auth.as_ref(), |token| {
+                    self.http
+                        .post(&base_url)
+                        .query(&query_params)
+                        .bearer_auth(token)
+                        .header("User-Agent", USER_AGENT)
+                        .header("Content-Type", "application/x-ndjson")
+                        .header("Content-Encoding", "zstd")
+                        .body(batch.bytes().clone())
+                })
+                .await?;
 
-                    let response: InsertRowsApiResponse = resp.json().await.map_err(|e| {
-                        Error::Encoding(format!("failed to parse insert_rows response: {e}"))
-                    })?;
+                let response: InsertRowsApiResponse = resp.json().await.map_err(|e| {
+                    Error::Encoding(format!("failed to parse insert_rows response: {e}"))
+                })?;
 
-                    Ok(InsertRowsResponse { continuation_token: response.next_continuation_token })
-                }
+                Ok(InsertRowsResponse { continuation_token: response.next_continuation_token })
             },
         )
         .await
@@ -265,8 +245,6 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
         let host = self.get_or_discover_host().await?;
         let url = channel_url(host, database, schema, table, channel)?;
 
-        let auth = Arc::clone(&self.auth);
-        let http = self.http.clone();
         let request_body = ChannelLifecycleRequest::new(None);
 
         let result = retry_with_backoff(
@@ -282,21 +260,16 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                     "retrying drop_channel"
                 );
             },
-            || {
-                let url = url.clone();
-                let auth = Arc::clone(&auth);
-                let http = http.clone();
-                let body = &request_body;
-                async move {
-                    send_authenticated(auth.as_ref(), |token| {
-                        http.delete(&url)
-                            .bearer_auth(token)
-                            .header("User-Agent", USER_AGENT)
-                            .json(body)
-                    })
-                    .await?;
-                    Ok(())
-                }
+            || async {
+                send_authenticated(self.auth.as_ref(), |token| {
+                    self.http
+                        .delete(&url)
+                        .bearer_auth(token)
+                        .header("User-Agent", USER_AGENT)
+                        .json(&request_body)
+                })
+                .await?;
+                Ok(())
             },
         )
         .await;
@@ -321,10 +294,7 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
         let host = self.get_or_discover_host().await?;
         let url = channel_status_url(host, database, schema, table)?;
 
-        let auth = Arc::clone(&self.auth);
-        let http = self.http.clone();
-        let requested_channel = channel.to_owned();
-        let channel_names = vec![requested_channel.clone()];
+        let channel_names = vec![channel.to_owned()];
         let request_body = BulkStatusRequest { channel_names: &channel_names };
 
         retry_with_backoff(
@@ -340,35 +310,29 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                     "retrying channel_status"
                 );
             },
-            || {
-                let url = url.clone();
-                let auth = Arc::clone(&auth);
-                let http = http.clone();
-                let body = &request_body;
-                let requested_channel = requested_channel.clone();
-                async move {
-                    let resp = send_authenticated(auth.as_ref(), |token| {
-                        http.post(&url)
-                            .bearer_auth(token)
-                            .header("User-Agent", USER_AGENT)
-                            .json(body)
-                    })
-                    .await?;
+            || async {
+                let resp = send_authenticated(self.auth.as_ref(), |token| {
+                    self.http
+                        .post(&url)
+                        .bearer_auth(token)
+                        .header("User-Agent", USER_AGENT)
+                        .json(&request_body)
+                })
+                .await?;
 
-                    let mut response: BulkStatusApiResponse = resp.json().await.map_err(|e| {
-                        Error::Encoding(format!("failed to parse channel_status response: {e}"))
-                    })?;
+                let mut response: BulkStatusApiResponse = resp.json().await.map_err(|e| {
+                    Error::Encoding(format!("failed to parse channel_status response: {e}"))
+                })?;
 
-                    let channel = response
-                        .channel_statuses
-                        .remove(&requested_channel)
-                        .ok_or(SnowpipeError::ChannelNotFound)?;
-                    let status = channel.into_channel_status(&requested_channel)?;
-                    if status.status_code == "SUCCESS" {
-                        Ok(status)
-                    } else {
-                        Err(SnowpipeError::ChannelInvalidated.into())
-                    }
+                let channel_status = response
+                    .channel_statuses
+                    .remove(channel)
+                    .ok_or(SnowpipeError::ChannelNotFound)?;
+                let status = channel_status.into_channel_status(channel)?;
+                if status.status_code == "SUCCESS" {
+                    Ok(status)
+                } else {
+                    Err(SnowpipeError::ChannelInvalidated.into())
                 }
             },
         )
@@ -549,11 +513,14 @@ fn parse_optional_offset_token(token: Option<String>) -> Result<Option<OffsetTok
 
 #[cfg(test)]
 mod tests {
+    use std::str::from_utf8;
+
     use etl::{
         data::{Cell, TableRow},
         error::Retryability,
         schema::{ColumnSchema, TableId, Type},
     };
+    use reqwest::Url;
     use serde_json::json;
 
     use super::*;
@@ -562,7 +529,7 @@ mod tests {
         snowflake::{
             encoding::{CdcMeta, CdcOperation, serialize_row},
             streaming::{OffsetToken, RowBatchBuilder},
-            test_server::{CountingTokenProvider, serve_responses},
+            test_server::{CountingTokenProvider, serve_requests, serve_responses},
         },
     };
 
@@ -883,42 +850,101 @@ mod tests {
         assert_eq!(val["id"], 42);
     }
 
-    #[test]
-    fn insert_query_params_include_start_and_end_offsets() {
+    /// Insert retries and token refresh resend the same query and compressed
+    /// body.
+    #[tokio::test]
+    async fn insert_rows_preserves_query_and_body_across_retries() {
         let cols = [ColumnSchema::new("id".into(), Type::INT4, -1, 1, true)];
         let start: OffsetToken = "000000000000000a/0000000000000001".parse().unwrap();
         let end: OffsetToken = "000000000000000a/0000000000000002".parse().unwrap();
         let mut builder = RowBatchBuilder::new(TableId::new(1));
-        let completed = builder
-            .push_row(
-                &cols,
-                &TableRow::new(vec![Cell::I32(1)]),
-                CdcMeta::new(CdcOperation::Insert, start.as_ref()),
-                &start,
-            )
-            .unwrap();
-        assert!(completed.is_empty());
-        let completed = builder
-            .push_row(
-                &cols,
-                &TableRow::new(vec![Cell::I32(2)]),
-                CdcMeta::new(CdcOperation::Insert, end.as_ref()),
-                &end,
-            )
-            .unwrap();
-        assert!(completed.is_empty());
+
+        for (id, offset) in [(1, &start), (2, &end)] {
+            let completed = builder
+                .push_row(
+                    &cols,
+                    &TableRow::new(vec![Cell::I32(id)]),
+                    CdcMeta::new(CdcOperation::Insert, offset.as_ref()),
+                    offset,
+                )
+                .unwrap();
+            assert!(completed.is_empty());
+        }
+
         let batch = builder.finish().unwrap().into_iter().next().unwrap();
+        let expected_body = batch.bytes().clone();
+        let (url, server) = serve_requests(
+            vec![
+                (500, "{}".to_owned()),
+                (401, "{}".to_owned()),
+                (200, r#"{"next_continuation_token":"placeholder-next-token"}"#.to_owned()),
+            ],
+            move |request, head_end| {
+                let head = from_utf8(&request[..head_end]).unwrap();
+                let target = head
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .strip_prefix("POST ")
+                    .unwrap()
+                    .strip_suffix(" HTTP/1.1")
+                    .unwrap();
+                let url = Url::parse(&format!("http://example.com{target}")).unwrap();
 
-        let params = insert_query_params(&batch, "ct0");
+                assert_eq!(
+                    url.path(),
+                    "/v2/streaming/data/databases/DB%3F/schemas/SCHEMA%23/pipes/TABLE%\
+                     2F-STREAMING/channels/CHANNEL%252F/rows"
+                );
+                assert_eq!(
+                    url.query_pairs().into_owned().collect::<Vec<_>>(),
+                    [
+                        ("continuationToken", "placeholder-token?/#% +"),
+                        ("startOffsetToken", start.as_ref()),
+                        ("endOffsetToken", end.as_ref()),
+                    ]
+                    .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                );
+                for header in [
+                    "user-agent: supabase-etl/0.1.0",
+                    "content-type: application/x-ndjson",
+                    "content-encoding: zstd",
+                ] {
+                    assert!(head.lines().any(|line| line.eq_ignore_ascii_case(header)));
+                }
+                assert_eq!(&request[head_end..], expected_body.as_ref());
 
-        assert_eq!(
-            params,
-            [
-                ("continuationToken", "ct0".to_owned()),
-                ("startOffsetToken", start.as_ref().to_owned()),
-                ("endOffsetToken", end.as_ref().to_owned()),
-            ]
+                head.lines().find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("authorization: bearer ")
+                        .map(str::to_owned)
+                })
+            },
+        )
+        .await;
+        let auth = Arc::new(CountingTokenProvider::default());
+        let stream = RestStreamClient::new(
+            url.clone(),
+            Arc::clone(&auth),
+            Client::builder().no_proxy().build().unwrap(),
         );
+        stream.ingest_host.set(url).unwrap();
+
+        let response = stream
+            .insert_rows(
+                "DB?",
+                "SCHEMA#",
+                "TABLE/",
+                "CHANNEL%2F",
+                &batch,
+                "placeholder-token?/#% +",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.continuation_token, "placeholder-next-token");
+        assert_eq!(server.await.unwrap(), vec!["token-0", "token-0", "token-1"]);
+        assert_eq!(auth.invalidations(), 1);
     }
 
     #[test]

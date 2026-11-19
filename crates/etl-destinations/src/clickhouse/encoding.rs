@@ -416,6 +416,9 @@ pub(crate) fn encode_row(
     Ok(())
 }
 
+#[cfg(kani)]
+mod verification;
+
 #[cfg(test)]
 mod tests {
     use chrono::NaiveDate;
