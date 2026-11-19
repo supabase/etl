@@ -18,6 +18,8 @@ mod codec;
 mod counters;
 mod fixtures;
 mod postgres;
+#[cfg(feature = "snowflake")]
+mod snowflake;
 
 use anyhow::{Result, ensure};
 use clap::Parser;
@@ -41,6 +43,8 @@ const SCENARIO_GROUPS: &[&[Scenario]] = &[
     bigquery::SCENARIOS,
     #[cfg(feature = "clickhouse")]
     clickhouse::SCENARIOS,
+    #[cfg(feature = "snowflake")]
+    snowflake::SCENARIOS,
 ];
 
 /// Command-line arguments for the hot-path benchmark.

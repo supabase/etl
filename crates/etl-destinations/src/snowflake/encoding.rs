@@ -1,4 +1,4 @@
-use std::{fmt, io::Write};
+use std::{fmt, io::Write, str};
 
 use etl::{
     data::{
@@ -16,6 +16,12 @@ use crate::snowflake::{
     Error, Result,
     schema::{CDC_MISSING_COLUMNS_COLUMN, CDC_OPERATION_COLUMN, CDC_SEQUENCE_COLUMN, is_json_type},
 };
+
+/// Lowercase digits for `bytea` hex text.
+const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+
+/// Hex characters batched on the stack before each formatter write.
+const HEX_BUFFER_BYTES: usize = 256;
 
 /// CDC operation type appended to every row sent via Snowpipe Streaming.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -249,19 +255,27 @@ fn serialize_pg_numeric<S: Serializer>(
     ser.collect_str(n)
 }
 
-/// Zero-allocation hex formatter for byte slices.
+/// Zero-allocation lowercase hex formatter for byte slices.
 ///
 /// Implements `Display` so it can be used with `collect_str()` to write hex
 /// directly into the JSON buffer, avoiding the `String` that `hex::encode`
-/// would allocate.
+/// would allocate. Digits are batched in a stack buffer so each formatter
+/// write covers up to [`HEX_BUFFER_BYTES`] characters instead of two.
 ///
 /// For arrays, wrap in `CollectStr(HexDisplay(b))`.
 struct HexDisplay<'a>(&'a [u8]);
 
 impl fmt::Display for HexDisplay<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in self.0 {
-            write!(f, "{byte:02x}")?;
+        let mut hex = [0; HEX_BUFFER_BYTES];
+        for bytes in self.0.chunks(HEX_BUFFER_BYTES / 2) {
+            for (digits, &byte) in hex.chunks_exact_mut(2).zip(bytes) {
+                digits[0] = HEX_DIGITS[usize::from(byte >> 4)];
+                digits[1] = HEX_DIGITS[usize::from(byte & 0x0f)];
+            }
+            let text = str::from_utf8(&hex[..bytes.len() * 2])
+                .expect("hex digits are ASCII, which is valid UTF-8");
+            f.write_str(text)?;
         }
         Ok(())
     }
@@ -399,13 +413,35 @@ fn expand_partial_row(
     Ok(row)
 }
 
+/// Returns the replicated positions a key-only old tuple omits under the
+/// schema's replica identity, in replicated order.
+pub(super) fn key_only_missing_columns(schema: &ReplicatedTableSchema) -> Vec<usize> {
+    let mut identity = schema.identity_column_schemas().peekable();
+    schema
+        .column_schemas()
+        .enumerate()
+        .filter_map(|(index, column)| {
+            if identity.peek().is_some_and(|key| key.ordinal_position == column.ordinal_position) {
+                identity.next();
+                None
+            } else {
+                Some(index)
+            }
+        })
+        .collect()
+}
+
 /// Expands key-only deletes using the actual replica identity, including an
 /// alternative unique index. Materialization queries never carry forward values
 /// from deletes.
-pub(super) fn normalize_delete_row(
+///
+/// `key_only_missing` comes from [`key_only_missing_columns`] for `schema`, so
+/// callers can build it once per table instead of once per event.
+pub(super) fn normalize_delete_row<'a>(
     schema: &ReplicatedTableSchema,
     row: Option<OldTableRow>,
-) -> Result<(TableRow, Vec<usize>)> {
+    key_only_missing: &'a [usize],
+) -> Result<(TableRow, &'a [usize])> {
     let row =
         row.ok_or_else(|| Error::UnsupportedIdentity("Delete has no old tuple".to_owned()))?;
     match row {
@@ -415,26 +451,10 @@ pub(super) fn normalize_delete_row(
                     "Old row width does not match the replicated layout".to_owned(),
                 ));
             }
-            Ok((row, Vec::new()))
+            Ok((row, &[]))
         }
         OldTableRow::Key(row) => {
-            let mut identity = schema.identity_column_schemas().peekable();
-            let missing = schema
-                .column_schemas()
-                .enumerate()
-                .filter_map(|(index, column)| {
-                    if identity
-                        .peek()
-                        .is_some_and(|key| key.ordinal_position == column.ordinal_position)
-                    {
-                        identity.next();
-                        None
-                    } else {
-                        Some(index)
-                    }
-                })
-                .collect::<Vec<_>>();
-            Ok((expand_partial_row(schema, row, &missing)?, missing))
+            Ok((expand_partial_row(schema, row, key_only_missing)?, key_only_missing))
         }
     }
 }
@@ -471,7 +491,8 @@ pub(super) fn normalize_update_row(
                 ));
             }
             if let Some(old) = old {
-                let (old, _) = normalize_delete_row(schema, Some(old))?;
+                let (old, _) =
+                    normalize_delete_row(schema, Some(old), &key_only_missing_columns(schema))?;
                 for ((column, before), after) in
                     schema.column_schemas().zip(old.values()).zip(row.values())
                 {
@@ -686,6 +707,22 @@ mod tests {
         }
     }
 
+    /// Bytea hex keeps every byte value lowercase and in order, including
+    /// values longer than one stack buffer.
+    #[test]
+    fn bytea_hex_preserves_every_byte_across_buffer_boundaries() {
+        for len in [0, HEX_BUFFER_BYTES / 2, HEX_BUFFER_BYTES / 2 + 1, 3 * HEX_BUFFER_BYTES] {
+            let bytes: Vec<u8> = (0..len).map(|index| (index % 256) as u8).collect();
+            let expected: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+
+            assert_eq!(push_single_cell(Cell::Bytes(bytes.clone())).unwrap(), json!(expected));
+            assert_eq!(
+                push_single_cell(Cell::Array(ArrayCell::Bytes(vec![Some(bytes), None]))).unwrap(),
+                json!([expected, null])
+            );
+        }
+    }
+
     #[test]
     fn rejects_non_finite_floats() {
         let cases: Vec<Cell> = vec![
@@ -868,7 +905,7 @@ mod tests {
             assert_eq!(EtlError::from(error).kind(), ErrorKind::DestinationLayoutUnsupported);
         }
         assert_eq!(
-            EtlError::from(normalize_delete_row(&schema, None).unwrap_err()).kind(),
+            EtlError::from(normalize_delete_row(&schema, None, &[]).unwrap_err()).kind(),
             ErrorKind::SourceReplicaIdentityError
         );
     }
@@ -998,13 +1035,15 @@ mod tests {
             schema.replication_mask().clone(),
             IdentityMask::from_bytes(vec![1, 0, 0]),
         );
+        let key_only_missing = key_only_missing_columns(&alternative);
         let (row, missing) = normalize_delete_row(
             &alternative,
             Some(OldTableRow::Key(TableRow::new(vec![Cell::String("identity".into())]))),
+            &key_only_missing,
         )
         .unwrap();
         assert_eq!(row.values(), &[Cell::String("identity".into()), Cell::Null, Cell::Null]);
-        assert_eq!(missing, vec![1, 2]);
+        assert_eq!(missing, [1, 2]);
         let partial =
             PartialTableRow::new(3, TableRow::new(vec![Cell::I32(1), Cell::Null]), vec![0]);
         assert_eq!(
@@ -1553,8 +1592,10 @@ mod tests {
                         (CdcOperation::Update, row, missing)
                     }
                     HistoryEvent::Delete { old } => {
-                        let (row, missing) = normalize_delete_row(&schema, Some(old)).unwrap();
-                        (CdcOperation::Delete, row, missing)
+                        let key_only_missing = key_only_missing_columns(&schema);
+                        let (row, missing) =
+                            normalize_delete_row(&schema, Some(old), &key_only_missing).unwrap();
+                        (CdcOperation::Delete, row, missing.to_vec())
                     }
                 };
                 let mut line = Vec::new();

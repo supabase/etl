@@ -257,13 +257,9 @@ fn copy_row(fields: &[Option<String>]) -> Vec<u8> {
     row
 }
 
-/// Returns decoded rows of an order-like table that also has the types
-/// destinations format as text: timestamp, time, UUID, and JSON.
-///
-/// The rows come from the COPY decoder, so destination scenarios encode
-/// exactly what a table copy would hand them.
-#[cfg(any(feature = "bigquery", feature = "clickhouse"))]
-pub(super) fn decoded_wide_rows(rng: &mut Rng, units: usize) -> Vec<TableRow> {
+/// Returns the schema of [`decoded_wide_rows`].
+#[cfg(any(feature = "bigquery", feature = "clickhouse", feature = "snowflake"))]
+pub(super) fn wide_column_schemas() -> Vec<ColumnSchema> {
     let mut column_schemas = plain_column_schemas();
     column_schemas.extend([
         ColumnSchema::new("updated_at".to_owned(), Type::TIMESTAMP, -1, 9, false),
@@ -271,6 +267,18 @@ pub(super) fn decoded_wide_rows(rng: &mut Rng, units: usize) -> Vec<TableRow> {
         ColumnSchema::new("external_id".to_owned(), Type::UUID, -1, 11, false),
         ColumnSchema::new("attributes".to_owned(), Type::JSONB, -1, 12, false),
     ]);
+
+    column_schemas
+}
+
+/// Returns decoded rows of an order-like table that also has the types
+/// destinations format as text: timestamp, time, UUID, and JSON.
+///
+/// The rows come from the COPY decoder, so destination scenarios encode
+/// exactly what a table copy would hand them.
+#[cfg(any(feature = "bigquery", feature = "clickhouse", feature = "snowflake"))]
+pub(super) fn decoded_wide_rows(rng: &mut Rng, units: usize) -> Vec<TableRow> {
+    let column_schemas = wide_column_schemas();
 
     let rows: Vec<Vec<u8>> = (0..units)
         .map(|id| {
