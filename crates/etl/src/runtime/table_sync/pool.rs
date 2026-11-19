@@ -53,7 +53,7 @@ impl std::fmt::Display for TableSyncWorkerId {
 /// Locking order during spawn is: workers_join_set lock -> workers write lock.
 /// This ensures that [`Self::wait_all`] (which holds the workers_join_set lock)
 /// blocks any new spawns until all existing workers have completed.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) struct TableSyncWorkerPool {
     /// Monotonically increasing counter for generating unique run IDs.
     next_run_id: AtomicU64,
@@ -66,11 +66,7 @@ pub(crate) struct TableSyncWorkerPool {
 impl TableSyncWorkerPool {
     /// Creates a new empty table sync worker pool.
     pub(crate) fn new() -> Self {
-        Self {
-            next_run_id: AtomicU64::new(0),
-            workers_join_set: Mutex::new(JoinSet::new()),
-            workers: RwLock::new(HashMap::new()),
-        }
+        Self::default()
     }
 
     /// Spawns a new worker into the pool if no active worker exists for the
@@ -226,12 +222,6 @@ impl TableSyncWorkerPool {
         }
 
         Ok(())
-    }
-}
-
-impl Default for TableSyncWorkerPool {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
