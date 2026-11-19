@@ -697,6 +697,11 @@ async fn primary_key_made_deferrable_is_rejected_replacing_merge_tree() {
 /// A type change that ClickHouse rejects stops the pipeline until the table
 /// is resynchronized. The resync copies the table under the new type without
 /// replaying the rejected schema change, and later rows keep replicating.
+///
+/// The resync is the per-table reset an operator requests: only this table's
+/// state returns to `Init`, while the apply checkpoint, stored schemas, and
+/// destination metadata stay. The pipeline-wide reset also deletes the apply
+/// checkpoint and starts a new slot, so it never replays the rejected change.
 async fn rejected_type_change_recovers_after_resync_inner(engine: ClickHouseEngine) {
     // GIVEN: a copied table with an `integer` column and one row.
     init_test_tracing();
