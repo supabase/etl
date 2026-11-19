@@ -29,6 +29,9 @@ use crate::{
     retry::{ClassifiedError, classified_error},
 };
 
+/// Uppercase digits for DuckDB hex literals and CDC fingerprints.
+const HEX_DIGITS: &[u8; 16] = b"0123456789ABCDEF";
+
 /// Arrow errors come from encoding rows and fail the same way for the same
 /// rows.
 impl ClassifiedError for duckdb::arrow::error::ArrowError {
@@ -569,7 +572,13 @@ fn float_literal(value: f64, is_double: bool) -> String {
 
 /// Encodes bytes as uppercase hexadecimal for DuckDB's `from_hex`.
 fn encode_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02X}")).collect()
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        encoded.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX_DIGITS[usize::from(byte & 0x0f)]));
+    }
+
+    encoded
 }
 
 /// Converts a [`Cell`] to a [`duckdb::types::Value`] for use with parameterized
@@ -719,6 +728,23 @@ pub(super) mod tests {
                 None,
             ])),
             "[CAST('{\"a\":1}' AS JSON), NULL]"
+        );
+    }
+
+    /// Preserves the exact bytea SQL text used in CDC batch fingerprints.
+    #[test]
+    fn bytea_literals_preserve_uppercase_hex_and_nulls() {
+        let bytes = (0..=u8::MAX).collect::<Vec<_>>();
+        let expected_hex = bytes.iter().map(|byte| format!("{byte:02X}")).collect::<String>();
+
+        assert_eq!(cell_to_sql_literal(Cell::Bytes(bytes)), format!("from_hex('{expected_hex}')"));
+        assert_eq!(
+            array_cell_to_sql_literal(ArrayCell::Bytes(vec![
+                Some(vec![0x00, 0x0a, 0xff]),
+                Some(vec![]),
+                None,
+            ])),
+            "[from_hex('000AFF'), from_hex(''), NULL]"
         );
     }
 
