@@ -1,6 +1,6 @@
 //! One-shot DuckLake maintenance binary for Kubernetes maintenance Jobs.
 
-use std::{env, error::Error, process::ExitCode};
+use std::{env, error::Error, process::ExitCode, time::Duration};
 
 use etl_config::{
     default_ducklake_s3_url_style, default_ducklake_s3_use_ssl, load_config,
@@ -10,10 +10,15 @@ use etl_config::{
         ReplicatorConfig, Validate,
     },
 };
-use etl_maintenance::ducklake::{
-    CleanupOldFilesMaintenanceConfig, DuckLakeMaintenanceConfig, ExpireSnapshotsMaintenanceConfig,
-    InlineFlushMaintenanceConfig, MergeAdjacentFilesMaintenanceConfig,
-    RewriteDataFilesMaintenanceConfig, S3Config as DuckLakeS3Config, run_maintenance_once,
+use etl_maintenance::{
+    KubernetesExternalMaintenanceStore,
+    ducklake::{
+        CleanupOldFilesMaintenanceConfig, DuckLakeMaintenanceConfig,
+        ExpireSnapshotsMaintenanceConfig, InlineFlushMaintenanceConfig,
+        MergeAdjacentFilesMaintenanceConfig, RewriteDataFilesMaintenanceConfig,
+        S3Config as DuckLakeS3Config, run_maintenance_once,
+    },
+    report::{MaintenanceResults, MaintenanceRunnerReport},
 };
 use rustls::crypto::aws_lc_rs;
 use secrecy::ExposeSecret;
@@ -45,6 +50,23 @@ fn try_main() -> MaintenanceResult<()> {
 
 /// Runs one async maintenance attempt.
 async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
+    let pipeline_id = config.pipeline.id.clone();
+    let project_ref = config.project_ref().map(ToOwned::to_owned);
+    let report_target = if env_bool("ETL_DUCKLAKE_MAINTENANCE_REPORTING_ENABLED", false) {
+        let run_id = env::var("ETL_DUCKLAKE_MAINTENANCE__RUN_ID")?;
+        let store = KubernetesExternalMaintenanceStore::from_env(Duration::from_secs(10))
+            .await?
+            .ok_or("maintenance Job requires its CR name and namespace for durable reporting")?;
+        let project =
+            project_ref.as_deref().ok_or("maintenance Job requires project attribution")?;
+        if store.completed_report(&pipeline_id, project, &run_id).await?.is_some() {
+            info!("maintenance results already persisted; skipping repeated execution");
+            return Ok(());
+        }
+        Some((store, run_id))
+    } else {
+        None
+    };
     let DestinationConfig::Ducklake {
         catalog_url,
         catalog_pooler_url,
@@ -166,6 +188,22 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
     );
 
     let outcome = run_maintenance_once(maintenance_config).await?;
+    if let Some((store, run_id)) = report_target {
+        let report = MaintenanceRunnerReport {
+            version: 1,
+            run_id,
+            inline_flush: outcome.inline_flush_summaries.clone(),
+            results: MaintenanceResults {
+                merge_adjacent_files_created: outcome.merge_adjacent_files_created,
+                rewrite_data_files_created: outcome.rewrite_data_files_created,
+                expired_snapshots: outcome.expired_snapshots,
+                cleaned_up_files: outcome.cleaned_up_files,
+            },
+        };
+        store
+            .report_result(&pipeline_id, project_ref.as_deref().unwrap_or_default(), &report)
+            .await?;
+    }
     info!(
         applied = outcome.applied(),
         replay_helper_rows_deleted = outcome.replay_helper_rows_deleted,
