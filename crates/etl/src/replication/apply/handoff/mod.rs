@@ -45,7 +45,7 @@ use crate::{
         apply::{
             ApplyWorkerContext, ExitIntent, get_syncing_tables,
             handoff::{
-                active_table::ActiveTable,
+                active_table::execute_active_action,
                 decision::{HandoffAction, ReadinessInputs, Trigger, decide},
             },
         },
@@ -286,12 +286,20 @@ where
 
         let exit_intent =
             if let Some(worker_state) = ctx.pool.get_active_worker_state(table_id).await {
-                let table = ActiveTable::lock(table_id, &worker_state).await;
-                let table_state = table.table_state();
+                let guard = worker_state.lock().await;
+                let table_state = guard.table_state();
                 let action = decide(Trigger::AfterCommit, true, &table_state, current_lsn, None);
                 evaluation.log_active(&table_state, &action);
 
-                table.execute(action, &ctx.store, &ctx.shutdown_token, activity_handle).await?
+                execute_active_action(
+                    table_id,
+                    guard,
+                    action,
+                    &ctx.store,
+                    &ctx.shutdown_token,
+                    Some(activity_handle),
+                )
+                .await?
             } else {
                 let action = decide(Trigger::AfterCommit, false, &stored_state, current_lsn, None);
                 evaluation.log_idle(&stored_state, &action);
@@ -345,27 +353,14 @@ where
         };
 
         if let Some(worker_state) = ctx.pool.get_active_worker_state(table_id).await {
-            let table = ActiveTable::lock(table_id, &worker_state).await;
-            let table_state = table.table_state();
+            let guard = worker_state.lock().await;
+            let table_state = guard.table_state();
             let action =
                 decide(Trigger::AfterFlush, true, &table_state, current_lsn, Some(&readiness));
             evaluation.log_active(&table_state, &action);
 
-            if let HandoffAction::PromoteToReady {
-                sync_done_lsn,
-                current_lsn,
-                persisted_checkpoint_lsn,
-            } = action
-            {
-                table
-                    .promote_to_ready(
-                        sync_done_lsn,
-                        current_lsn,
-                        persisted_checkpoint_lsn,
-                        &ctx.store,
-                    )
-                    .await?;
-            }
+            execute_active_action(table_id, guard, action, &ctx.store, &ctx.shutdown_token, None)
+                .await?;
         } else {
             let action =
                 decide(Trigger::AfterFlush, false, &stored_state, current_lsn, Some(&readiness));
@@ -408,13 +403,21 @@ where
 
         let exit_intent =
             if let Some(worker_state) = ctx.pool.get_active_worker_state(table_id).await {
-                let table = ActiveTable::lock(table_id, &worker_state).await;
-                let table_state = table.table_state();
+                let guard = worker_state.lock().await;
+                let table_state = guard.table_state();
                 let action =
                     decide(Trigger::Quiescent, true, &table_state, current_lsn, Some(&readiness));
                 evaluation.log_active(&table_state, &action);
 
-                table.execute(action, &ctx.store, &ctx.shutdown_token, activity_handle).await?
+                execute_active_action(
+                    table_id,
+                    guard,
+                    action,
+                    &ctx.store,
+                    &ctx.shutdown_token,
+                    Some(activity_handle),
+                )
+                .await?
             } else {
                 let action =
                     decide(Trigger::Quiescent, false, &stored_state, current_lsn, Some(&readiness));

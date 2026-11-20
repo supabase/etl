@@ -1,16 +1,11 @@
-//! A syncing table whose sync worker is running.
+//! Execution of handoff actions for a syncing table whose sync worker is
+//! running.
 //!
-//! [`ActiveTable`] holds the worker's state lock from observation through
-//! transition. Its catchup internals are private to this module, which keeps
-//! two rules out of the callers' hands:
-//!
-//! - Storing `Catchup` and waiting for the worker are one operation,
-//!   [`ActiveTable::execute`]. A caller cannot store `Catchup` and then read
-//!   more WAL, and a caller without an [`ActivityHandle`] cannot enter catchup
-//!   at all.
-//! - The wait runs on a [`CatchupWait`], which holds no lock. Building one
-//!   consumes the [`ActiveTable`], so the apply worker cannot wait while
-//!   holding the lock the table-sync worker needs to reach `SyncDone`.
+//! [`execute_active_action`] receives the worker's
+//! [`TableSyncWorkerStateGuard`] so state observation and transition stay
+//! atomic. Waiting for catchup consumes that guard via
+//! [`TableSyncWorkerStateGuard::wait_for_state_type`], releasing the lock so
+//! the table-sync worker can reach `SyncDone`.
 
 use tokio_postgres::types::PgLsn;
 use tokio_util::sync::CancellationToken;
@@ -27,200 +22,142 @@ use crate::{
         },
         state::{TableState, TableStateType},
     },
-    runtime::{TableSyncWorkerState, TableSyncWorkerStateGuard, concurrency::ShutdownResult},
+    runtime::{TableSyncWorkerStateGuard, concurrency::ShutdownResult},
     schema::TableId,
     store::StateStore,
 };
 
-/// Why the apply worker is waiting for table-sync catchup.
-#[derive(Debug)]
-enum CatchupWaitReason {
-    /// The apply worker just moved the table-sync worker into catchup.
-    EnteredCatchup,
-    /// The apply worker found the table-sync worker already in catchup.
-    AlreadyInCatchup,
-}
-
-/// Wait for a table-sync worker in catchup to hand its table back.
+/// Waits until the table-sync worker reaches `SyncDone` or `Errored`.
 ///
-/// Waiting consumes the state guard, releasing the lock so the table-sync
-/// worker can reach `SyncDone`.
-struct CatchupWait<'a> {
-    /// Table the worker synchronizes.
+/// Consumes `guard` so the lock is released while waiting. The table-sync
+/// worker owns the table through `SyncDone`; reaching it releases the apply
+/// loop. Returns [`ExitIntent::Pause`] when shutdown interrupts the wait.
+async fn wait_for_table_sync_worker_catchup(
     table_id: TableId,
-    /// State guard of the running worker, consumed to release the lock while
-    /// waiting.
-    guard: TableSyncWorkerStateGuard<'a>,
-    /// LSN the worker streams up to before `SyncDone`.
+    guard: TableSyncWorkerStateGuard<'_>,
     catchup_lsn: PgLsn,
-    /// How the worker came to be in catchup.
-    reason: CatchupWaitReason,
-}
+    catchup_state: &'static str,
+    shutdown_token: &CancellationToken,
+    activity_handle: &ActivityHandle,
+) -> Option<ExitIntent> {
+    info!(
+        worker_type = %WorkerType::Apply,
+        table_id = table_id.0,
+        %catchup_lsn,
+        catchup_state,
+        "apply worker blocking until table sync worker reaches sync_done",
+    );
 
-impl CatchupWait<'_> {
-    /// Waits until the table-sync worker reaches `SyncDone` or `Errored`.
-    ///
-    /// The table-sync worker owns the table through `SyncDone`; reaching it
-    /// releases the apply loop. An owned relation can rebuild the decoder
-    /// using the handover boundary, while relation-less DML can restore the
-    /// complete stored decoder on demand. Returns [`ExitIntent::Pause`] when
-    /// shutdown interrupts the wait.
-    async fn wait(
-        self,
-        shutdown_token: &CancellationToken,
-        activity_handle: &ActivityHandle,
-    ) -> Option<ExitIntent> {
-        let Self { table_id, guard, catchup_lsn, reason } = self;
-        let catchup_state = match reason {
-            CatchupWaitReason::EnteredCatchup => "entered",
-            CatchupWaitReason::AlreadyInCatchup => "already_in",
-        };
+    // We wait for both states since if the table sync worker errors, we
+    // don't want to stall forever.
+    let _activity_suspension = activity_handle.suspend();
+    let result = guard
+        .wait_for_state_type(
+            &[TableStateType::SyncDone, TableStateType::Errored],
+            shutdown_token.clone(),
+        )
+        .await;
 
-        info!(
-            worker_type = %WorkerType::Apply,
-            table_id = table_id.0,
-            %catchup_lsn,
-            catchup_state,
-            "apply worker blocking until table sync worker reaches sync_done",
-        );
-
-        // We wait for both states since if the table sync worker errors, we
-        // don't want to stall forever.
-        let _activity_suspension = activity_handle.suspend();
-        let result = guard
-            .wait_for_state_type(
-                &[TableStateType::SyncDone, TableStateType::Errored],
-                shutdown_token.clone(),
-            )
-            .await;
-
-        match result {
-            ShutdownResult::Ok(result) => {
-                let final_state = result.table_state();
-                if final_state.as_type().is_errored() {
-                    info!(
-                        worker_type = %WorkerType::Apply,
-                        table_id = table_id.0,
-                        table_state_type = %final_state.as_type(),
-                        "apply worker unblocked: table sync worker errored, skipping table",
-                    );
-
-                    return None;
-                }
-
+    match result {
+        ShutdownResult::Ok(result) => {
+            let final_state = result.table_state();
+            if final_state.as_type().is_errored() {
                 info!(
                     worker_type = %WorkerType::Apply,
                     table_id = table_id.0,
                     table_state_type = %final_state.as_type(),
-                    "apply worker unblocked: table sync worker reached sync_done",
+                    "apply worker unblocked: table sync worker errored, skipping table",
                 );
 
-                None
+                return None;
             }
-            ShutdownResult::Shutdown(_) => {
-                info!(
-                    worker_type = %WorkerType::Apply,
-                    table_id = table_id.0,
-                    "apply worker unblocked: shutdown signal received while waiting for table sync worker",
-                );
 
-                Some(ExitIntent::Pause)
-            }
+            info!(
+                worker_type = %WorkerType::Apply,
+                table_id = table_id.0,
+                table_state_type = %final_state.as_type(),
+                "apply worker unblocked: table sync worker reached sync_done",
+            );
+
+            None
+        }
+        ShutdownResult::Shutdown(_) => {
+            info!(
+                worker_type = %WorkerType::Apply,
+                table_id = table_id.0,
+                "apply worker unblocked: shutdown signal received while waiting for table sync worker",
+            );
+
+            Some(ExitIntent::Pause)
         }
     }
 }
 
-/// A syncing table whose sync worker is running, observed under the worker's
-/// state lock.
+/// Carries out a handoff action for a table whose sync worker is running,
+/// storing any new state under `guard`.
 ///
-/// Holding the lock makes the observed state and any transition one atomic
-/// step.
-pub(super) struct ActiveTable<'a> {
-    /// Table the worker synchronizes.
+/// A catchup action consumes `guard` to release the lock before waiting for
+/// the table-sync worker. Returns [`ExitIntent::Pause`] when shutdown
+/// interrupts that wait.
+pub(super) async fn execute_active_action<S: StateStore>(
     table_id: TableId,
-    /// Lock on the worker's state, held from observation through transition.
-    guard: TableSyncWorkerStateGuard<'a>,
-}
+    mut guard: TableSyncWorkerStateGuard<'_>,
+    action: HandoffAction,
+    store: &S,
+    shutdown_token: &CancellationToken,
+    activity_handle: Option<&ActivityHandle>,
+) -> EtlResult<Option<ExitIntent>> {
+    match action {
+        HandoffAction::StartCatchup { snapshot_lsn, current_lsn, catchup_lsn } => {
+            let activity_handle =
+                activity_handle.expect("catchup actions only run when an activity handle exists");
 
-impl<'a> ActiveTable<'a> {
-    /// Locks the state of a running worker.
-    pub(super) async fn lock(table_id: TableId, worker_state: &'a TableSyncWorkerState) -> Self {
-        let guard = worker_state.lock().await;
+            info!(
+                worker_type = %WorkerType::Apply,
+                table_id = table_id.0,
+                %current_lsn,
+                %snapshot_lsn,
+                %catchup_lsn,
+                "transitioning sync_wait -> catchup",
+            );
 
-        Self { table_id, guard }
-    }
+            guard.set_and_store(TableState::Catchup { lsn: catchup_lsn }, store).await?;
 
-    /// Returns the worker's current table state.
-    pub(super) fn table_state(&self) -> TableState {
-        self.guard.table_state()
-    }
+            Ok(wait_for_table_sync_worker_catchup(
+                table_id,
+                guard,
+                catchup_lsn,
+                "entered",
+                shutdown_token,
+                activity_handle,
+            )
+            .await)
+        }
+        HandoffAction::AwaitCatchup { catchup_lsn } => {
+            let activity_handle =
+                activity_handle.expect("catchup actions only run when an activity handle exists");
 
-    /// Carries out a handoff action, storing any new state under the lock.
-    ///
-    /// A catchup action releases the lock and then waits for the table-sync
-    /// worker. Returns an exit intent when shutdown interrupts that wait.
-    pub(super) async fn execute<S: StateStore>(
-        mut self,
-        action: HandoffAction,
-        store: &S,
-        shutdown_token: &CancellationToken,
-        activity_handle: &ActivityHandle,
-    ) -> EtlResult<Option<ExitIntent>> {
-        let catchup_wait = match action {
-            HandoffAction::StartCatchup { snapshot_lsn, current_lsn, catchup_lsn } => {
-                info!(
-                    worker_type = %WorkerType::Apply,
-                    table_id = self.table_id.0,
-                    %current_lsn,
-                    %snapshot_lsn,
-                    %catchup_lsn,
-                    "transitioning sync_wait -> catchup",
-                );
+            Ok(wait_for_table_sync_worker_catchup(
+                table_id,
+                guard,
+                catchup_lsn,
+                "already_in",
+                shutdown_token,
+                activity_handle,
+            )
+            .await)
+        }
+        HandoffAction::PromoteToReady { sync_done_lsn, current_lsn, persisted_checkpoint_lsn } => {
+            log_ready_transition(table_id, sync_done_lsn, current_lsn, persisted_checkpoint_lsn);
 
-                self.guard.set_and_store(TableState::Catchup { lsn: catchup_lsn }, store).await?;
+            guard.set_and_store(TableState::Ready, store).await?;
 
-                self.into_catchup_wait(catchup_lsn, CatchupWaitReason::EnteredCatchup)
-            }
-            HandoffAction::AwaitCatchup { catchup_lsn } => {
-                self.into_catchup_wait(catchup_lsn, CatchupWaitReason::AlreadyInCatchup)
-            }
-            HandoffAction::PromoteToReady {
-                sync_done_lsn,
-                current_lsn,
-                persisted_checkpoint_lsn,
-            } => {
-                self.promote_to_ready(sync_done_lsn, current_lsn, persisted_checkpoint_lsn, store)
-                    .await?;
-
-                return Ok(None);
-            }
-            HandoffAction::Keep => return Ok(None),
-            HandoffAction::SpawnWorker => {
-                unreachable!("active table never spawns a duplicate sync worker")
-            }
-        };
-
-        Ok(catchup_wait.wait(shutdown_token, activity_handle).await)
-    }
-
-    /// Stores `Ready` under the lock.
-    pub(super) async fn promote_to_ready<S: StateStore>(
-        mut self,
-        sync_done_lsn: PgLsn,
-        current_lsn: PgLsn,
-        persisted_checkpoint_lsn: PgLsn,
-        store: &S,
-    ) -> EtlResult<()> {
-        log_ready_transition(self.table_id, sync_done_lsn, current_lsn, persisted_checkpoint_lsn);
-
-        self.guard.set_and_store(TableState::Ready, store).await
-    }
-
-    /// Converts this active table into a catchup wait that consumes the lock.
-    fn into_catchup_wait(self, catchup_lsn: PgLsn, reason: CatchupWaitReason) -> CatchupWait<'a> {
-        let Self { table_id, guard } = self;
-
-        CatchupWait { table_id, guard, catchup_lsn, reason }
+            Ok(None)
+        }
+        HandoffAction::Keep => Ok(None),
+        HandoffAction::SpawnWorker => {
+            unreachable!("active table never spawns a duplicate sync worker")
+        }
     }
 }
 
@@ -239,7 +176,7 @@ mod tests {
         replication::{
             apply::{
                 ExitIntent,
-                handoff::{active_table::ActiveTable, decision::HandoffAction},
+                handoff::{active_table::execute_active_action, decision::HandoffAction},
             },
             state::{TableRetryPolicy, TableState},
         },
@@ -278,8 +215,10 @@ mod tests {
                 table_id,
                 TableState::SyncWait { lsn: PgLsn::from(10) },
             );
-            let table = ActiveTable::lock(table_id, &worker_state).await;
-            let mut handoff = pin!(table.execute(
+            let guard = worker_state.lock().await;
+            let mut handoff = pin!(execute_active_action(
+                table_id,
+                guard,
                 HandoffAction::StartCatchup {
                     snapshot_lsn: PgLsn::from(10),
                     current_lsn: catchup_lsn,
@@ -287,7 +226,7 @@ mod tests {
                 },
                 &store,
                 &shutdown_token,
-                &activity_handle,
+                Some(&activity_handle),
             ));
 
             assert!(handoff.as_mut().now_or_never().is_none());
@@ -314,12 +253,14 @@ mod tests {
         let catchup_lsn = PgLsn::from(20);
         let worker_state =
             TableSyncWorkerState::new_for_test(table_id, TableState::Catchup { lsn: catchup_lsn });
-        let table = ActiveTable::lock(table_id, &worker_state).await;
-        let mut handoff = pin!(table.execute(
+        let guard = worker_state.lock().await;
+        let mut handoff = pin!(execute_active_action(
+            table_id,
+            guard,
             HandoffAction::AwaitCatchup { catchup_lsn },
             &store,
             &shutdown_token,
-            &activity_handle,
+            Some(&activity_handle),
         ));
 
         assert!(handoff.as_mut().now_or_never().is_none());
@@ -340,21 +281,22 @@ mod tests {
             table_id,
             TableState::SyncDone { lsn: sync_done_lsn, table_decoding_state: None },
         );
-        let table = ActiveTable::lock(table_id, &worker_state).await;
+        let guard = worker_state.lock().await;
 
-        let exit_intent = table
-            .execute(
-                HandoffAction::PromoteToReady {
-                    sync_done_lsn,
-                    current_lsn: sync_done_lsn,
-                    persisted_checkpoint_lsn: sync_done_lsn,
-                },
-                &store,
-                &shutdown_token,
-                &activity.handle(),
-            )
-            .await
-            .unwrap();
+        let exit_intent = execute_active_action(
+            table_id,
+            guard,
+            HandoffAction::PromoteToReady {
+                sync_done_lsn,
+                current_lsn: sync_done_lsn,
+                persisted_checkpoint_lsn: sync_done_lsn,
+            },
+            &store,
+            &shutdown_token,
+            Some(&activity.handle()),
+        )
+        .await
+        .unwrap();
 
         assert!(exit_intent.is_none());
         assert_eq!(store.get_table_state(table_id).await.unwrap(), Some(TableState::Ready));
