@@ -97,16 +97,17 @@ fn metadata_error_category(error: &Error) -> &'static str {
 
 /// Shared routing for read-only DuckLake catalog queries.
 ///
-/// The first failed pooled read is retried through the direct pool. All clones
-/// then use the direct pool until this reader is recreated, avoiding repeated
-/// pooler delays and warnings. The direct pool retains its connection limit.
+/// Except for server query cancellations, the first failed pooled read is
+/// retried through the direct pool. All clones then use the direct pool until
+/// this reader is recreated, avoiding repeated pooler delays and warnings.
+/// The direct pool retains its connection limit.
 #[derive(Clone)]
 pub struct DuckLakeMetadataPool {
     /// Existing direct pool, also shared with foreground catalog operations.
     direct: PgPool,
-    /// Independently bounded pool used until a read fails.
+    /// Independently bounded pool used until fallback is required.
     pooler: Option<PgPool>,
-    /// Whether a pooled read has failed in any clone.
+    /// Whether any clone has switched to direct reads.
     fallback: Arc<AtomicBool>,
     /// Optional caller-owned metric for the first transition to direct reads.
     fallback_counter: Counter,
@@ -144,7 +145,7 @@ impl DuckLakeMetadataPool {
     }
 
     /// Runs a read-only query in a pinned transaction, retrying once on the
-    /// direct pool after a pooled failure.
+    /// direct pool after a pooled failure other than query cancellation.
     ///
     /// Each attempt has seven seconds after checkout to run the transaction and
     /// release the connection. A transaction-local six-second statement
@@ -177,6 +178,13 @@ impl DuckLakeMetadataPool {
                 Ok(result) => return Ok(result),
                 Err(error) => {
                     record_metadata_read_error("pooler", &error);
+
+                    // A canceled query does not indicate an unhealthy pooler.
+                    if error.as_database_error().and_then(DatabaseError::code).as_deref()
+                        == Some("57014")
+                    {
+                        return Err(error);
+                    }
 
                     if !self.fallback.swap(true, Ordering::Relaxed) {
                         self.fallback_counter.increment(1);
@@ -256,6 +264,7 @@ mod tests {
     enum BackendResponse {
         Healthy,
         FailSecondQuery,
+        CancelQuery,
         StallQuery,
         StallReturn,
     }
@@ -314,6 +323,17 @@ mod tests {
                                     &mut socket,
                                     b'E',
                                     b"SERROR\0C08006\0MSynthetic unavailable\0\0",
+                                )
+                                .await;
+                                frame(&mut socket, b'Z', b"E").await;
+                            }
+                            (b'Q', b"select 42\0")
+                                if matches!(response, BackendResponse::CancelQuery) =>
+                            {
+                                frame(
+                                    &mut socket,
+                                    b'E',
+                                    b"SERROR\0C57014\0MSynthetic query canceled\0\0",
                                 )
                                 .await;
                                 frame(&mut socket, b'Z', b"E").await;
@@ -452,6 +472,28 @@ mod tests {
 
         let invalid = Url::parse("file:///tmp/catalog").unwrap();
         assert!(DuckLakeMetadataPool::new(direct, Some(&invalid)).is_err());
+    }
+
+    /// Server cancellations are counted without retrying directly or changing
+    /// the route used by subsequent reads through a clone.
+    #[tokio::test]
+    async fn canceled_pooler_query_keeps_pooler_preferred() {
+        let metrics = init_metrics_handle().unwrap();
+        let backend =
+            TestBackend::start([BackendResponse::CancelQuery, BackendResponse::Healthy]).await;
+        let direct = backend.pool();
+        direct.close().await;
+        let fallbacks = Arc::new(AtomicU64::new(0));
+        let reader = DuckLakeMetadataPool::new(direct, Some(&backend.url))
+            .unwrap()
+            .with_fallback_counter(Counter::from_arc(Arc::clone(&fallbacks)));
+
+        let error = reader.read("list_tables", (), select).await.unwrap_err();
+
+        assert_eq!(error.as_database_error().unwrap().code().as_deref(), Some("57014"));
+        assert_eq!(reader.clone().read("list_tables", (), select).await.unwrap(), 1);
+        assert_eq!(fallbacks.load(Ordering::Relaxed), 0);
+        assert_read_errors(&metrics.render(), &[("pooler", "query_canceled", 1)]);
     }
 
     /// Direct errors are returned to the caller without a retry.
