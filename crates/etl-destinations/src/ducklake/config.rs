@@ -10,7 +10,7 @@ use etl::{
     etl_error,
 };
 use etl_config::{libpq_tcp_host, shared::DuckLakeWriterConfig};
-use etl_maintenance::ducklake::duckdb_version_check_sql;
+use etl_maintenance::ducklake::{configure_parquet_settings_sql, duckdb_version_check_sql};
 use pg_escape::{quote_identifier, quote_literal};
 use tokio_postgres::{
     Config as PgConfig,
@@ -30,33 +30,11 @@ pub(super) const TARGET_FILE_SIZE_OPTION_NAME: &str = "target_file_size";
 pub(super) const EXPIRE_SNAPSHOTS_OLDER_THAN: &str = "7 days";
 /// Minimum snapshot-retention interval accepted for DuckLake maintenance.
 pub(super) const MIN_EXPIRE_SNAPSHOTS_OLDER_THAN: &str = "1 day";
-const PARQUET_COMPRESSION_OPTION_NAME: &str = "parquet_compression";
-const PARQUET_COMPRESSION_OPTION_VALUE: &str = "zstd";
-const PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_NAME: &str = "parquet_row_group_size_bytes";
-const PARQUET_ROW_GROUP_SIZE_OPTION_NAME: &str = "parquet_row_group_size";
-const PARQUET_VERSION_OPTION_NAME: &str = "parquet_version";
-const PARQUET_VERSION_OPTION_VALUE: u8 = 2;
 const PRESERVE_INSERTION_ORDER_OPTION_NAME: &str = "preserve_insertion_order";
 
 /// Builds the SQL that configures DuckDB's session-level write ordering.
 fn configure_writer_session_sql() -> String {
     format!("SET {PRESERVE_INSERTION_ORDER_OPTION_NAME} = false;")
-}
-
-/// Builds the SQL that configures DuckLake's global Parquet writer settings.
-fn configure_parquet_settings_sql(writer_config: &DuckLakeWriterConfig) -> String {
-    format!(
-        "CALL {LAKE_CATALOG}.set_option({}, {}); CALL {LAKE_CATALOG}.set_option({}, {}); CALL \
-         {LAKE_CATALOG}.set_option({}, {}); CALL {LAKE_CATALOG}.set_option({}, {});",
-        quote_literal(PARQUET_COMPRESSION_OPTION_NAME),
-        quote_literal(PARQUET_COMPRESSION_OPTION_VALUE),
-        quote_literal(PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_NAME),
-        quote_literal(writer_config.parquet_row_group_size_bytes()),
-        quote_literal(PARQUET_ROW_GROUP_SIZE_OPTION_NAME),
-        quote_literal(writer_config.parquet_row_group_size()),
-        quote_literal(PARQUET_VERSION_OPTION_NAME),
-        PARQUET_VERSION_OPTION_VALUE,
-    )
 }
 
 /// Builds the SQL that sets DuckLake's maintenance target file size.
@@ -776,7 +754,7 @@ fn build_setup_plan_with_strategy(
     });
     steps.push(DuckLakeSetupStep {
         label: "configure_parquet",
-        sql: configure_parquet_settings_sql(writer_config),
+        sql: configure_parquet_settings_sql(LAKE_CATALOG, writer_config),
     });
 
     Ok(DuckLakeSetupPlan { steps })
@@ -1252,21 +1230,6 @@ mod tests {
         assert!(!sql.contains("postgres"));
         assert!(!sql.contains("httpfs"));
         assert!(!sql.contains("json"));
-        assert!(sql.contains(&format!(
-            "CALL {LAKE_CATALOG}.set_option({}, {});",
-            quote_literal(PARQUET_COMPRESSION_OPTION_NAME),
-            quote_literal(PARQUET_COMPRESSION_OPTION_VALUE),
-        )));
-        assert!(sql.contains(&format!(
-            "CALL {LAKE_CATALOG}.set_option({}, {});",
-            quote_literal(PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_NAME),
-            quote_literal(DuckLakeWriterConfig::default().parquet_row_group_size_bytes()),
-        )));
-        assert!(sql.contains(&format!(
-            "CALL {LAKE_CATALOG}.set_option({}, {});",
-            quote_literal(PARQUET_VERSION_OPTION_NAME),
-            PARQUET_VERSION_OPTION_VALUE,
-        )));
         assert!(sql.contains(&quote_literal(&format!("ducklake:{}", catalog_url.as_str()))));
         assert!(sql.contains(&format!("DATA_PATH {}", quote_literal(data_url.as_str()))));
         assert!(sql.contains(&format!(
@@ -1299,21 +1262,6 @@ mod tests {
         assert!(!sql.contains("postgres"));
         assert!(!sql.contains("httpfs"));
         assert!(!sql.contains("json"));
-        assert!(sql.contains(&format!(
-            "CALL {LAKE_CATALOG}.set_option({}, {});",
-            quote_literal(PARQUET_COMPRESSION_OPTION_NAME),
-            quote_literal(PARQUET_COMPRESSION_OPTION_VALUE),
-        )));
-        assert!(sql.contains(&format!(
-            "CALL {LAKE_CATALOG}.set_option({}, {});",
-            quote_literal(PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_NAME),
-            quote_literal(DuckLakeWriterConfig::default().parquet_row_group_size_bytes()),
-        )));
-        assert!(sql.contains(&format!(
-            "CALL {LAKE_CATALOG}.set_option({}, {});",
-            quote_literal(PARQUET_VERSION_OPTION_NAME),
-            PARQUET_VERSION_OPTION_VALUE,
-        )));
     }
 
     #[test]
@@ -1336,21 +1284,6 @@ mod tests {
         assert!(sql.contains("LOAD postgres"));
         assert!(!sql.contains("httpfs"));
         assert!(!sql.contains("json"));
-        assert!(sql.contains(&format!(
-            "CALL {LAKE_CATALOG}.set_option({}, {});",
-            quote_literal(PARQUET_COMPRESSION_OPTION_NAME),
-            quote_literal(PARQUET_COMPRESSION_OPTION_VALUE),
-        )));
-        assert!(sql.contains(&format!(
-            "CALL {LAKE_CATALOG}.set_option({}, {});",
-            quote_literal(PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_NAME),
-            quote_literal(DuckLakeWriterConfig::default().parquet_row_group_size_bytes()),
-        )));
-        assert!(sql.contains(&format!(
-            "CALL {LAKE_CATALOG}.set_option({}, {});",
-            quote_literal(PARQUET_VERSION_OPTION_NAME),
-            PARQUET_VERSION_OPTION_VALUE,
-        )));
         assert!(!sql.contains("ducklake:postgres://"));
         assert!(sql.contains("ducklake:postgres:"));
         assert!(sql.contains(&format!("DATA_PATH {}", quote_literal(data_url.as_str()))));
@@ -1383,21 +1316,6 @@ mod tests {
         assert!(sql.contains(POSTGRES_SCANNER_EXTENSION_FILE));
         assert!(sql.contains(HTTPFS_EXTENSION_FILE));
         assert!(!sql.contains("json"));
-        assert!(sql.contains(&format!(
-            "CALL {LAKE_CATALOG}.set_option({}, {});",
-            quote_literal(PARQUET_COMPRESSION_OPTION_NAME),
-            quote_literal(PARQUET_COMPRESSION_OPTION_VALUE),
-        )));
-        assert!(sql.contains(&format!(
-            "CALL {LAKE_CATALOG}.set_option({}, {});",
-            quote_literal(PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_NAME),
-            quote_literal(DuckLakeWriterConfig::default().parquet_row_group_size_bytes()),
-        )));
-        assert!(sql.contains(&format!(
-            "CALL {LAKE_CATALOG}.set_option({}, {});",
-            quote_literal(PARQUET_VERSION_OPTION_NAME),
-            PARQUET_VERSION_OPTION_VALUE,
-        )));
         assert!(!sql.contains("ducklake:postgres://"));
         assert!(sql.contains(&format!("DATA_PATH {}", quote_literal(data_url.as_str()))));
         assert!(sql.contains(&format!(
@@ -1459,17 +1377,14 @@ mod tests {
         assert!(plan.steps()[4].sql.contains("METADATA_CATALOG '__ducklake_metadata_lake'"));
         assert_eq!(
             plan.steps()[5].sql,
-            configure_parquet_settings_sql(&DuckLakeWriterConfig::default())
+            configure_parquet_settings_sql(LAKE_CATALOG, &DuckLakeWriterConfig::default())
         );
     }
 
     #[test]
-    fn ducklake_writer_settings_use_recommended_defaults() {
+    fn maintenance_target_file_size_uses_recommended_default() {
         let writer_config = DuckLakeWriterConfig::default();
-        let parquet_sql = configure_parquet_settings_sql(&writer_config);
 
-        assert!(parquet_sql.contains("'parquet_row_group_size_bytes', '128MiB'"));
-        assert!(parquet_sql.contains("'parquet_row_group_size', '2500000'"));
         assert_eq!(
             maintenance_target_file_size_sql(writer_config.target_file_size()),
             "CALL ducklake_set_option('lake', 'target_file_size', '256MiB');"
@@ -1477,16 +1392,13 @@ mod tests {
     }
 
     #[test]
-    fn ducklake_writer_settings_use_configured_overrides() {
+    fn maintenance_target_file_size_uses_configured_override() {
         let writer_config = DuckLakeWriterConfig::new(
             Some("64MB".to_owned()),
             Some("32MB".to_owned()),
             Some("500000".to_owned()),
         );
-        let parquet_sql = configure_parquet_settings_sql(&writer_config);
 
-        assert!(parquet_sql.contains("'parquet_row_group_size_bytes', '32MB'"));
-        assert!(parquet_sql.contains("'parquet_row_group_size', '500000'"));
         assert_eq!(
             maintenance_target_file_size_sql(writer_config.target_file_size()),
             "CALL ducklake_set_option('lake', 'target_file_size', '64MB');"

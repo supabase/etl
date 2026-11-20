@@ -783,6 +783,55 @@ fn checkpoint_lake(catalog: &Url, data: &Url) {
 
 // ── tests ─────────────────────────────────────────────────────────────────────
 
+/// Connection setup stores the Parquet writer options in the catalog, so files
+/// written by the destination use them.
+#[tokio::test(flavor = "multi_thread")]
+async fn connection_setup_stores_parquet_writer_options() {
+    let lake = create_test_lake("parquet_writer_options").await;
+
+    let destination = new_unbuffered_destination(
+        lake.catalog_url.clone(),
+        lake.data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        MemoryStore::new(),
+    )
+    .await
+    .unwrap();
+    destination.shutdown().await.unwrap();
+
+    let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
+    let options: Vec<(String, String)> = conn
+        .prepare(
+            "select key, value from __ducklake_metadata_lake.ducklake_metadata
+             where key in ('parquet_compression', 'parquet_row_group_size_bytes',
+                 'parquet_row_group_size', 'parquet_version')
+             order by key",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    // DuckLake normalizes some values (`128MiB` is stored as bytes), so only
+    // values it stores verbatim are compared.
+    let keys: Vec<&str> = options.iter().map(|(key, _)| key.as_str()).collect();
+    assert_eq!(
+        keys,
+        [
+            "parquet_compression",
+            "parquet_row_group_size",
+            "parquet_row_group_size_bytes",
+            "parquet_version"
+        ]
+    );
+    assert_eq!(options[0].1, "zstd");
+    assert_eq!(options[1].1, DuckLakeWriterConfig::default().parquet_row_group_size());
+}
+
 /// `write_table_rows` inserts rows that can be queried back through the
 /// DuckLake catalog using a separate DuckDB connection, retaining format 1.1
 /// when creating and reopening the catalog.

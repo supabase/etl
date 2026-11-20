@@ -40,8 +40,9 @@ use tracing::{debug, info, trace, warn};
 use url::Url;
 
 use crate::ducklake::{
-    DataFileRewriteReason, DuckLakeMetadataPool, RedactedDuckDbError, duckdb_version_check_sql,
-    namespace_version_check_sql, namespaced_tables_query, table_namespace_filter,
+    DataFileRewriteReason, DuckLakeMetadataPool, RedactedDuckDbError,
+    configure_parquet_settings_sql, duckdb_version_check_sql, namespace_version_check_sql,
+    namespaced_tables_query, table_namespace_filter,
 };
 
 const LAKE_CATALOG: &str = "lake";
@@ -68,12 +69,6 @@ const TARGET_FILE_SIZE_OPTION_NAME: &str = "target_file_size";
 const MIN_EXPIRE_SNAPSHOTS_OLDER_THAN: &str = "1 day";
 /// Minimum old-file cleanup grace window used by DuckLake cleanup.
 const CLEANUP_OLD_FILES_OLDER_THAN: &str = "1 hour";
-const PARQUET_COMPRESSION_OPTION_NAME: &str = "parquet_compression";
-const PARQUET_COMPRESSION_OPTION_VALUE: &str = "zstd";
-const PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_NAME: &str = "parquet_row_group_size_bytes";
-const PARQUET_ROW_GROUP_SIZE_OPTION_NAME: &str = "parquet_row_group_size";
-const PARQUET_VERSION_OPTION_NAME: &str = "parquet_version";
-const PARQUET_VERSION_OPTION_VALUE: u8 = 2;
 const PRESERVE_INSERTION_ORDER_OPTION_NAME: &str = "preserve_insertion_order";
 const MAINTENANCE_QUERY_TIMEOUT: Duration = Duration::from_secs(6 * 60);
 /// Helper-table repair timeout, leaving five minutes inside the default
@@ -204,21 +199,6 @@ impl DuckDbExtensionStrategy {
 
 fn configure_writer_session_sql() -> String {
     format!("SET {PRESERVE_INSERTION_ORDER_OPTION_NAME} = false;")
-}
-
-fn configure_parquet_settings_sql(writer_config: &DuckLakeWriterConfig) -> String {
-    format!(
-        "CALL {LAKE_CATALOG}.set_option({}, {}); CALL {LAKE_CATALOG}.set_option({}, {}); CALL \
-         {LAKE_CATALOG}.set_option({}, {}); CALL {LAKE_CATALOG}.set_option({}, {});",
-        quote_literal(PARQUET_COMPRESSION_OPTION_NAME),
-        quote_literal(PARQUET_COMPRESSION_OPTION_VALUE),
-        quote_literal(PARQUET_ROW_GROUP_SIZE_BYTES_OPTION_NAME),
-        quote_literal(writer_config.parquet_row_group_size_bytes()),
-        quote_literal(PARQUET_ROW_GROUP_SIZE_OPTION_NAME),
-        quote_literal(writer_config.parquet_row_group_size()),
-        quote_literal(PARQUET_VERSION_OPTION_NAME),
-        PARQUET_VERSION_OPTION_VALUE,
-    )
 }
 
 fn maintenance_target_file_size_sql(target_file_size: &str) -> String {
@@ -759,7 +739,7 @@ fn build_setup_plan_with_strategy(
     });
     steps.push(DuckLakeSetupStep {
         label: "configure_parquet",
-        sql: configure_parquet_settings_sql(writer_config),
+        sql: configure_parquet_settings_sql(LAKE_CATALOG, writer_config),
     });
 
     Ok(DuckLakeSetupPlan { steps })
