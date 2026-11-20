@@ -23,6 +23,7 @@ use url::Url;
 use uuid::Uuid;
 
 const DUCKDB_EXTENSION_VERSION: &str = "2.0.0";
+const ICU_EXTENSION_FILE: &str = "icu.duckdb_extension";
 const DUCKLAKE_EXTENSION_FILE: &str = "ducklake.duckdb_extension";
 const POSTGRES_SCANNER_EXTENSION_FILE: &str = "postgres_scanner.duckdb_extension";
 pub struct DuckLakeTestEnv {
@@ -121,14 +122,15 @@ pub fn ducklake_load_sql() -> String {
         let postgres_scanner_extension = extension_dir.join(POSTGRES_SCANNER_EXTENSION_FILE);
 
         return format!(
-            "LOAD {}; LOAD {}; LOAD json; LOAD parquet;",
+            "LOAD {}; LOAD {}; LOAD {}; LOAD json; LOAD parquet;",
             quote_literal(&ducklake_extension.display().to_string()),
             quote_literal(&postgres_scanner_extension.display().to_string()),
+            quote_literal(&extension_dir.join(ICU_EXTENSION_FILE).display().to_string()),
         );
     }
 
-    "INSTALL ducklake; LOAD ducklake; INSTALL json; LOAD json; INSTALL parquet; LOAD parquet; \
-     INSTALL postgres_scanner; LOAD postgres_scanner;"
+    "INSTALL ducklake; LOAD ducklake; INSTALL icu; LOAD icu; INSTALL json; LOAD json; INSTALL \
+     parquet; LOAD parquet; INSTALL postgres_scanner; LOAD postgres_scanner;"
         .to_owned()
 }
 
