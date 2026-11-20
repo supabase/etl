@@ -6,11 +6,11 @@ on:
       postgres-version:
         description: Postgres major version used by the test-service runner.
         type: string
-        default: '18'
+        default: '19'
       postgres-image:
         description: Source Postgres container image, including OrioleDB variants.
         type: string
-        default: postgres:18
+        default: postgres:19
       coverage:
         description: Compile instrumented tests instead of consuming the regular test archive.
         type: boolean

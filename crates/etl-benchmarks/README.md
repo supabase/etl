@@ -56,6 +56,10 @@ go install github.com/pingcap/go-tpc/cmd/go-tpc@v1.0.12
 
 Make sure `$(go env GOPATH)/bin` is on `PATH`.
 
+On macOS, if a release build fails with `mis-aligned LINKEDIT string pool`,
+set `CARGO_PROFILE_RELEASE_STRIP=none` when running the benchmark.
+[Rust issue #157750](https://github.com/rust-lang/rust/issues/157750)
+
 ## Local Source Database
 
 The local benchmark source database defaults to:

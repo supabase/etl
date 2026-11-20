@@ -64,7 +64,7 @@ jobs:
           retention-days: 1
 
   test:
-    name: Property tests (PostgreSQL 18)
+    name: Property tests (PostgreSQL 19)
     needs: test-build
     # Runs the full suite so new properties are covered without a filter. Only
     # properties that use the shared runner honor the raised budget. BigQuery

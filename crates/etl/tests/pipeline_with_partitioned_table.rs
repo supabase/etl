@@ -377,8 +377,9 @@ async fn assert_nested_partition_pipeline_row_filter_case(
     assert_table_row_counts(&table_rows, &expected_copy_counts);
 }
 
-/// Checks that COPY and CDC use the filter belonging to the published identity.
-async fn assert_partition_identity_row_filter(publish_via_partition_root: bool) {
+/// Checks that COPY and CDC use the row filter and columns of the published
+/// identity.
+async fn assert_partition_identity_filters(publish_via_partition_root: bool) {
     init_test_tracing();
 
     let database = spawn_source_database().await;
@@ -394,13 +395,17 @@ async fn assert_partition_identity_row_filter(publish_via_partition_root: bool) 
             .unwrap();
     let table = table_name.as_quoted_identifier();
     let leaf = partition_table_name(&table_name, "leaf").as_quoted_identifier();
-    let root_filter = if publish_via_partition_root { " where (id % 2 = 0)" } else { "" };
+    let (root_columns_and_filter, leaf_columns) = if publish_via_partition_root {
+        (" (id, partition_key) where (id % 2 = 0)", " (id, data, partition_key)")
+    } else {
+        ("", " (id, partition_key)")
+    };
     client
         .batch_execute(&format!(
             "insert into {table} (data, partition_key) values
              ('initial', 10), ('initial', 10);
              create publication filtered_partition_pub for table
-             {table}{root_filter}, {leaf} where (id % 2 = 1)
+             {table}{root_columns_and_filter}, {leaf}{leaf_columns} where (id % 2 = 1)
              with (publish_via_partition_root = {publish_via_partition_root})"
         ))
         .await
@@ -447,7 +452,6 @@ async fn assert_partition_identity_row_filter(publish_via_partition_root: bool) 
         copied_rows[&table_id],
         vec![TableRow::new(vec![
             Cell::I64(if publish_via_partition_root { 2 } else { 1 }),
-            Cell::String("initial".to_owned()),
             Cell::I32(10),
         ])]
     );
@@ -462,28 +466,20 @@ async fn assert_partition_identity_row_filter(publish_via_partition_root: bool) 
         .collect();
     assert_eq!(
         inserts,
-        vec![(
-            table_id,
-            &TableRow::new(vec![
-                Cell::I64(included_id),
-                Cell::String("included".to_owned()),
-                Cell::I32(10),
-            ])
-        )]
+        vec![(table_id, &TableRow::new(vec![Cell::I64(included_id), Cell::I32(10)]))]
     );
 }
 
-/// The parent filter applies to both COPY and CDC when publishing via the root.
+/// The parent filters apply to COPY and CDC when publishing via the root.
 #[tokio::test(flavor = "multi_thread")]
-async fn partition_root_filter_overrides_leaf_filter() {
-    assert_partition_identity_row_filter(true).await;
+async fn partition_root_filters_override_leaf_filters() {
+    assert_partition_identity_filters(true).await;
 }
 
-/// The leaf filter applies to both COPY and CDC when publishing leaf
-/// identities.
+/// The leaf filters apply to COPY and CDC when publishing leaf identities.
 #[tokio::test(flavor = "multi_thread")]
-async fn partition_leaf_filter_applies_with_published_root() {
-    assert_partition_identity_row_filter(false).await;
+async fn partition_leaf_filters_apply_with_leaf_identity() {
+    assert_partition_identity_filters(false).await;
 }
 
 /// Tests that initial COPY replicates all rows from a partitioned table. Only
