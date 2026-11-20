@@ -718,9 +718,10 @@ async fn composite_snapshot_migration_preserves_legacy_message_lsn_ordering() {
         .unwrap();
     drop(conn);
 
-    let restored_snapshot_id: String = client
+    // Compare LSN values independently of server text formatting.
+    let restored_snapshot_id: PgLsn = client
         .query_one(
-            "select snapshot_id::pg_catalog.text
+            "select snapshot_id
             from etl.table_schemas
             where pipeline_id = $1 and table_id = $2",
             &[&1_i64, &table_id],
@@ -728,11 +729,11 @@ async fn composite_snapshot_migration_preserves_legacy_message_lsn_ordering() {
         .await
         .unwrap()
         .get(0);
-    assert_eq!(restored_snapshot_id, "0/2");
+    assert_eq!(restored_snapshot_id, PgLsn::from(2));
 
-    let restored_initial_snapshot_id: String = client
+    let restored_initial_snapshot_id: PgLsn = client
         .query_one(
-            "select snapshot_id::pg_catalog.text
+            "select snapshot_id
             from etl.table_schemas
             where pipeline_id = $1 and table_id = $2",
             &[&1_i64, &initial_table_id],
@@ -740,11 +741,11 @@ async fn composite_snapshot_migration_preserves_legacy_message_lsn_ordering() {
         .await
         .unwrap()
         .get(0);
-    assert_eq!(restored_initial_snapshot_id, "0/0");
+    assert_eq!(restored_initial_snapshot_id, PgLsn::from(0));
 
-    let restored_max_snapshot_id: String = client
+    let restored_max_snapshot_id: PgLsn = client
         .query_one(
-            "select snapshot_id::pg_catalog.text
+            "select snapshot_id
             from etl.table_schemas
             where pipeline_id = $1 and table_id = $2",
             &[&1_i64, &max_table_id],
@@ -752,10 +753,12 @@ async fn composite_snapshot_migration_preserves_legacy_message_lsn_ordering() {
         .await
         .unwrap()
         .get(0);
-    assert_eq!(restored_max_snapshot_id, "FFFFFFFF/FFFFFFFF");
-    let restored_above_i64_snapshot_id: String = client
+    assert_eq!(restored_max_snapshot_id, PgLsn::from(u64::MAX));
+
+    let above_i64_lsn = PgLsn::from(1 << 63);
+    let restored_above_i64_snapshot_id: PgLsn = client
         .query_one(
-            "select snapshot_id::pg_catalog.text
+            "select snapshot_id
             from etl.table_schemas
             where pipeline_id = $1 and table_id = $2",
             &[&1_i64, &above_i64_table_id],
@@ -763,48 +766,46 @@ async fn composite_snapshot_migration_preserves_legacy_message_lsn_ordering() {
         .await
         .unwrap()
         .get(0);
-    assert_eq!(restored_above_i64_snapshot_id, "80000000/0");
+    assert_eq!(restored_above_i64_snapshot_id, above_i64_lsn);
 
     let restored_metadata_row = client
         .query_one(
-            "select snapshot_id::pg_catalog.text, previous_snapshot_id::pg_catalog.text
+            "select snapshot_id, previous_snapshot_id
             from etl.destination_tables_metadata
             where pipeline_id = $1 and table_id = $2",
             &[&1_i64, &table_id],
         )
         .await
         .unwrap();
-    let restored_metadata_snapshot_ids: (String, Option<String>) =
+    let restored_metadata_snapshot_ids: (PgLsn, Option<PgLsn>) =
         (restored_metadata_row.get(0), restored_metadata_row.get(1));
-    assert_eq!(restored_metadata_snapshot_ids, ("0/2".to_owned(), Some("0/1".to_owned())));
+    assert_eq!(restored_metadata_snapshot_ids, (PgLsn::from(2), Some(PgLsn::from(1))));
 
     let restored_initial_metadata_row = client
         .query_one(
-            "select snapshot_id::pg_catalog.text, previous_snapshot_id::pg_catalog.text
+            "select snapshot_id, previous_snapshot_id
             from etl.destination_tables_metadata
             where pipeline_id = $1 and table_id = $2",
             &[&1_i64, &initial_table_id],
         )
         .await
         .unwrap();
-    let restored_initial_metadata_snapshot_ids: (String, Option<String>) =
+    let restored_initial_metadata_snapshot_ids: (PgLsn, Option<PgLsn>) =
         (restored_initial_metadata_row.get(0), restored_initial_metadata_row.get(1));
-    assert_eq!(restored_initial_metadata_snapshot_ids, ("0/0".to_owned(), None));
+    assert_eq!(restored_initial_metadata_snapshot_ids, (PgLsn::from(0), None));
+
     let restored_max_metadata_row = client
         .query_one(
-            "select snapshot_id::pg_catalog.text, previous_snapshot_id::pg_catalog.text
+            "select snapshot_id, previous_snapshot_id
             from etl.destination_tables_metadata
             where pipeline_id = $1 and table_id = $2",
             &[&1_i64, &max_table_id],
         )
         .await
         .unwrap();
-    let restored_max_metadata_snapshot_ids: (String, Option<String>) =
+    let restored_max_metadata_snapshot_ids: (PgLsn, Option<PgLsn>) =
         (restored_max_metadata_row.get(0), restored_max_metadata_row.get(1));
-    assert_eq!(
-        restored_max_metadata_snapshot_ids,
-        ("FFFFFFFF/FFFFFFFF".to_owned(), Some("80000000/0".to_owned()),)
-    );
+    assert_eq!(restored_max_metadata_snapshot_ids, (PgLsn::from(u64::MAX), Some(above_i64_lsn)));
 }
 
 #[tokio::test(flavor = "multi_thread")]

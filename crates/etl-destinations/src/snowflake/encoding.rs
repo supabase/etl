@@ -2,8 +2,8 @@ use std::{fmt, io::Write, str};
 
 use etl::{
     data::{
-        ArrayCell, Cell, OldTableRow, PgNumeric, TableRow, UpdatedTableRow, format_date,
-        format_timestamp, format_timestamptz,
+        ArrayCell, Cell, OldTableRow, TableRow, UpdatedTableRow, format_date, format_timestamp,
+        format_timestamptz,
     },
     schema::{ColumnSchema, ReplicatedTableSchema},
 };
@@ -221,7 +221,9 @@ impl Serialize for CellSerializer<'_> {
                 reject_non_finite(*f)?;
                 ser.serialize_f64(*f)
             }
-            Cell::Numeric(n) => serialize_pg_numeric(n, ser),
+            // Snowflake stores PostgreSQL NUMERIC as VARCHAR, so serialize as
+            // strings to preserve values, including NaN and infinities.
+            Cell::Numeric(n) => ser.collect_str(n),
             // collect_str: Display::fmt writes directly into the JSON serializer's output buffer,
             // avoiding an intermediate String allocation.
             Cell::Date(d) => ser.collect_str(&format_date(d)),
@@ -244,15 +246,6 @@ fn reject_non_finite<E: serde::ser::Error>(f: f64) -> std::result::Result<(), E>
         ));
     }
     Ok(())
-}
-
-fn serialize_pg_numeric<S: Serializer>(
-    n: &PgNumeric,
-    ser: S,
-) -> std::result::Result<S::Ok, S::Error> {
-    // PostgreSQL NUMERIC columns are stored as Snowflake VARCHAR, including
-    // special values, so formatting preserves the source value exactly.
-    ser.collect_str(n)
 }
 
 /// Zero-allocation lowercase hex formatter for byte slices.
@@ -314,14 +307,6 @@ impl Serialize for ValidatedF64 {
     }
 }
 
-struct NumericElement<'a>(&'a PgNumeric);
-
-impl Serialize for NumericElement<'_> {
-    fn serialize<S: Serializer>(&self, ser: S) -> std::result::Result<S::Ok, S::Error> {
-        serialize_pg_numeric(self.0, ser)
-    }
-}
-
 struct ArrayCellSerializer<'a>(&'a ArrayCell);
 
 impl Serialize for ArrayCellSerializer<'_> {
@@ -339,7 +324,7 @@ impl Serialize for ArrayCellSerializer<'_> {
             ArrayCell::F32(v) => serialize_array_with(v, ser, |f| ValidatedF32(*f)),
             ArrayCell::F64(v) => serialize_array_with(v, ser, |f| ValidatedF64(*f)),
             // Custom formatting via collect_str wrappers.
-            ArrayCell::Numeric(v) => serialize_array_with(v, ser, NumericElement),
+            ArrayCell::Numeric(v) => serialize_array_with(v, ser, CollectStr),
             ArrayCell::Date(v) => serialize_array_with(v, ser, |d| CollectStr(format_date(d))),
             ArrayCell::Time(v) => serialize_array_with(v, ser, CollectStr),
             ArrayCell::TimeTz(v) => serialize_array_with(v, ser, CollectStr),
@@ -521,8 +506,8 @@ mod tests {
     use chrono::{NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
     use etl::{
         data::{
-            Date, PartialTableRow, PgTime, TIME_FORMAT, TIMESTAMP_FORMAT, TIMESTAMPTZ_FORMAT_HH_MM,
-            Timestamp,
+            Date, PartialTableRow, PgNumeric, PgTime, TIME_FORMAT, TIMESTAMP_FORMAT,
+            TIMESTAMPTZ_FORMAT_HH_MM, Timestamp,
         },
         error::{ErrorKind, EtlError},
         schema::{IdentityMask, PgLsn, ReplicationMask, TableId, TableName, TableSchema, Type},
