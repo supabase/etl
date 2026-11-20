@@ -722,6 +722,9 @@ async fn maybe_request_operations<S, M>(
         Ok(Ok(ExternalMaintenanceRequestOutcome::RejectedActiveRun)) => {
             debug!("ducklake external maintenance request rejected because an active run exists");
         }
+        Ok(Ok(ExternalMaintenanceRequestOutcome::StateChanged)) => {
+            debug!("ducklake maintenance state changed before request; retrying on next poll");
+        }
         Ok(Ok(ExternalMaintenanceRequestOutcome::MissingState)) => {
             debug!("ducklake external maintenance request ignored because state is missing");
         }

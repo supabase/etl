@@ -51,6 +51,7 @@ tracing = { workspace = true, features = ["default"] }
 url = { workspace = true, optional = true }
 
 [dev-dependencies]
+axum = { workspace = true, features = ["json"] }
 etl-telemetry = { workspace = true }
 k8s-openapi = { workspace = true, features = ["latest"] }
 serde_json = { workspace = true }
