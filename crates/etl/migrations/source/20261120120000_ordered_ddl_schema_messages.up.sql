@@ -218,25 +218,24 @@ declare
 begin
     -- PostgreSQL 19 records `FOR ALL TABLES EXCEPT` entries as
     -- pg_publication_rel rows with prexcept set; excluding a partition root
-    -- also excludes its partitions. Dynamic SQL keeps older servers from
-    -- planning the column.
+    -- also excludes its partitions. PL/pgSQL plans this statement only when
+    -- the branch runs, so older servers never resolve the column.
     if pg_catalog.current_setting('server_version_num')::pg_catalog.int4 >= 190000 then
-        execute $sql$
-            with recursive ancestors as (
-                select c.oid, c.relispartition
-                from pg_catalog.pg_class c where c.oid = $1
-                union all
-                select c.oid, c.relispartition
-                from ancestors a
-                join pg_catalog.pg_inherits i on i.inhrelid = a.oid
-                join pg_catalog.pg_class c on c.oid = i.inhparent
-                where a.relispartition and not i.inhdetachpending
-            )
-            select coalesce(pg_catalog.array_agg(distinct pr.prpubid), '{}')
-            from pg_catalog.pg_publication_rel pr
-            join ancestors a on a.oid = pr.prrelid
-            where pr.prexcept
-        $sql$ into v_excluded_publications using p_table;
+        with recursive ancestors as (
+            select c.oid, c.relispartition
+            from pg_catalog.pg_class c where c.oid = p_table
+            union all
+            select c.oid, c.relispartition
+            from ancestors a
+            join pg_catalog.pg_inherits i on i.inhrelid = a.oid
+            join pg_catalog.pg_class c on c.oid = i.inhparent
+            where a.relispartition and not i.inhdetachpending
+        )
+        select coalesce(pg_catalog.array_agg(distinct pr.prpubid), '{}')
+        into v_excluded_publications
+        from pg_catalog.pg_publication_rel pr
+        join ancestors a on a.oid = pr.prrelid
+        where pr.prexcept;
     end if;
 
     -- PostgreSQL 14 has neither column lists nor schema publications. Keep
