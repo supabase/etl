@@ -1195,6 +1195,7 @@ async fn pause_before_insert_statement_for_tests(statement_index: u64) {
 #[cfg(test)]
 mod tests {
     use etl::schema::{ColumnSchema, Type};
+    use tokio::time::Instant as TokioInstant;
 
     use super::*;
 
@@ -1440,15 +1441,21 @@ mod tests {
         // GIVEN: a future that never resolves. Tokio's paused clock advances
         // virtual time when all tasks are stalled, so the timeout fires
         // immediately in wall-clock terms.
-        let config = ClickHouseClientConfig::default();
+        let config = ClickHouseClientConfig {
+            connectivity_check_timeout: Duration::from_millis(10),
+            client_timeout_epsilon: Duration::from_millis(3),
+            ..Default::default()
+        };
         let never = std::future::pending::<Result<(), clickhouse::error::Error>>();
 
         // WHEN: the call is awaited.
+        let started = TokioInstant::now();
         let err = timeout_call(ClickHouseOperationKind::ConnectivityCheck, &config, None, never)
             .await
             .unwrap_err();
 
-        // THEN: the error is a timeout that names the operation.
+        // THEN: the configured timeout fires and names the operation.
+        assert_eq!(started.elapsed(), Duration::from_millis(13));
         assert_eq!(err.kind(), ErrorKind::DestinationTimeout);
         assert!(
             err.detail()
