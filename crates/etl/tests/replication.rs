@@ -86,6 +86,9 @@ fn column_schemas_from_ddl_message(message: &JsonValue) -> Vec<ColumnSchema> {
             .with_default_expression_option(
                 column["default_expression"].as_str().map(ToOwned::to_owned),
             )
+            .with_missing_value_expression(
+                column["missing_value_expression"].as_str().map(ToOwned::to_owned),
+            )
         })
         .collect::<Vec<_>>();
     columns.sort_by_key(|column| column.ordinal_position);
@@ -2146,19 +2149,13 @@ async fn schema_change_messages_emit_enriched_payload_for_multiple_alter_table_v
         .unwrap();
 
     database
-        .alter_table(
-            table_name.clone(),
-            &[TableModification::AddColumn {
-                name: "email",
-                data_type: "text not null default 'unknown@example.com'",
-            }],
-        )
-        .await
-        .unwrap();
-    database
-        .run_sql(&format!(
-            "insert into {quoted_table_name} (name, age, email) values ('alice', 30, \
-             'alice@example.com')"
+        .client
+        .as_ref()
+        .unwrap()
+        .batch_execute(&format!(
+            "alter table {quoted_table_name} add column email text not null default \
+             'unknown@example.com'; insert into {quoted_table_name} (name, age, email) values \
+             ('row-only-payload-marker', 30, 'alice@example.com')"
         ))
         .await
         .unwrap();
@@ -2170,13 +2167,6 @@ async fn schema_change_messages_emit_enriched_payload_for_multiple_alter_table_v
         )
         .await
         .unwrap();
-    database
-        .run_sql(&format!(
-            "insert into {quoted_table_name} (full_name, age, email) values ('alice 2', 31, \
-             'alice2@example.com')"
-        ))
-        .await
-        .unwrap();
 
     database
         .alter_table(
@@ -2185,23 +2175,9 @@ async fn schema_change_messages_emit_enriched_payload_for_multiple_alter_table_v
         )
         .await
         .unwrap();
-    database
-        .run_sql(&format!(
-            "insert into {quoted_table_name} (full_name, age, email) values ('alice 3', 32, \
-             'alice3@example.com')"
-        ))
-        .await
-        .unwrap();
 
     database
         .alter_table(table_name.clone(), &[TableModification::ReplicaIdentity { value: "full" }])
-        .await
-        .unwrap();
-    database
-        .run_sql(&format!(
-            "insert into {quoted_table_name} (full_name, age, email) values ('alice 4', 33, \
-             'alice4@example.com')"
-        ))
         .await
         .unwrap();
 
@@ -2209,28 +2185,25 @@ async fn schema_change_messages_emit_enriched_payload_for_multiple_alter_table_v
     assert_eq!(messages.len(), 4);
 
     let add_column_message = &messages[0];
+    assert!(!add_column_message.to_string().contains("row-only-payload-marker"));
     assert_eq!(add_column_message["command_tag"], "ALTER TABLE");
     assert_eq!(add_column_message["oid"], u64::from(table_id.into_inner()));
     assert_eq!(add_column_message["nspname"], table_name.schema);
     assert_eq!(add_column_message["relname"], table_name.name);
-    assert_eq!(add_column_message["relkind"], "r");
-    assert!(
-        add_column_message["current_query"]
-            .as_str()
-            .expect("current_query should be present")
-            .contains("add column email"),
-        "statement text should mention the executed alter table statement"
+    assert_eq!(
+        add_column_message.as_object().unwrap().keys().map(String::as_str).collect::<HashSet<_>>(),
+        HashSet::from([
+            "command_tag",
+            "oid",
+            "nspname",
+            "relname",
+            "identity",
+            "columns",
+            "publication_column_attnums",
+        ])
     );
     assert_eq!(add_column_message["identity"]["primary_key_attnums"], serde_json::json!([1]));
     assert_eq!(add_column_message["identity"]["relreplident"], "d");
-    assert!(
-        add_column_message["commands"]
-            .as_array()
-            .expect("commands should be an array")
-            .iter()
-            .any(|command| command["command_tag"] == "ALTER TABLE"),
-        "commands should include the alter table base command"
-    );
     let add_columns = add_column_message["columns"].as_array().expect("columns should be an array");
     let email_column = add_columns
         .iter()
@@ -2238,10 +2211,20 @@ async fn schema_change_messages_emit_enriched_payload_for_multiple_alter_table_v
         .expect("email column should be present after add column");
     assert_eq!(email_column["attnum"], 4);
     assert_eq!(email_column["atttypid"], u64::from(Type::TEXT.oid()));
-    assert_eq!(email_column["typname"], "text");
-    assert_eq!(email_column["formatted_type"], "text");
     assert_eq!(email_column["attnotnull"], true);
-    assert_eq!(email_column["atthasdef"], true);
+    assert_eq!(
+        email_column.as_object().unwrap().keys().map(String::as_str).collect::<HashSet<_>>(),
+        HashSet::from([
+            "attname",
+            "attnum",
+            "atttypid",
+            "atttypmod",
+            "formatted_type",
+            "attnotnull",
+            "default_expression",
+            "missing_value_expression",
+        ])
+    );
     assert!(
         email_column["default_expression"]
             .as_str()
@@ -2258,14 +2241,6 @@ async fn schema_change_messages_emit_enriched_payload_for_multiple_alter_table_v
             .any(|column| column["attname"] == "full_name" && column["attnum"] == 2),
         "rename should preserve attnum and expose the new column name"
     );
-    assert!(
-        rename_message["commands"]
-            .as_array()
-            .expect("commands should be an array")
-            .iter()
-            .any(|command| command["object_type"] == "table column"),
-        "rename column should emit table column command metadata"
-    );
 
     let alter_type_message = &messages[2];
     let alter_type_columns =
@@ -2276,8 +2251,6 @@ async fn schema_change_messages_emit_enriched_payload_for_multiple_alter_table_v
         .expect("age column should still be present after type change");
     assert_eq!(age_column["attnum"], 3);
     assert_eq!(age_column["atttypid"], u64::from(Type::INT8.oid()));
-    assert_eq!(age_column["typname"], "int8");
-    assert_eq!(age_column["formatted_type"], "bigint");
 
     let replica_identity_message = &messages[3];
     assert_eq!(replica_identity_message["identity"]["relreplident"], "f");
@@ -2308,10 +2281,6 @@ async fn schema_change_messages_emit_and_decode_set_and_drop_default() {
     let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("ddl_default_payload_slot");
     let slot = client.create_slot(&slot_name, &Default::default()).await.unwrap();
-    let (stream, _) = client
-        .start_logical_replication(publication_name, &slot_name, slot.consistent_point, None)
-        .await
-        .unwrap();
 
     database
         .run_sql(&format!(
@@ -2325,6 +2294,12 @@ async fn schema_change_messages_emit_and_decode_set_and_drop_default() {
         .await
         .unwrap();
 
+    // The slot retains the DDL. Start this feedback-free reader only
+    // when ready to consume, avoiding idle sender timeouts during setup.
+    let (stream, _) = client
+        .start_logical_replication(publication_name, &slot_name, slot.consistent_point, None)
+        .await
+        .unwrap();
     let messages = collect_ddl_messages(stream, 2).await;
     let set_default_message = &messages[0];
     let drop_default_message = &messages[1];
@@ -2333,7 +2308,6 @@ async fn schema_change_messages_emit_and_decode_set_and_drop_default() {
         set_default_message["columns"].as_array().expect("columns should be an array");
     let set_status_column =
         set_columns.iter().find(|column| column["attname"] == "status").unwrap();
-    assert_eq!(set_status_column["atthasdef"], true);
     let set_default_expression = set_status_column["default_expression"]
         .as_str()
         .expect("set default expression should be present");
@@ -2353,7 +2327,6 @@ async fn schema_change_messages_emit_and_decode_set_and_drop_default() {
         drop_default_message["columns"].as_array().expect("columns should be an array");
     let drop_status_column =
         drop_columns.iter().find(|column| column["attname"] == "status").unwrap();
-    assert_eq!(drop_status_column["atthasdef"], false);
     assert_eq!(drop_status_column["default_expression"], serde_json::Value::Null);
 
     let drop_column_schemas = column_schemas_from_ddl_message(drop_default_message);

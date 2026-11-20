@@ -248,14 +248,18 @@ fn clickhouse_add_column_definition(
         return (destination_column_schema, true);
     }
 
+    destination_column_schema.default_expression =
+        after_column_schema.initial_default_expression().map(ToOwned::to_owned);
     let preserve_not_null = !after_column_schema.nullable
-        && after_column_schema.default_expression.as_deref().is_some_and(|default_expression| {
-            supports_column_default(
-                default_expression,
-                &after_column_schema.typ,
-                after_column_schema.modifier,
-            )
-        });
+        && destination_column_schema.default_expression.as_deref().is_some_and(
+            |default_expression| {
+                supports_column_default(
+                    default_expression,
+                    &after_column_schema.typ,
+                    after_column_schema.modifier,
+                )
+            },
+        );
     (destination_column_schema, !preserve_not_null)
 }
 
@@ -3096,19 +3100,40 @@ mod tests {
             .expect("fence acquisition deadlocked");
     }
 
+    /// Only a physical addition with a supported historical value can retain
+    /// source NOT NULL; publication reveals do not populate existing rows.
     #[test]
-    fn replication_mask_addition_is_nullable_and_omits_source_default() {
-        let source_column = ColumnSchema::new("score".to_owned(), Type::INT4, -1, 1, false)
-            .with_default_expression("42".to_owned());
+    fn column_additions_preserve_missing_value_and_nullability() {
+        for (reason, missing, expected_default, expected_type) in [
+            (ColumnPresenceChangeReason::TableSchema, "1", Some("1"), "Int32"),
+            (ColumnPresenceChangeReason::TableSchema, "null", None, "Nullable(Int32)"),
+            (ColumnPresenceChangeReason::ReplicationMask, "1", None, "Nullable(Int32)"),
+        ] {
+            let source = ColumnSchema::new("score".to_owned(), Type::INT4, -1, 1, false)
+                .with_default_expression("2".to_owned())
+                .with_missing_value_expression(Some(missing.to_owned()));
+            let (column, force_nullable) = clickhouse_add_column_definition(&source, reason);
 
-        let (destination_column, force_nullable) = clickhouse_add_column_definition(
-            &source_column,
-            ColumnPresenceChangeReason::ReplicationMask,
-        );
+            assert_eq!(column.default_expression.as_deref(), expected_default);
+            assert_eq!(clickhouse_column_type(&column, force_nullable), expected_type);
+        }
+    }
 
-        assert!(force_nullable);
-        assert_eq!(destination_column.default_expression, None);
-        assert_eq!(clickhouse_column_type(&destination_column, force_nullable), "Nullable(Int32)");
+    /// Historical defaults must pass the source modifier guard before an
+    /// added column can retain NOT NULL, independently of its future default.
+    #[test]
+    fn column_addition_checks_historical_default_with_type_modifier() {
+        for (missing, force_nullable) in [("'abc'::text", false), ("'abcd'::text", true)] {
+            let source = ColumnSchema::new("code".to_owned(), Type::VARCHAR, 7, 1, false)
+                .with_default_expression("'future'::text".to_owned())
+                .with_missing_value_expression(Some(missing.to_owned()));
+
+            let (column, actual_force_nullable) =
+                clickhouse_add_column_definition(&source, ColumnPresenceChangeReason::TableSchema);
+
+            assert_eq!(column.default_expression.as_deref(), Some(missing));
+            assert_eq!(actual_force_nullable, force_nullable);
+        }
     }
 
     /// A publication-added array has no historical values, so it is added

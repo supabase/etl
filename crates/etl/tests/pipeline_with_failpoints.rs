@@ -496,6 +496,7 @@ async fn run_table_copy_timed_retry_scenario(failpoint: &str) {
     let mut expected_users_schema = database_schema.users_schema();
     expected_users_schema.column_schemas[0].default_expression =
         Some("nextval('test.users_id_seq'::regclass)".to_owned());
+    expected_users_schema.column_schemas[0].missing_value_expression = Some("null".to_owned());
     assert_eq!(table_schemas.len(), 1);
     assert_eq!(
         *table_schemas.get(&database_schema.users_schema().id).unwrap(),

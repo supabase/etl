@@ -1533,9 +1533,11 @@ async fn table_schema_copy_survives_pipeline_restarts() {
     let mut expected_users_schema = database_schema.users_schema();
     expected_users_schema.column_schemas[0].default_expression =
         Some("nextval('test.users_id_seq'::regclass)".to_owned());
+    expected_users_schema.column_schemas[0].missing_value_expression = Some("null".to_owned());
     let mut expected_orders_schema = database_schema.orders_schema();
     expected_orders_schema.column_schemas[0].default_expression =
         Some("nextval('test.orders_id_seq'::regclass)".to_owned());
+    expected_orders_schema.column_schemas[0].missing_value_expression = Some("null".to_owned());
 
     // We check that the table schemas have been stored.
     let table_schemas = store.get_latest_table_schemas().await;

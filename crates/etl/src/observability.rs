@@ -341,9 +341,9 @@ pub(crate) fn register_metrics() {
         describe_counter!(
             ETL_RELATION_SCHEMA_MISMATCHES_TOTAL,
             Unit::Count,
-            "Total number of relation messages whose column order or types disagree with the \
-             stored table schema, labeled by worker_type and mismatch_kind. Replication continues \
-             with the stored schema."
+            "Total number of relation messages whose column order, types, or type modifiers \
+             disagree with the stored table schema, labeled by worker_type and mismatch_kind. \
+             Replication continues with the stored schema."
         );
 
         describe_histogram!(
