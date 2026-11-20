@@ -213,7 +213,32 @@ stable
 set search_path = pg_catalog
 as
 $fnc$
+declare
+    v_excluded_publications pg_catalog.oid[] := '{}';
 begin
+    -- PostgreSQL 19 records `FOR ALL TABLES EXCEPT` entries as
+    -- pg_publication_rel rows with prexcept set; excluding a partition root
+    -- also excludes its partitions. Dynamic SQL keeps older servers from
+    -- planning the column.
+    if pg_catalog.current_setting('server_version_num')::pg_catalog.int4 >= 190000 then
+        execute $sql$
+            with recursive ancestors as (
+                select c.oid, c.relispartition
+                from pg_catalog.pg_class c where c.oid = $1
+                union all
+                select c.oid, c.relispartition
+                from ancestors a
+                join pg_catalog.pg_inherits i on i.inhrelid = a.oid
+                join pg_catalog.pg_class c on c.oid = i.inhparent
+                where a.relispartition and not i.inhdetachpending
+            )
+            select coalesce(pg_catalog.array_agg(distinct pr.prpubid), '{}')
+            from pg_catalog.pg_publication_rel pr
+            join ancestors a on a.oid = pr.prrelid
+            where pr.prexcept
+        $sql$ into v_excluded_publications using p_table;
+    end if;
+
     -- PostgreSQL 14 has neither column lists nor schema publications. Keep
     -- version-specific catalogs in separately planned branches.
     -- Only declarative partition ancestors contribute inherited membership.
@@ -260,6 +285,7 @@ begin
         where (p_publication is null or p.pubname::pg_catalog.text = p_publication)
           and c.relkind in ('r', 'p') and c.relpersistence = 'p'
           and c.oid >= 16384
+          and p.oid <> all(v_excluded_publications)
           and ((not p.pubviaroot and c.relkind != 'p')
                or (p.pubviaroot and not exists (
                    select 1 from published_ancestors pa
@@ -309,7 +335,8 @@ publications using the caller's MVCC catalog snapshot. Copy and streaming DDL
 capture share the same membership, partition-root, and column-list rules.
 A null column_attnums value means all supported table columns; explicit
 filters retain PostgreSQL attnums without resolving names for every publication.
-No rows means the relation is not an effective publication target. The helper
+No rows means the relation is not an effective publication target, including
+PostgreSQL 19 publications that exclude it or a partition ancestor. The helper
 does not expand publications through current-cache functions or lock unrelated
 tables. It does not make concurrent topology or publication changes supported.$$;
 

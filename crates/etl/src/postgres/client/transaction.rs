@@ -4,10 +4,7 @@ use std::{
     num::NonZeroI32,
 };
 
-use etl_postgres::{
-    below_version, requires_version,
-    version::{POSTGRES_15, POSTGRES_19},
-};
+use etl_postgres::{below_version, version::POSTGRES_15};
 use pg_escape::{quote_identifier, quote_literal};
 use tokio::sync::watch;
 use tokio_postgres::{CopyOutStream, SimpleQueryMessage, Transaction};
