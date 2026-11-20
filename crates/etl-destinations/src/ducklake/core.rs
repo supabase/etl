@@ -4664,6 +4664,7 @@ where
         inline_flush_min_inlined_bytes: u64,
         rewrite_data_files_min_active_data_files: i64,
         policy: ExternalMaintenanceOperationPolicy,
+        resume_after: &mut Option<DuckLakeTableName>,
     ) -> EtlResult<ExternalMaintenanceOperationSample> {
         let copy_phase_active = self.has_active_table_copy().await?;
         let mut operations = ExternalMaintenanceOperations::default();
@@ -4677,7 +4678,7 @@ where
             }
         }
 
-        let table_names = match self.list_active_ducklake_tables().await {
+        let mut table_names = match self.list_active_ducklake_tables().await {
             Ok(table_names) => table_names,
             Err(error) => {
                 warn!(error = %error, "failed to discover ducklake table maintenance triggers");
@@ -4689,11 +4690,21 @@ where
             self.metadata_pg_pool.clone(),
         );
 
+        // A pass that stopped at a failed table gives the next table the
+        // first turn. Discovery returns tables in schema and name order.
+        if !table_names.is_empty()
+            && let Some(previous) = resume_after.take()
+            && let Some(index) = table_names.iter().position(|table| *table == previous)
+        {
+            table_names.rotate_left(index + 1);
+        }
+
         for table_name in table_names {
             if table_name.is_internal_helper() {
                 continue;
             }
 
+            let mut inline_failed = false;
             if !operations.inline_flush {
                 match inline_sampler.sample_table(&table_name).await {
                     Ok(sizes) => {
@@ -4706,6 +4717,7 @@ where
                             table = %table_name.id(),
                             "failed to sample ducklake inline flush trigger"
                         );
+                        inline_failed = true;
                     }
                 }
             }
@@ -4725,7 +4737,8 @@ where
                             table = %table_name.id(),
                             "failed to sample ducklake file maintenance triggers"
                         );
-                        continue;
+                        *resume_after = Some(table_name);
+                        break;
                     }
                 };
                 let sample = ExternalMaintenanceOperationSample::for_file_metrics(
@@ -4740,6 +4753,11 @@ where
                 operations.rewrite_data_files = sample.operations.rewrite_data_files;
                 operations.cleanup_old_files = sample.operations.cleanup_old_files;
                 rewrite_data_files_reason = sample.rewrite_data_files_reason;
+            }
+
+            if inline_failed {
+                *resume_after = Some(table_name);
+                break;
             }
 
             if operations.inline_flush && file_maintenance_requested {
@@ -6416,8 +6434,8 @@ mod tests {
             direct.close().await;
         }
 
-        /// A failed catalog scan and table-storage sample must not prevent
-        /// independent maintenance from being requested and executed.
+        /// Failed catalog reads still allow the watcher to handle a pause,
+        /// resume at the next table, and request independently eligible work.
         #[tokio::test(flavor = "multi_thread")]
         async fn maintenance_progress_survives_failed_catalog_samples() {
             let directory = TempDir::new().unwrap();
@@ -6491,6 +6509,7 @@ mod tests {
                         0,
                         40,
                         ExternalMaintenanceOperationPolicy::default(),
+                        &mut None,
                     )
                     .await
                     .unwrap();
@@ -6507,6 +6526,11 @@ mod tests {
 
                 lock.rollback().await.unwrap();
             }
+
+            // The empty table sorts before the table with rows to flush.
+            let conn = open_lake_conn(&catalog, &data);
+            conn.execute_batch("create table lake.main.aaa_empty (id integer)").unwrap();
+            drop(conn);
 
             let coordination_pool = build_ducklake_catalog_pg_pool(&catalog).unwrap();
             let coordination = PostgresExternalMaintenanceStore::new(
@@ -6541,8 +6565,8 @@ mod tests {
                 destination.clone(),
                 coordination.clone(),
                 ExternalMaintenanceWatcherConfig {
-                    poll_interval: Duration::from_secs(60),
-                    inline_flush_min_inlined_bytes: 0,
+                    poll_interval: Duration::from_millis(100),
+                    inline_flush_min_inlined_bytes: 1,
                     ..Default::default()
                 },
             ));
@@ -6550,12 +6574,57 @@ mod tests {
                 result = &mut watcher => panic!("Watcher exited: {result:?}"),
 
                 request = timeout(Duration::from_secs(30), async {
-                    loop {
-                        if let Some(request) = coordination.load_state().await.unwrap().operation_request {
-                            break request.operations;
+                    let wait_for_operations = async |want_flush: bool| {
+                        loop {
+                            let state = coordination.load_state().await.unwrap();
+                            if let Some(request) = state.operation_request
+                                && (!want_flush || request.operations.inline_flush)
+                            {
+                                break request.operations;
+                            }
+
+                            tokio::time::sleep(Duration::from_millis(20)).await;
                         }
+                    };
+
+                    let first = wait_for_operations(false).await;
+
+                    assert!(first.expire_snapshots);
+                    assert!(!first.inline_flush);
+
+                    sqlx::query(
+                        "update etl.external_maintenance_state set
+                         active_run = jsonb_build_object('runId', 'test-pause'),
+                         pause_request = jsonb_build_object('runId', 'test-pause',
+                             'requestedAt', now(), 'expiresAt', now() + interval '5 minutes')
+                         where pipeline_id = 'maintenance-progress'",
+                    )
+                    .execute(&coordination_pool)
+                    .await
+                    .unwrap();
+
+                    loop {
+                        let state = coordination.load_state().await.unwrap();
+                        if state.replicator.is_some_and(|status| {
+                            status.state_name() == "Quiesced"
+                                && status.observed_run_id.as_deref() == Some("test-pause")
+                        }) {
+                            break;
+                        }
+
                         tokio::time::sleep(Duration::from_millis(20)).await;
                     }
+
+                    sqlx::query(
+                        "update etl.external_maintenance_state set
+                         active_run = null, pause_request = null
+                         where pipeline_id = 'maintenance-progress'",
+                    )
+                    .execute(&coordination_pool)
+                    .await
+                    .unwrap();
+
+                    wait_for_operations(true).await
                 }) => request.unwrap(),
             };
             drop(watcher);
@@ -6678,6 +6747,7 @@ mod tests {
                         0,
                         40,
                         ExternalMaintenanceOperationPolicy::default(),
+                        &mut None,
                     )
                     .await
                     .unwrap();
