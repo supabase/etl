@@ -71,6 +71,18 @@ impl KubernetesExternalMaintenanceStore {
         Ok(Some(Self { api, name, timeout }))
     }
 
+    async fn load_resource(&self) -> EtlResult<Option<DynamicObject>> {
+        time::timeout(self.timeout, self.api.get_opt(&self.name))
+            .await
+            .map_err(|_| {
+                etl_error!(
+                    ErrorKind::SourceQueryFailed,
+                    "Timed out loading DuckLake maintenance CR"
+                )
+            })?
+            .map_err(|error| Self::kube_error(error, "Failed to load DuckLake maintenance CR"))
+    }
+
     fn kube_error(error: kube::Error, message: &'static str) -> etl::error::EtlError {
         etl_error!(ErrorKind::SourceQueryFailed, message, source: error)
     }
@@ -79,57 +91,58 @@ impl KubernetesExternalMaintenanceStore {
 #[async_trait::async_trait]
 impl ExternalMaintenanceStore for KubernetesExternalMaintenanceStore {
     async fn load_state(&self) -> EtlResult<ExternalMaintenanceState> {
-        match time::timeout(self.timeout, self.api.get(&self.name)).await {
-            Ok(Ok(resource)) => Ok(state_from_ducklake_maintenance_cr(&resource)),
-            Ok(Err(kube::Error::Api(error))) if error.code == 404 => {
-                Ok(ExternalMaintenanceState::default())
-            }
-            Ok(Err(error)) => {
-                Err(Self::kube_error(error, "Failed to load DuckLake maintenance CR"))
-            }
-            Err(_) => Err(etl_error!(
-                ErrorKind::SourceQueryFailed,
-                "Timed out loading DuckLake maintenance CR"
-            )),
-        }
+        Ok(self
+            .load_resource()
+            .await?
+            .as_ref()
+            .map(state_from_ducklake_maintenance_cr)
+            .unwrap_or_default())
     }
 
     async fn request_operations(
         &self,
         request: ExternalMaintenanceOperationRequest,
     ) -> EtlResult<ExternalMaintenanceRequestOutcome> {
-        let state = self.load_state().await?;
-        if !state.exists {
+        let Some(resource) = self.load_resource().await? else {
             return Ok(ExternalMaintenanceRequestOutcome::MissingState);
-        }
-        if state.active_run.is_some() {
+        };
+        if !resource.data["status"]["activeRun"].is_null() {
             return Ok(ExternalMaintenanceRequestOutcome::RejectedActiveRun);
         }
-        if state
-            .operation_request
-            .as_ref()
-            .is_some_and(|existing| existing.operations.covers(request.operations))
-        {
+
+        let pending = operations_from_value(&resource.data["status"]["operationRequests"]);
+        if pending.covers(request.operations) {
             return Ok(ExternalMaintenanceRequestOutcome::AlreadyCovered);
         }
 
-        let patch = json!({
-            "status": {
-                "operationRequests": {
-                    "inlineFlush": request.operations.inline_flush,
-                    "mergeAdjacentFiles": request.operations.merge_adjacent_files,
-                    "rewriteDataFiles": request.operations.rewrite_data_files,
-                    "expireSnapshots": request.operations.expire_snapshots,
-                    "cleanupOldFiles": request.operations.cleanup_old_files,
-                    "inlineFlushMinInlinedBytes": request.inline_flush_min_inlined_bytes,
-                    "rewriteDataFilesMinActiveDataFiles":
-                        request.rewrite_data_files_min_active_data_files,
-                    "requestedAt": request.requested_at.to_rfc3339(),
-                }
+        let Some(version) = resource.metadata.resource_version.as_deref().filter(|v| !v.is_empty())
+        else {
+            return Err(etl_error!(
+                ErrorKind::InvalidState,
+                "DuckLake maintenance CR is missing its resource version"
+            ));
+        };
+
+        let patch = operation_request_patch(version, pending, &request);
+        let params = PatchParams::default();
+        let patch = Patch::Merge(&patch);
+        match time::timeout(self.timeout, self.api.patch_status(&self.name, &params, &patch)).await
+        {
+            Ok(Ok(_)) => Ok(ExternalMaintenanceRequestOutcome::Created),
+            Ok(Err(kube::Error::Api(error))) if error.code == 409 => {
+                Ok(ExternalMaintenanceRequestOutcome::StateChanged)
             }
-        });
-        patch_status(&self.api, &self.name, &patch, self.timeout).await?;
-        Ok(ExternalMaintenanceRequestOutcome::Created)
+            Ok(Err(kube::Error::Api(error))) if error.code == 404 => {
+                Ok(ExternalMaintenanceRequestOutcome::MissingState)
+            }
+            Ok(Err(error)) => {
+                Err(Self::kube_error(error, "Failed to request DuckLake maintenance operations"))
+            }
+            Err(_) => Err(etl_error!(
+                ErrorKind::SourceQueryFailed,
+                "Timed out requesting DuckLake maintenance operations"
+            )),
+        }
     }
 
     async fn report_replicator_status(
@@ -160,6 +173,26 @@ impl ExternalMaintenanceStore for KubernetesExternalMaintenanceStore {
         });
         patch_status(&self.api, &self.name, &patch, self.timeout).await
     }
+}
+
+/// Merges newly requested operations without changing thresholds for pending
+/// work.
+fn operation_request_patch(
+    version: &str,
+    pending: ExternalMaintenanceOperations,
+    request: &ExternalMaintenanceOperationRequest,
+) -> Value {
+    let mut operations = json!(pending.merge(request.operations));
+    operations["requestedAt"] = json!(request.requested_at);
+    if request.operations.inline_flush && !pending.inline_flush {
+        operations["inlineFlushMinInlinedBytes"] = json!(request.inline_flush_min_inlined_bytes);
+    }
+    if request.operations.rewrite_data_files && !pending.rewrite_data_files {
+        operations["rewriteDataFilesMinActiveDataFiles"] =
+            json!(request.rewrite_data_files_min_active_data_files);
+    }
+
+    json!({"metadata": {"resourceVersion": version}, "status": {"operationRequests": operations}})
 }
 
 async fn patch_status(
@@ -355,9 +388,105 @@ fn ducklake_maintenance_api_resource() -> ApiResource {
 
 #[cfg(test)]
 mod tests {
+    use axum::{
+        Json, Router,
+        http::StatusCode,
+        routing::{get, patch},
+    };
     use serde_json::json;
 
     use super::*;
+
+    const RESOURCE: &str =
+        "/apis/etl.supabase.com/v1alpha1/namespaces/default/ducklakemaintenances/test";
+
+    fn test_store(service: Router) -> KubernetesExternalMaintenanceStore {
+        let api = ducklake_maintenance_api_resource();
+
+        KubernetesExternalMaintenanceStore {
+            api: Api::namespaced_with(Client::new(service, "default"), "default", &api),
+            name: "test".into(),
+            timeout: Duration::from_secs(5),
+        }
+    }
+
+    fn flush_request() -> ExternalMaintenanceOperationRequest {
+        ExternalMaintenanceOperationRequest {
+            operations: ExternalMaintenanceOperations { inline_flush: true, ..Default::default() },
+            inline_flush_min_inlined_bytes: Some(128),
+            rewrite_data_files_min_active_data_files: Some(32),
+            requested_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_admission_defers_the_merged_request_until_the_next_poll() {
+        let service = Router::new()
+            .route(
+                RESOURCE,
+                get(|| async {
+                    Json(json!({
+                        "apiVersion": "etl.supabase.com/v1alpha1",
+                        "kind": "DuckLakeMaintenance",
+                        "metadata": {"name": "test", "resourceVersion": "41"},
+                        "status": {"operationRequests": {
+                            "rewriteDataFiles": true, "rewriteDataFilesMinActiveDataFiles": 9
+                        }}
+                    }))
+                }),
+            )
+            .route(
+                &format!("{RESOURCE}/status"),
+                patch(|Json(body): Json<Value>| async move {
+                    assert_eq!(body["metadata"]["resourceVersion"], "41");
+
+                    let operations = &body["status"]["operationRequests"];
+                    assert_eq!(operations["inlineFlush"], true);
+                    assert_eq!(operations["inlineFlushMinInlinedBytes"], 128);
+                    assert_eq!(operations["rewriteDataFiles"], true);
+                    assert!(operations.get("rewriteDataFilesMinActiveDataFiles").is_none());
+
+                    // Admission won the race with this write.
+                    (
+                        StatusCode::CONFLICT,
+                        Json(json!({
+                            "kind": "Status", "apiVersion": "v1", "status": "Failure",
+                            "message": "resource version changed", "reason": "Conflict", "code": 409
+                        })),
+                    )
+                }),
+            );
+
+        let outcome = test_store(service).request_operations(flush_request()).await.unwrap();
+
+        assert_eq!(outcome, ExternalMaintenanceRequestOutcome::StateChanged);
+    }
+
+    #[tokio::test]
+    async fn retry_after_an_unconfirmed_write_respects_the_current_state() {
+        use ExternalMaintenanceRequestOutcome::{AlreadyCovered, RejectedActiveRun};
+
+        for (status, expected) in [
+            (json!({"operationRequests": {"inlineFlush": true}}), AlreadyCovered),
+            (json!({"activeRun": {"runId": "run-1"}}), RejectedActiveRun),
+        ] {
+            // The previous PATCH lost its response. Only a GET is allowed on
+            // retry.
+            let service = Router::new().route(
+                RESOURCE,
+                get(move || async move {
+                    Json(json!({
+                        "metadata": {"name": "test", "resourceVersion": "42"},
+                        "status": status,
+                    }))
+                }),
+            );
+
+            let outcome = test_store(service).request_operations(flush_request()).await.unwrap();
+
+            assert_eq!(outcome, expected);
+        }
+    }
 
     #[test]
     fn operation_policy_defaults_expire_snapshots_enabled() {
