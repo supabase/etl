@@ -1138,6 +1138,85 @@ async fn namespaced_tables_preserve_identifier_components() {
     destination.shutdown().await.unwrap();
 }
 
+async fn active_partition_values(catalog_url: &Url) -> Vec<String> {
+    let metadata = sqlx::PgPool::connect(catalog_url.as_str()).await.unwrap();
+    let metadata_schema: String = sqlx::query_scalar(
+        "select table_schema from information_schema.tables where table_name = \
+         'ducklake_file_partition_value'",
+    )
+    .fetch_one(&metadata)
+    .await
+    .unwrap();
+    let prefix = quote_identifier(&metadata_schema);
+    let values: Vec<(i64, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "select distinct p.partition_key_index, p.partition_value from \
+         {prefix}.ducklake_file_partition_value p join {prefix}.ducklake_data_file f using \
+         (data_file_id, table_id) where f.end_snapshot is null order by p.partition_key_index, \
+         p.partition_value"
+    )))
+    .fetch_all(&metadata)
+    .await
+    .unwrap();
+    metadata.close().await;
+    values.into_iter().map(|(_, value)| value).collect()
+}
+
+/// External maintenance can flush inlined timestamptz calendar partitions
+/// using its own DuckDB instance with extension autoload disabled.
+#[tokio::test(flavor = "multi_thread")]
+async fn maintenance_flushes_timestamptz_day_partitions() {
+    let lake = create_test_lake("maintenance_timestamptz_partitions").await;
+    let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
+    conn.execute_batch(
+        "call ducklake_set_option('lake', 'data_inlining_row_limit', 1000);          create table \
+         lake.main.events (id bigint, event_at timestamptz);          alter table \
+         lake.main.events set partitioned by (day(event_at));          insert into \
+         lake.main.events values (1, '2026-11-04 23:30:00+00'),          (2, '2026-11-05 \
+         23:30:00+00');",
+    )
+    .map_err(RedactedDuckDbError::from)
+    .unwrap();
+    drop(conn);
+    let writer_config = DuckLakeWriterConfig::default();
+    let target_file_size = writer_config.target_file_size().to_owned();
+    let outcome = run_maintenance_once(DuckLakeMaintenanceConfig {
+        catalog_url: lake.catalog_url.clone(),
+        catalog_pooler_url: None,
+        data_path: lake.data_url.clone(),
+        s3: None,
+        metadata_schema: None,
+        table_namespace: None,
+        writer_config,
+        inline_flush: InlineFlushMaintenanceConfig { enabled: true, min_inlined_bytes: 0 },
+        merge_adjacent_files: MergeAdjacentFilesMaintenanceConfig {
+            enabled: false,
+            max_compacted_files: 40,
+            max_tables_per_run: 1,
+            target_file_size,
+        },
+        rewrite_data_files: RewriteDataFilesMaintenanceConfig {
+            enabled: false,
+            min_active_data_files: 0,
+            max_tables_per_run: 1,
+        },
+        expire_snapshots: ExpireSnapshotsMaintenanceConfig {
+            enabled: false,
+            older_than: "7 days".to_owned(),
+        },
+        cleanup_old_files: CleanupOldFilesMaintenanceConfig { enabled: false },
+    })
+    .await
+    .unwrap();
+    assert_eq!(outcome.inline_flush_tables, 1);
+    assert_eq!(outcome.inline_flush_rows, 2);
+    assert_eq!(active_partition_values(&lake.catalog_url).await, vec!["4", "5"]);
+    let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
+    assert_eq!(
+        count_rows(&conn, &DuckLakeTableName::new("main".to_owned(), "events".to_owned())),
+        2
+    );
+}
+
 /// Maintenance discovers the PostgreSQL metadata schema through its named
 /// DuckDB catalog and flushes inline rows without upgrading an existing 1.0
 /// catalog.
@@ -6462,50 +6541,169 @@ async fn partition_layout_rejects_unreplicated_and_incompatible_columns() {
 /// extension, including columns that need SQL identifier escaping.
 #[tokio::test(flavor = "multi_thread")]
 async fn partition_layout_applies_calendar_transforms_with_quoted_columns() {
-    let lake = create_test_lake("partition_layout_calendar").await;
-    let column = "occurred \"at\"".to_owned();
+    for pg_type in [PgType::TIMESTAMP, PgType::TIMESTAMPTZ] {
+        let lake = create_test_lake("partition_layout_calendar").await;
+        let column = "occurred \"at\"".to_owned();
+        let schema = TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "events".to_owned()),
+            vec![ColumnSchema::new(column.clone(), pg_type.clone(), -1, 1, false)],
+        );
+        let replicated = make_replicated_table_schema(&schema);
+        let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
+        let store = MemoryStore::new();
+        store.store_table_schema(schema).await.unwrap();
+        let keys = [
+            DuckLakePartitionTransform::Year {},
+            DuckLakePartitionTransform::Month {},
+            DuckLakePartitionTransform::Day {},
+            DuckLakePartitionTransform::Hour {},
+        ]
+        .into_iter()
+        .map(|transform| DuckLakePartitionColumn::new(column.clone(), transform))
+        .collect();
+        let destination = DuckLakeDestination::builder(
+            lake.catalog_url.clone(),
+            lake.data_url.clone(),
+            NonZeroU16::MIN,
+            store,
+        )
+        .copy_buffer(DuckLakeCopyBufferConfig { enabled: false, ..Default::default() })
+        .table_partitioning(DuckLakeTablePartitioningConfig::new(vec![
+            DuckLakeTablePartitionConfig::new("public".to_owned(), "events".to_owned(), keys),
+        ]))
+        .build()
+        .await
+        .unwrap();
+        let timestamp =
+            NaiveDate::from_ymd_opt(2026, 11, 4).unwrap().and_hms_opt(23, 30, 0).unwrap();
+        destination
+            .write_table_rows_for_tests(
+                &replicated,
+                vec![TableRow::new(vec![if pg_type == PgType::TIMESTAMPTZ {
+                    Cell::TimestampTz(etl::data::Timestamp::Value(timestamp.and_utc()))
+                } else {
+                    Cell::Timestamp(etl::data::Timestamp::Value(timestamp))
+                }])],
+            )
+            .await
+            .unwrap();
+        destination.shutdown().await.unwrap();
+        let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
+        assert_eq!(count_rows(&conn, &table_name), 1);
+        assert_eq!(active_partition_values(&lake.catalog_url).await, vec!["2026", "11", "4", "23"]);
+    }
+}
+
+/// Calendar partitioning of timestamptz preserves CDC against files copied
+/// before the layout change, including updates that move between partitions.
+#[tokio::test(flavor = "multi_thread")]
+async fn partition_layout_timestamptz_preserves_copied_rows_during_cdc() {
+    use etl::{
+        data::Timestamp,
+        event::{InsertEvent, UpdateEvent},
+        schema::PgLsn,
+    };
+
+    let lake = create_test_lake("partition_layout_timestamptz_cdc").await;
     let schema = TableSchema::new(
         TableId::new(1),
         TableName::new("public".to_owned(), "events".to_owned()),
-        vec![ColumnSchema::new(column.clone(), PgType::TIMESTAMP, -1, 1, false)],
+        vec![
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("event_at".to_owned(), PgType::TIMESTAMPTZ, -1, 2, false),
+        ],
     );
     let replicated = make_replicated_table_schema(&schema);
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
-    let keys = [
-        DuckLakePartitionTransform::Year {},
-        DuckLakePartitionTransform::Month {},
-        DuckLakePartitionTransform::Day {},
-        DuckLakePartitionTransform::Hour {},
-    ]
-    .into_iter()
-    .map(|transform| DuckLakePartitionColumn::new(column.clone(), transform))
-    .collect();
-    let destination = DuckLakeDestination::builder(
-        lake.catalog_url.clone(),
-        lake.data_url.clone(),
-        NonZeroU16::MIN,
-        store,
-    )
-    .copy_buffer(DuckLakeCopyBufferConfig { enabled: false, ..Default::default() })
-    .table_partitioning(DuckLakeTablePartitioningConfig::new(vec![
-        DuckLakeTablePartitionConfig::new("public".to_owned(), "events".to_owned(), keys),
-    ]))
-    .build()
-    .await
-    .unwrap();
-    let timestamp = NaiveDate::from_ymd_opt(2026, 11, 4).unwrap().and_hms_opt(15, 30, 0).unwrap();
-    destination
-        .write_table_rows_for_tests(
-            &replicated,
-            vec![TableRow::new(vec![Cell::Timestamp(etl::data::Timestamp::Value(timestamp))])],
+    let row = |id, day| {
+        let timestamp = NaiveDate::from_ymd_opt(2026, 11, day)
+            .unwrap()
+            .and_hms_opt(23, 30, 0)
+            .unwrap()
+            .and_utc();
+        TableRow::new(vec![Cell::I32(id), Cell::TimestampTz(Timestamp::Value(timestamp))])
+    };
+    let build = || {
+        DuckLakeDestination::builder(
+            lake.catalog_url.clone(),
+            lake.data_url.clone(),
+            NonZeroU16::MIN,
+            store.clone(),
         )
+        .copy_buffer(DuckLakeCopyBufferConfig { enabled: false, ..Default::default() })
+    };
+    let original = build().build().await.unwrap();
+    original
+        .write_table_rows_for_tests(&replicated, vec![row(1, 4), row(2, 4), row(3, 4)])
+        .await
+        .unwrap();
+    original.shutdown().await.unwrap();
+    drop(original);
+
+    let destination = build()
+        .table_partitioning(DuckLakeTablePartitioningConfig::new(vec![
+            DuckLakeTablePartitionConfig::new(
+                "public".to_owned(),
+                "events".to_owned(),
+                vec![DuckLakePartitionColumn::new(
+                    "event_at".to_owned(),
+                    DuckLakePartitionTransform::Day {},
+                )],
+            ),
+        ]))
+        .build()
+        .await
+        .unwrap();
+    destination.startup().await.unwrap();
+    let lsn = PgLsn::from(100_u64);
+    destination
+        .write_events(vec![
+            Event::Update(UpdateEvent {
+                commit_lsn: lsn,
+                tx_ordinal: 0,
+                replicated_table_schema: replicated.clone(),
+                updated_table_row: UpdatedTableRow::Full(row(1, 5)),
+                old_table_row: None,
+            }),
+            Event::Delete(DeleteEvent {
+                commit_lsn: lsn,
+                tx_ordinal: 1,
+                replicated_table_schema: replicated.clone(),
+                old_table_row: Some(OldTableRow::Full(row(2, 4))),
+            }),
+            Event::Insert(InsertEvent {
+                commit_lsn: lsn,
+                tx_ordinal: 2,
+                replicated_table_schema: replicated.clone(),
+                table_row: row(4, 6),
+            }),
+        ])
         .await
         .unwrap();
     destination.shutdown().await.unwrap();
+    drop(destination);
     let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
-    assert_eq!(count_rows(&conn, &table_name), 1);
+    let rows: Vec<(i32, String)> = conn
+        .prepare(&format!(
+            "select id, cast(event_at at time zone 'UTC' as varchar) from {} order by id",
+            qualified_lake_table_name(&table_name)
+        ))
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            (1, "2026-11-05 23:30:00".to_owned()),
+            (3, "2026-11-04 23:30:00".to_owned()),
+            (4, "2026-11-06 23:30:00".to_owned()),
+        ]
+    );
 }
 
 /// Stale rules preserve active partitions after renames and type changes,
