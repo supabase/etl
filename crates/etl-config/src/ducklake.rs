@@ -116,13 +116,16 @@ pub fn ducklake_catalog_metadata_connect_options(
         None => "",
     };
 
-    // Only lists have positional ports. Keep SQLx's scalar port for other URLs.
-    let first_port =
-        if config.get_hosts().len() > 1 || host.contains(',') || config.get_hostaddrs().len() > 1 {
-            config.get_ports().first()
-        } else {
-            None
-        };
+    let ports = config.get_ports();
+    let first_port = if config.get_hosts().len() > 1 || host.contains(',') {
+        ports.first()
+    } else if config.get_hostaddrs().len() > 1 {
+        // With one host, query ports override the authority port. PgConfig adds
+        // one port for an authority even when its port defaults to 5432.
+        ports.get(usize::from(catalog_url.has_host()))
+    } else {
+        None
+    };
 
     // Select the first endpoint before SQLx reads the password file.
     let mut url = catalog_url.clone();
@@ -510,6 +513,9 @@ mod tests {
 
         let urls = [
             ("postgres://first.example/db?port=6432", 6432),
+            ("postgres://first.example/db?hostaddr=192.0.2.10,192.0.2.11&port=6543", 6543),
+            ("postgres://first.example:6432/db?hostaddr=192.0.2.10,192.0.2.11", 6432),
+            ("postgres://first.example/db?hostaddr=192.0.2.10,192.0.2.11&port=6543,6544", 6543),
             ("postgres:///db?hostaddr=192.0.2.10,192.0.2.11&port=5433,5434", 5433),
         ];
         for (url, port) in urls {
