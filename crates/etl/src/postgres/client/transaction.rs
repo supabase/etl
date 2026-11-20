@@ -10,7 +10,7 @@ use etl_postgres::{
 };
 use pg_escape::{quote_identifier, quote_literal};
 use tokio::sync::watch;
-use tokio_postgres::{CopyOutStream, SimpleQueryMessage, Transaction};
+use tokio_postgres::{CopyOutStream, Transaction};
 use tracing::warn;
 
 use super::{
@@ -18,7 +18,7 @@ use super::{
     query::{PgReplicationQueryTarget, classify_table_copy_error},
     raw::{PgReplicationClient, PgReplicationConnectionConfig},
     types::{CtidPartition, PostgresConnectionUpdate},
-    utils::get_row_value,
+    utils::{for_each_simple_query_row, get_row_value, simple_query_first_row},
 };
 use crate::{
     bail,
@@ -345,19 +345,22 @@ impl<'a> PgReplicationTransactionCore<'a> {
              )",
         );
 
-        let rows = self.transaction.simple_query(&column_query).await?;
         let mut column_names = HashSet::new();
         let mut table_in_publication = false;
-
-        for row in rows {
-            if let SimpleQueryMessage::Row(row) = row {
+        for_each_simple_query_row(
+            self.transaction.client(),
+            &column_query,
+            |row| -> EtlResult<()> {
                 table_in_publication = true;
 
                 if let Some(column_name) = row.try_get::<&str>("column_name")? {
                     column_names.insert(column_name.to_owned());
                 }
-            }
-        }
+
+                Ok(())
+            },
+        )
+        .await?;
 
         if !table_in_publication {
             bail!(
@@ -384,21 +387,19 @@ impl<'a> PgReplicationTransactionCore<'a> {
 
     /// Exports the current transaction snapshot.
     async fn export_snapshot(&self) -> EtlResult<String> {
-        let results = self.transaction.simple_query("select pg_export_snapshot();").await?;
+        let query = "select pg_export_snapshot();";
+        if let Some(row) = simple_query_first_row(self.transaction.client(), query).await? {
+            let snapshot_id = row
+                .try_get(0)?
+                .ok_or_else(|| {
+                    etl_error!(
+                        ErrorKind::InvalidState,
+                        "PostgreSQL pg_export_snapshot returned NULL"
+                    )
+                })?
+                .to_owned();
 
-        for msg in results {
-            if let SimpleQueryMessage::Row(row) = msg {
-                let snapshot_id = row
-                    .try_get(0)?
-                    .ok_or_else(|| {
-                        etl_error!(
-                            ErrorKind::InvalidState,
-                            "PostgreSQL pg_export_snapshot returned NULL"
-                        )
-                    })?
-                    .to_owned();
-                return Ok(snapshot_id);
-            }
+            return Ok(snapshot_id);
         }
 
         Err(etl_error!(ErrorKind::InvalidState, "PostgreSQL pg_export_snapshot returned no rows"))
@@ -427,15 +428,20 @@ impl<'a> PgReplicationTransactionCore<'a> {
         );
 
         let mut estimates = BTreeMap::new();
-        for message in self.transaction.simple_query(&estimate_query).await? {
-            if let SimpleQueryMessage::Row(row) = message {
+        for_each_simple_query_row(
+            self.transaction.client(),
+            &estimate_query,
+            |row| -> EtlResult<()> {
                 let table_id = get_row_value(&row, "table_id", "pg_class")?;
                 let table_blocks = get_row_value(&row, "table_blocks", "pg_class")?;
                 let estimated_rows = get_row_value(&row, "estimated_rows", "pg_class")?;
                 estimates
                     .insert(table_id, TableCopyPlanningEstimate::new(table_blocks, estimated_rows));
-            }
-        }
+
+                Ok(())
+            },
+        )
+        .await?;
 
         if table_ids.iter().any(|table_id| !estimates.contains_key(table_id)) {
             return Err(etl_error!(
@@ -468,21 +474,23 @@ impl<'a> PgReplicationTransactionCore<'a> {
         );
 
         let mut leaves = Vec::new();
-        for msg in self.transaction.simple_query(&query).await? {
-            if let SimpleQueryMessage::Row(row) = msg {
-                let leaf_id = get_row_value::<TableId>(&row, "oid", "pg_class")?;
-                // Foreign partitions have no local heap to scan. Skipping one
-                // would make an incomplete root copy appear successful.
-                if row.try_get("relkind")? != Some("r") {
-                    bail!(
-                        ErrorKind::SourceSchemaError,
-                        "Unsupported partition in table copy",
-                        format!("Table {table_id} contains non-heap partition {leaf_id}")
-                    );
-                }
-                leaves.push(leaf_id);
+        for_each_simple_query_row(self.transaction.client(), &query, |row| -> EtlResult<()> {
+            let leaf_id = get_row_value::<TableId>(&row, "oid", "pg_class")?;
+
+            // Foreign partitions have no local heap to scan. Skipping one
+            // would make an incomplete root copy appear successful.
+            if row.try_get("relkind")? != Some("r") {
+                bail!(
+                    ErrorKind::SourceSchemaError,
+                    "Unsupported partition in table copy",
+                    format!("Table {table_id} contains non-heap partition {leaf_id}")
+                );
             }
-        }
+            leaves.push(leaf_id);
+
+            Ok(())
+        })
+        .await?;
 
         Ok(leaves)
     }
@@ -539,15 +547,14 @@ impl<'a> PgReplicationTransactionCore<'a> {
              select {}::regclass::oid = {table_id} as matches",
             quote_literal(&quoted_name),
         );
-        for message in
-            self.transaction.simple_query(&query).await.map_err(classify_table_copy_error)?
+        if let Some(row) = simple_query_first_row(self.transaction.client(), &query)
+            .await
+            .map_err(classify_table_copy_error)?
+            && row.try_get("matches")? == Some("t")
         {
-            if let SimpleQueryMessage::Row(row) = message
-                && row.try_get("matches")? == Some("t")
-            {
-                return Ok(());
-            }
+            return Ok(());
         }
+
         bail!(
             ErrorKind::SourceSchemaError,
             "Copy source changed during name resolution",
@@ -593,14 +600,12 @@ impl<'a> PgReplicationTransactionCore<'a> {
              where c.oid = {table_id}",
         );
 
-        for message in self.transaction.simple_query(&query).await? {
-            if let SimpleQueryMessage::Row(row) = message {
-                let schema_name = get_row_value::<String>(&row, "schema_name", "pg_namespace")?;
-                let table_name = get_row_value::<String>(&row, "table_name", "pg_class")?;
-                let row_filter = row.try_get("row_filter")?.map(str::to_owned);
+        if let Some(row) = simple_query_first_row(self.transaction.client(), &query).await? {
+            let schema_name = get_row_value::<String>(&row, "schema_name", "pg_namespace")?;
+            let table_name = get_row_value::<String>(&row, "table_name", "pg_class")?;
+            let row_filter = row.try_get("row_filter")?.map(str::to_owned);
 
-                return Ok((TableName { schema: schema_name, name: table_name }, row_filter));
-            }
+            return Ok((TableName { schema: schema_name, name: table_name }, row_filter));
         }
 
         bail!(
@@ -623,23 +628,20 @@ impl<'a> PgReplicationTransactionCore<'a> {
             ) as has_generated;"#
         );
 
-        for message in self.transaction.simple_query(&generated_columns_check_query).await? {
-            if let SimpleQueryMessage::Row(row) = message {
-                let has_generated_columns =
-                    get_row_value::<String>(&row, "has_generated", "pg_attribute")? == "t";
-                if has_generated_columns {
-                    warn!(
-                        "table {} contains generated columns that will not be replicated. \
-                         generated columns are not supported in postgres logical replication and \
-                         will be excluded from the etl schema. these columns will not appear in \
-                         the destination.",
-                        table_id
-                    );
-                }
-
-                // Explicity break for clarity; this query returns a single
-                // SimpleQueryMessage::Row.
-                break;
+        if let Some(row) =
+            simple_query_first_row(self.transaction.client(), &generated_columns_check_query)
+                .await?
+        {
+            let has_generated_columns =
+                get_row_value::<String>(&row, "has_generated", "pg_attribute")? == "t";
+            if has_generated_columns {
+                warn!(
+                    "table {} contains generated columns that will not be replicated. generated \
+                     columns are not supported in postgres logical replication and will be \
+                     excluded from the etl schema. these columns will not appear in the \
+                     destination.",
+                    table_id
+                );
             }
         }
 
@@ -714,42 +716,37 @@ impl<'a> PgReplicationTransactionCore<'a> {
             "#,
         );
 
-        // TODO: there's a lot of code using simple_query but only checking for
-        // SimpleQueryMessage::Row, a small optimization could be done here if
-        // we upgraded tokio-postgres to a newer version in order to use
-        // https://docs.rs/tokio-postgres/0.7.15/tokio_postgres/struct.Client.html#method.simple_query_raw
-        // to filter on SimpleQueryMessage::Row and avoid useless allocations.
-        for message in self.transaction.simple_query(&schema_snapshot_query).await? {
-            if let SimpleQueryMessage::Row(row) = message {
-                let schema_name = get_row_value::<String>(&row, "schema_name", "pg_namespace")?;
-                let table_name = get_row_value::<String>(&row, "table_name", "pg_class")?;
-                let columns_json = get_row_value::<String>(&row, "columns", "etl")?;
-                let identity_json = get_row_value::<String>(&row, "identity", "etl")?;
-                let columns: Vec<ColumnSchemaMessage> = serde_json::from_str(&columns_json)
-                    .map_err(|err| {
-                        etl_error!(
-                            ErrorKind::DeserializationError,
-                            "Invalid table schema snapshot",
-                            format!(
-                                "Failed to parse describe_table_schema payload for table {}: {}",
-                                table_id, err
-                            )
+        if let Some(row) =
+            simple_query_first_row(self.transaction.client(), &schema_snapshot_query).await?
+        {
+            let schema_name = get_row_value::<String>(&row, "schema_name", "pg_namespace")?;
+            let table_name = get_row_value::<String>(&row, "table_name", "pg_class")?;
+            let columns_json = get_row_value::<String>(&row, "columns", "etl")?;
+            let identity_json = get_row_value::<String>(&row, "identity", "etl")?;
+            let columns: Vec<ColumnSchemaMessage> =
+                serde_json::from_str(&columns_json).map_err(|err| {
+                    etl_error!(
+                        ErrorKind::DeserializationError,
+                        "Invalid table schema snapshot",
+                        format!(
+                            "Failed to parse describe_table_schema payload for table {}: {}",
+                            table_id, err
                         )
-                    })?;
-                let identity: IdentityMessage =
-                    serde_json::from_str(&identity_json).map_err(|err| {
-                        etl_error!(
-                            ErrorKind::DeserializationError,
-                            "Invalid table identity snapshot",
-                            format!(
-                                "Failed to parse describe_table_identity payload for table {}: {}",
-                                table_id, err
-                            )
+                    )
+                })?;
+            let identity: IdentityMessage =
+                serde_json::from_str(&identity_json).map_err(|err| {
+                    etl_error!(
+                        ErrorKind::DeserializationError,
+                        "Invalid table identity snapshot",
+                        format!(
+                            "Failed to parse describe_table_identity payload for table {}: {}",
+                            table_id, err
                         )
-                    })?;
+                    )
+                })?;
 
-                return Ok((TableName::new(schema_name, table_name), columns, identity));
-            }
+            return Ok((TableName::new(schema_name, table_name), columns, identity));
         }
 
         bail!(
@@ -897,12 +894,10 @@ impl<'a> PgReplicationTransaction<'a> {
              ) as missing_lock",
             table_copy_relations_cte(table_id),
         );
-        for message in self.core.transaction.simple_query(&query).await? {
-            if let SimpleQueryMessage::Row(row) = message
-                && row.try_get("missing_lock")? == Some("f")
-            {
-                return Ok(());
-            }
+        if let Some(row) = simple_query_first_row(self.core.transaction.client(), &query).await?
+            && row.try_get("missing_lock")? == Some("f")
+        {
+            return Ok(());
         }
 
         bail!(

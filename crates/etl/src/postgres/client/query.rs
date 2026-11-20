@@ -1,10 +1,10 @@
 use etl_config::shared::{ReplicationSlotConfig, ReplicationSlotPersistence};
 use pg_escape::quote_identifier;
-use tokio_postgres::{SimpleQueryMessage, Transaction, error::SqlState, types::PgLsn};
+use tokio_postgres::{Transaction, error::SqlState, types::PgLsn};
 
 use super::{
     types::{CreateSlotResult, SnapshotAction},
-    utils::get_row_value,
+    utils::{get_row_value, simple_query_first_row},
 };
 use crate::{
     bail,
@@ -100,25 +100,21 @@ impl<'a, 'tx> PgReplicationQueryTarget<'a, 'tx> {
         // but for now we will keep the commands in uppercase.
         let query = create_slot_query(slot_name, snapshot_action, config);
         let attempt = monitor.map(|monitor| monitor.start(worker_type));
-        let response = self.transaction.simple_query(&query).await;
+        let response = simple_query_first_row(self.transaction.client(), &query).await;
         if let Some(attempt) = attempt {
             attempt.finish(response.is_ok());
         }
         match response {
-            Ok(results) => {
-                for result in results {
-                    if let SimpleQueryMessage::Row(row) = result {
-                        let consistent_point = get_row_value::<PgLsn>(
-                            &row,
-                            "consistent_point",
-                            "pg_replication_slots",
-                        )?;
-                        let slot = CreateSlotResult { consistent_point };
+            Ok(Some(row)) => {
+                let consistent_point =
+                    get_row_value::<PgLsn>(&row, "consistent_point", "pg_replication_slots")?;
 
-                        return Ok(slot);
-                    }
-                }
+                Ok(CreateSlotResult { consistent_point })
             }
+            Ok(None) => Err(etl_error!(
+                ErrorKind::ReplicationSlotNotCreated,
+                "Replication slot creation failed"
+            )),
             Err(err) => {
                 if err.code() == Some(&SqlState::T_R_DEADLOCK_DETECTED) {
                     return Err(etl_error!(
@@ -137,11 +133,9 @@ impl<'a, 'tx> PgReplicationQueryTarget<'a, 'tx> {
                     );
                 }
 
-                return Err(err.into());
+                Err(err.into())
             }
         }
-
-        Err(etl_error!(ErrorKind::ReplicationSlotNotCreated, "Replication slot creation failed"))
     }
 
     /// Checks if any of the provided table IDs are partitioned tables.
@@ -157,12 +151,6 @@ impl<'a, 'tx> PgReplicationQueryTarget<'a, 'tx> {
             "select 1 from pg_class where oid in ({table_oids_list}) and relkind = 'p' limit 1;"
         );
 
-        for msg in self.transaction.simple_query(&query).await? {
-            if let SimpleQueryMessage::Row(_) = msg {
-                return Ok(true);
-            }
-        }
-
-        Ok(false)
+        Ok(simple_query_first_row(self.transaction.client(), &query).await?.is_some())
     }
 }

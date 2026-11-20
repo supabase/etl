@@ -15,7 +15,7 @@ use rustls::{
 };
 use tokio::{sync::watch, time::timeout};
 use tokio_postgres::{
-    Client, Config, Connection, IsolationLevel, NoTls, SimpleQueryMessage, Socket, Transaction,
+    Client, Config, Connection, IsolationLevel, NoTls, Socket, Transaction,
     config::ReplicationMode, error::SqlState, tls::MakeTlsConnect, types::PgLsn,
 };
 use tracing::{Instrument, debug, error, info};
@@ -25,7 +25,7 @@ use super::{
     query::{PgReplicationQueryTarget, classify_table_copy_error},
     transaction::PgReplicationTransaction,
     types::{CreateSlotResult, GetSlotResult, PostgresConnectionUpdate, SlotState, SnapshotAction},
-    utils::get_row_value,
+    utils::{for_each_simple_query_row, get_row_value, simple_query_first_row},
 };
 use crate::{
     bail,
@@ -418,35 +418,33 @@ impl PgReplicationClient {
     pub async fn get_wal_sender_timeout(&self) -> EtlResult<Option<Duration>> {
         let query = "select setting, unit from pg_settings where name = 'wal_sender_timeout';";
 
-        for result in self.client.simple_query(query).await? {
-            if let SimpleQueryMessage::Row(row) = result {
-                let setting = get_row_value::<u64>(&row, "setting", "pg_settings")?;
-                if setting == 0 {
-                    return Ok(None);
-                }
-
-                let unit = row.try_get("unit")?.unwrap_or(PG_SETTINGS_DEFAULT_DURATION_UNIT);
-
-                let duration = match unit {
-                    "ms" => Duration::from_millis(setting),
-                    "s" => Duration::from_secs(setting),
-                    "min" => Duration::from_secs(setting.saturating_mul(60)),
-                    "h" => Duration::from_secs(setting.saturating_mul(60 * 60)),
-                    "d" => Duration::from_secs(setting.saturating_mul(60 * 60 * 24)),
-                    unsupported_unit => {
-                        return Err(etl_error!(
-                            ErrorKind::ConversionError,
-                            "Unsupported wal sender timeout unit",
-                            format!(
-                                "Unsupported wal_sender_timeout unit '{}' returned by pg_settings",
-                                unsupported_unit
-                            )
-                        ));
-                    }
-                };
-
-                return Ok(Some(duration));
+        if let Some(row) = simple_query_first_row(&self.client, query).await? {
+            let setting = get_row_value::<u64>(&row, "setting", "pg_settings")?;
+            if setting == 0 {
+                return Ok(None);
             }
+
+            let unit = row.try_get("unit")?.unwrap_or(PG_SETTINGS_DEFAULT_DURATION_UNIT);
+
+            let duration = match unit {
+                "ms" => Duration::from_millis(setting),
+                "s" => Duration::from_secs(setting),
+                "min" => Duration::from_secs(setting.saturating_mul(60)),
+                "h" => Duration::from_secs(setting.saturating_mul(60 * 60)),
+                "d" => Duration::from_secs(setting.saturating_mul(60 * 60 * 24)),
+                unsupported_unit => {
+                    return Err(etl_error!(
+                        ErrorKind::ConversionError,
+                        "Unsupported wal sender timeout unit",
+                        format!(
+                            "Unsupported wal_sender_timeout unit '{}' returned by pg_settings",
+                            unsupported_unit
+                        )
+                    ));
+                }
+            };
+
+            return Ok(Some(duration));
         }
 
         bail!(
@@ -495,22 +493,17 @@ impl PgReplicationClient {
              join pg_catalog.pg_namespace n on n.oid = c.relnamespace
              where c.oid = {table_id}"
         );
-        let mut table_name = None;
-        for message in self.client.simple_query(&query).await? {
-            if let SimpleQueryMessage::Row(row) = message {
-                table_name = Some(TableName::new(
-                    get_row_value(&row, "schema_name", "pg_namespace")?,
-                    get_row_value(&row, "table_name", "pg_class")?,
-                ));
-            }
-        }
-        let table_name = table_name.ok_or_else(|| {
+        let row = simple_query_first_row(&self.client, &query).await?.ok_or_else(|| {
             etl_error!(
                 ErrorKind::SourceSchemaError,
                 "Table not found before acquiring copy locks",
                 format!("Table ID: {table_id}")
             )
         })?;
+        let table_name = TableName::new(
+            get_row_value(&row, "schema_name", "pg_namespace")?,
+            get_row_value(&row, "table_name", "pg_class")?,
+        );
 
         let connection_config = self.connection_config.clone();
         let server_version = self.server_version;
@@ -594,21 +587,14 @@ impl PgReplicationClient {
             quote_literal(slot_name)
         );
 
-        let results = self.client.simple_query(&query).await?;
-        for result in results {
-            if let SimpleQueryMessage::Row(row) = result {
-                // wal_status can be: 'reserved', 'extended', 'unreserved', or
-                // 'lost' A slot is invalidated when wal_status is 'lost'
-                let wal_status: Option<String> = row.try_get("wal_status")?.map(String::from);
-
-                // A NULL status means PostgreSQL cannot determine WAL
-                // availability from the slot's restart LSN, for example because
-                // the slot has not reserved WAL yet.
-                return match wal_status.as_deref() {
-                    Some("lost") => Ok(SlotState::Invalidated),
-                    Some(_) | None => Ok(SlotState::NotInvalidated),
-                };
-            }
+        if let Some(row) = simple_query_first_row(&self.client, &query).await? {
+            // A NULL status means PostgreSQL cannot determine WAL
+            // availability from the slot's restart LSN, for example because
+            // the slot has not reserved WAL yet.
+            return match row.try_get("wal_status")? {
+                Some("lost") => Ok(SlotState::Invalidated),
+                Some(_) | None => Ok(SlotState::NotInvalidated),
+            };
         }
 
         bail!(
@@ -627,15 +613,11 @@ impl PgReplicationClient {
             quote_literal(slot_name)
         );
 
-        let results = self.client.simple_query(&query).await?;
-        for result in results {
-            if let SimpleQueryMessage::Row(row) = result {
-                let confirmed_flush_lsn =
-                    get_row_value::<PgLsn>(&row, "confirmed_flush_lsn", "pg_replication_slots")?;
-                let slot = GetSlotResult { confirmed_flush_lsn };
+        if let Some(row) = simple_query_first_row(&self.client, &query).await? {
+            let confirmed_flush_lsn =
+                get_row_value::<PgLsn>(&row, "confirmed_flush_lsn", "pg_replication_slots")?;
 
-                return Ok(slot);
-            }
+            return Ok(GetSlotResult { confirmed_flush_lsn });
         }
 
         bail!(
@@ -658,15 +640,13 @@ impl PgReplicationClient {
             quote_literal(slot_name)
         );
 
-        for result in self.client.simple_query(&query).await? {
-            if let SimpleQueryMessage::Row(row) = result {
-                let temporary = get_row_value::<u8>(&row, "temporary", "pg_replication_slots")?;
-                return Ok(Some(if temporary != 0 {
-                    ReplicationSlotPersistence::Temporary
-                } else {
-                    ReplicationSlotPersistence::Permanent
-                }));
-            }
+        if let Some(row) = simple_query_first_row(&self.client, &query).await? {
+            let temporary = get_row_value::<u8>(&row, "temporary", "pg_replication_slots")?;
+            return Ok(Some(if temporary != 0 {
+                ReplicationSlotPersistence::Temporary
+            } else {
+                ReplicationSlotPersistence::Permanent
+            }));
         }
 
         Ok(None)
@@ -690,23 +670,14 @@ impl PgReplicationClient {
             quote_literal(slot_name)
         );
 
-        let results = self.client.simple_query(&query).await?;
-        let mut failover = None;
-        for result in results {
-            if let SimpleQueryMessage::Row(row) = result {
-                failover =
-                    Some(get_row_value::<u8>(&row, "failover", "pg_replication_slots")? != 0);
-                break;
-            }
-        }
-
-        let Some(failover) = failover else {
+        let Some(row) = simple_query_first_row(&self.client, &query).await? else {
             bail!(
                 ErrorKind::ReplicationSlotNotFound,
                 "Replication slot not found",
                 format!("Replication slot '{}' not found in database", slot_name)
             );
         };
+        let failover = get_row_value::<u8>(&row, "failover", "pg_replication_slots")? != 0;
 
         if !failover {
             // Uppercase per the replication-command lexer (see create_slot).
@@ -766,13 +737,8 @@ impl PgReplicationClient {
             "select 1 as exists from pg_publication where pubname = {};",
             quote_literal(publication_name)
         );
-        for msg in self.client.simple_query(&publication_exists_query).await? {
-            if let SimpleQueryMessage::Row(_) = msg {
-                return Ok(true);
-            }
-        }
 
-        Ok(false)
+        Ok(simple_query_first_row(&self.client, &publication_exists_query).await?.is_some())
     }
 
     /// Retrieves the OIDs of all tables included in a publication.
@@ -795,13 +761,14 @@ impl PgReplicationClient {
     ) -> EtlResult<Vec<TableId>> {
         let query = publication_table_ids_query(publication_name);
 
-        let mut table_ids = vec![];
-        for row in self.client.simple_query(&query).await? {
-            if let SimpleQueryMessage::Row(row) = row {
-                let table_id = get_row_value::<TableId>(&row, "oid", "pg_class")?;
-                table_ids.push(table_id);
-            }
-        }
+        let mut table_ids = Vec::new();
+        for_each_simple_query_row(&self.client, &query, |row| -> EtlResult<()> {
+            let table_id = get_row_value::<TableId>(&row, "oid", "pg_class")?;
+            table_ids.push(table_id);
+
+            Ok(())
+        })
+        .await?;
 
         if table_ids.is_empty() {
             bail!(
