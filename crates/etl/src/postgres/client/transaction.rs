@@ -4,7 +4,10 @@ use std::{
     num::NonZeroI32,
 };
 
-use etl_postgres::{below_version, version::POSTGRES_15};
+use etl_postgres::{
+    below_version, requires_version,
+    version::{POSTGRES_15, POSTGRES_19},
+};
 use pg_escape::{quote_identifier, quote_literal};
 use tokio::sync::watch;
 use tokio_postgres::{CopyOutStream, SimpleQueryMessage, Transaction};
@@ -289,6 +292,15 @@ impl<'a> PgReplicationTransactionCore<'a> {
         // published tables, potentially waiting behind queued DDL. Only
         // declarative partition ancestors contribute inherited membership.
         let publication_name_sql = quote_literal(publication_name);
+        let exclusion_filter = if requires_version!(self.server_version, POSTGRES_19) {
+            "and not exists (
+                 select 1 from pg_catalog.pg_publication_rel excluded
+                 join ancestors a on a.oid = excluded.prrelid
+                 where excluded.prpubid = p.oid and excluded.prexcept
+             )"
+        } else {
+            ""
+        };
         let column_query = format!(
             "with recursive ancestors as (
                  select oid, relnamespace, relispartition from pg_catalog.pg_class
@@ -324,7 +336,7 @@ impl<'a> PgReplicationTransactionCore<'a> {
                )
              where p.pubname = {publication_name_sql} and exists (
                  select 1 from published_ancestors pa where pa.pubid = p.oid
-             ) and (
+             ) {exclusion_filter} and (
                  (not p.pubviaroot and c.relkind != 'p') or
                  (p.pubviaroot and not exists (
                      select 1 from published_ancestors pa

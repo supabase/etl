@@ -1,23 +1,28 @@
 <p align="center">
-  <img alt="" width="740" src="site/public/assets/etl-logo-extended.png">
+  <img alt="" width="76" height="76" src="site/public/assets/etl-favicon.svg">
 </p>
 
-# Supabase ETL
+<h1 align="center">Supabase ETL</h1>
 
-Supabase ETL is an open-source Postgres replication engine written in Rust. It
-copies existing table rows and streams inserts, updates, deletes, and truncates
-to BigQuery, ClickHouse, DuckLake, Snowflake, or a destination you implement.
-Run the standalone replicator or embed the library in a Rust application.
+<p align="center">
+  <strong>Open-source Postgres replication</strong><br>
+  Copy existing rows and stream changes to your warehouse or lakehouse.
+</p>
 
-[Quickstart](#quickstart) · [Documentation](https://supabase.github.io/etl/) · [Examples](crates/etl-examples/README.md) · [Issues](https://github.com/supabase/etl/issues)
+<p align="center">
+  <a href="#quickstart">Quickstart</a> ·
+  <a href="https://supabase.github.io/etl/">Docs</a> ·
+  <a href="crates/etl-examples/README.md">Rust&nbsp;examples</a>
+</p>
 
-[![CI](https://github.com/supabase/etl/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/supabase/etl/actions/workflows/ci.yml)
-[![Coverage](https://coveralls.io/repos/github/supabase/etl/badge.svg?branch=main)](https://coveralls.io/github/supabase/etl?branch=main)
-[![Docs](https://github.com/supabase/etl/actions/workflows/docs.yml/badge.svg?branch=main)](https://github.com/supabase/etl/actions/workflows/docs.yml)
-[![Apache 2.0 license](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+<p align="center">
+  <a href="https://github.com/supabase/etl/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/supabase/etl/actions/workflows/ci.yml/badge.svg?branch=main"></a>
+  <a href="https://coveralls.io/github/supabase/etl?branch=main"><img alt="Coverage" src="https://coveralls.io/repos/github/supabase/etl/badge.svg?branch=main"></a>
+</p>
 
-**Supabase Pipelines** is the managed version of Supabase ETL. Configure and
-monitor pipelines in the Supabase Dashboard. [Set up Supabase Pipelines](https://supabase.com/docs/guides/database/replication/pipelines)
+Run the standalone replicator or embed the Rust library.
+[Supabase Pipelines](https://supabase.com/docs/guides/database/replication/pipelines)
+is the managed version, available in the Supabase Dashboard.
 
 > [!NOTE]
 > Supabase ETL is under active development. We are holding the first versioned
@@ -69,24 +74,20 @@ flowchart LR
 2. **Ongoing replication** decodes changes from the Postgres write-ahead log
    (WAL) and sends them to the destination.
 
-ETL runs in one Rust process, with direct writes to the destination and
-in-memory buffering for pending changes. The engine is designed for high
-throughput with low CPU and memory overhead. Postgres WAL supplies the replay
-history. A durable state store saves checkpoints and table state so ETL can
-resume after a restart.
-Delivery is at least once, so destinations can receive a change again.
+ETL runs in one Rust process and writes directly to the destination. It
+buffers pending changes in memory and applies backpressure by slowing reads
+from Postgres. There is no local disk spool to provision or manage. Postgres
+WAL supplies the replay history, and a durable state store saves checkpoints
+so ETL can resume after a restart. Delivery is at least once.
 [Architecture](https://supabase.github.io/etl/explanation/architecture/)
-
-To feed Kafka, implement a custom destination that publishes to topics, then
-run consumers against those topics. [Custom destinations](https://supabase.github.io/etl/guides/custom-implementations/)
 
 ### Operational limits
 
-- **WAL retention.** A table-sync slot retains WAL while ETL copies a table.
-  On a busy source, a long copy can exceed the configured retention limit
-  before catch-up starts. Postgres can then remove the required WAL and
-  invalidate the slot. A lost table-sync slot requires a fresh copy of that
-  table. Losing the apply slot can require resyncing the pipeline.
+- **WAL retention.** A long initial copy or a slow or unavailable destination
+  can make replication slots retain more WAL on the source. With a retention
+  limit, Postgres can remove required WAL and invalidate a slot. A lost
+  table-sync slot requires a fresh copy of that table. Losing the apply slot
+  can require resyncing the pipeline.
   [WAL buildup and slot recovery](https://supabase.github.io/etl/guides/configure-postgres/#wal-buildup-and-disk-usage)
 - **Schema changes.** Schema-change handling is in public beta. Some changes
   require a table resync, and queued schema changes can block queries during

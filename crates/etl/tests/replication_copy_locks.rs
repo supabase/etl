@@ -16,7 +16,9 @@ use etl::{
     },
 };
 use etl_postgres::{
-    below_version, tokio::test_utils::connect_to_pg_database, version::POSTGRES_15,
+    below_version, requires_version,
+    tokio::test_utils::connect_to_pg_database,
+    version::{POSTGRES_15, POSTGRES_19},
 };
 use futures::StreamExt;
 use pg_escape::quote_identifier;
@@ -607,6 +609,18 @@ async fn copy_publication_columns_match_postgres() {
                 .unwrap();
             publications.push(publication);
         }
+    }
+
+    if requires_version!(database.server_version(), POSTGRES_19) {
+        client
+            .batch_execute(
+                "create publication copy_except for all tables;
+                 alter publication copy_except set all tables except
+                     (table copy_roots.root, only test.parent)",
+            )
+            .await
+            .unwrap();
+        publications.push("copy_except".to_owned());
     }
 
     let mut parent = PgReplicationClient::connect(database.config.clone()).await.unwrap();

@@ -84,16 +84,17 @@ Postgres WAL.
 
 ### Buffering and replay
 
-ETL sends batches directly to the destination from one Rust process. The
-engine buffers pending decoded changes entirely in memory and slows intake
-when memory is under pressure. Postgres WAL supplies the durable replay
-history. With a durable store, ETL resumes from saved checkpoints and schemas.
-Large initial copies and slow destinations can increase
-[WAL retention on the source](/guides/configure-postgres/#wal-buildup-and-disk-usage).
+ETL sends batches directly to the destination from one Rust process. It
+buffers pending changes in memory and slows or pauses reads from Postgres
+when those buffers are under pressure. This keeps deployment simple because
+ETL needs no disk spool. Postgres WAL supplies the durable replay history,
+and a durable state store lets ETL resume from saved checkpoints and schemas.
 
-To integrate with Kafka, use a custom destination that publishes batches to
-topics for downstream consumers. A durable write result lets ETL checkpoint
-progress and acknowledge WAL. [Custom Implementations](/guides/custom-implementations/)
+If a destination falls behind or goes offline, ETL can take longer to
+acknowledge progress. Replication slots can then retain more WAL on the
+source, where it uses disk space until the pipeline catches up or Postgres
+enforces a configured retention limit. Long initial copies can also increase
+[WAL retention on the source](/guides/configure-postgres/#wal-buildup-and-disk-usage).
 
 ### Schema Changes
 

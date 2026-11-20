@@ -25,13 +25,6 @@ wal_level = logical
 
 Restart Postgres after changing this setting. Confirm with `SHOW wal_level;`.
 
-On a PostgreSQL 19 primary with `wal_level = replica`, creating the first
-logical slot enables logical decoding without a restart. Check
-`SHOW effective_wal_level;` after ETL creates its slot. Keep
-`wal_level = logical` on the primary for [read replica sources](#read-replicas),
-since losing the last logical slot on the primary can invalidate standby
-logical slots. [PostgreSQL logical decoding](https://www.postgresql.org/docs/19/logicaldecoding-explanation.html#LOGICALDECODING-EXPLANATION-LOG-DEC)
-
 ## Replication User
 
 ETL needs a login role with the `REPLICATION` privilege. A superuser works for
@@ -550,11 +543,10 @@ CREATE PUBLICATION schema_tables FOR TABLES IN SCHEMA public, analytics;
 CREATE PUBLICATION inserts_only FOR TABLE users WITH (publish = 'insert');
 ```
 
-Avoid publishing ETL-owned tables. If the source database is also used as the
-ETL state store, the `etl` schema contains ETL internal tables. Do not include
-that schema in the publication. In that setup, `FOR ALL TABLES` also includes
-ETL-owned tables, so use explicit table lists or `FOR TABLES IN SCHEMA ...` for
-customer-owned schemas instead.
+`FOR ALL TABLES` and PostgreSQL 19's `FOR ALL TABLES EXCEPT` apply across
+the database. They can include ETL migration metadata and, if the state
+store shares the source database, pipeline state tables. Use an explicit
+table list or `FOR TABLES IN SCHEMA ...` to publish only application tables.
 
 #### Partitioned Tables
 
