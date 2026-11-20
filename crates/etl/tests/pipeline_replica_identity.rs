@@ -10,7 +10,7 @@ use etl::{
         test_destination_wrapper::TestDestinationWrapper,
     },
 };
-use etl_postgres::tokio::test_utils::TableModification;
+use etl_postgres::{below_version, tokio::test_utils::TableModification, version::POSTGRES_18};
 use etl_telemetry::tracing::init_test_tracing;
 use pg_escape::{quote_identifier, quote_literal};
 use rand::{Rng, distr::Alphanumeric};
@@ -343,6 +343,111 @@ async fn run_replica_identity_scenario(
     }
 }
 
+/// Replicates an update and a delete of rows whose nulls predate a
+/// `not null ... not valid` constraint, added before the pipeline starts or
+/// while it runs.
+///
+/// The constraint leaves existing nulls in place, so the column stays nullable
+/// and full old rows can still carry those nulls.
+async fn run_not_valid_not_null_scenario(add_constraint_before_start: bool) {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    if below_version!(database.server_version(), POSTGRES_18) {
+        eprintln!("Skipping test: PostgreSQL 18+ required for NOT NULL NOT VALID");
+        return;
+    }
+
+    let table_name = test_table_name("not_valid_not_null");
+    let table_id =
+        database.create_table(table_name.clone(), true, &[("note", "text")]).await.unwrap();
+    let table = table_name.as_quoted_identifier();
+    let client = database.client.as_ref().unwrap();
+    let add_constraint_sql =
+        format!("alter table {table} add constraint note_not_null not null note not valid");
+    client
+        .batch_execute(&format!(
+            "alter table {table} replica identity full;
+             insert into {table} (id, note) values (1, null), (2, null)"
+        ))
+        .await
+        .unwrap();
+
+    if add_constraint_before_start {
+        client.batch_execute(&add_constraint_sql).await.unwrap();
+    }
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+
+    let publication_name = "test_pub_not_valid_not_null".to_owned();
+    database
+        .create_publication(&publication_name, std::slice::from_ref(&table_name))
+        .await
+        .unwrap();
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        random_pipeline_id().as_str(),
+        publication_name,
+        store.clone(),
+        destination.clone(),
+    );
+
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
+
+    pipeline.start().await.unwrap();
+
+    table_sync_complete_notify.notified().await;
+
+    if !add_constraint_before_start {
+        client.batch_execute(&add_constraint_sql).await.unwrap();
+    }
+
+    let changes_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Update, table_id, 1),
+            EventCondition::TableCount(EventType::Delete, table_id, 1),
+        ])
+        .await;
+
+    client
+        .batch_execute(&format!(
+            "update {table} set note = 'filled' where id = 1;
+             delete from {table} where id = 2"
+        ))
+        .await
+        .unwrap();
+
+    changes_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let table_schema = store.get_latest_table_schemas().await.remove(&table_id).unwrap();
+    let note_column =
+        table_schema.column_schemas.iter().find(|column| column.name == "note").unwrap();
+    assert!(note_column.nullable);
+
+    let row = |id, note: Cell| TableRow::new(vec![Cell::I64(id), note]);
+    let mut copied_rows = destination.get_table_rows().await.remove(&table_id).unwrap();
+    copied_rows.sort_by_key(|row| match row.values()[0] {
+        Cell::I64(id) => id,
+        _ => unreachable!(),
+    });
+    assert_eq!(copied_rows, vec![row(1, Cell::Null), row(2, Cell::Null)]);
+
+    let events = data_events(destination.get_events().await);
+    let update = find_update_event(&events, 0);
+    assert_eq!(
+        update.updated_table_row,
+        UpdatedTableRow::Full(row(1, Cell::String("filled".to_owned())))
+    );
+    assert_eq!(update.old_table_row, Some(OldTableRow::Full(row(1, Cell::Null))));
+
+    let delete = find_delete_event(&events);
+    assert_eq!(delete.old_table_row, Some(OldTableRow::Full(row(2, Cell::Null))));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn default_replica_identity_with_composite_primary_key_handles_partial_and_key_rows() {
     let result = run_replica_identity_scenario(ReplicaIdentityMode::Default).await;
@@ -569,4 +674,14 @@ async fn none_replica_identity_with_composite_primary_key_rejects_updates_and_de
     let events = data_events(result.events);
     assert_eq!(events.len(), 1);
     assert!(matches!(&events[0], Event::Insert(_)));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn not_valid_not_null_constraint_added_before_start_keeps_existing_nulls() {
+    run_not_valid_not_null_scenario(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn not_valid_not_null_constraint_added_while_running_keeps_existing_nulls() {
+    run_not_valid_not_null_scenario(false).await;
 }
