@@ -435,15 +435,16 @@ does not guarantee that every captured field describes the same schema state.
 
 ### Catalog rows and PostgreSQL helper functions can see different metadata
 
-SQL reads of `pg_catalog` follow an MVCC snapshot, but default-expression
-deparsing through `pg_get_expr` can use newer internal catalog metadata.
+SQL reads of `pg_catalog` follow an MVCC snapshot, but helpers such as
+`format_type` and `pg_get_expr` can use newer internal catalog metadata.
 A concurrent change to an enum, type, function, or namespace can therefore
 produce a name or expression that disagrees with the captured catalog rows.
 The table's copy lock does not protect all of these shared objects.
 
-Copy and CDC share a column query that uses type OIDs and modifiers directly;
-it does not call `format_type`. The broader legacy introspection helper remains
-available for older binaries, but is not used by the current decoder paths.
+Copy and CDC share one column query. Decoding uses its type OIDs and modifiers;
+`format_type` output only supplies type names for default rendering. The
+broader legacy introspection helper remains available for older binaries, but
+is not used by the current decoder paths.
 
 COPY reads publication columns, row-filter definitions, and partition membership
 through snapshot-visible catalog SQL. Copy and DDL capture share publication
