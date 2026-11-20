@@ -34,9 +34,9 @@ Copy and CDC share three catalog helpers:
 The trigger captures these fields in one statement through stable helpers.
 Publication filters use attribute numbers: `null` means all supported columns,
 while an explicit list preserves its policy when columns are added. Dropped
-column gaps do not change tuple order. Every snapshot carries the historical
-filter needed for replay; current catalogs or a previous all-one mask cannot
-recover that policy. Table DDL captures relevant publications together;
+column gaps do not change tuple order. Every snapshot records its historical
+filter, which current catalogs or a previous all-one mask cannot recover; ETL
+does not consume it yet (see below). Table DDL captures relevant publications together;
 publication DDL is scoped to the changed publication.
 
 Table DDL refreshes effective identities in the altered table's subtree, since
