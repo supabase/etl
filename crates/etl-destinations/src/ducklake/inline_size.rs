@@ -38,20 +38,15 @@ impl DuckLakePendingInlineSizeSampler {
         let sql = pending_inline_data_bytes_query(&self.metadata_schema);
         let inlined_bytes: i64 = self
             .pool
-            .read("inline_size", |pool| {
-                let sql = &sql;
-                async move {
-                    let mut transaction = pool.begin().await?;
-                    let result = sqlx::query_scalar(AssertSqlSafe(sql.as_str()))
+            .read("inline_size", (sql, table_name), |connection, (sql, table_name)| {
+                Box::pin(
+                    sqlx::query_scalar(AssertSqlSafe(sql.as_str()))
                         .persistent(false)
                         .bind(table_name.schema())
                         .bind(table_name.table())
                         .bind(table_name.namespace())
-                        .fetch_one(&mut *transaction)
-                        .await?;
-                    transaction.commit().await?;
-                    Ok::<_, sqlx::Error>(result)
-                }
+                        .fetch_one(connection),
+                )
             })
             .await
             .map_err(|source| {

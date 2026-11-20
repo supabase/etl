@@ -91,9 +91,8 @@ use crate::{
         inline_size::DuckLakePendingInlineSizeSampler,
         metrics::{
             DuckLakeMetricsSampler, ETL_DUCKLAKE_CATALOG_POOLER_FALLBACKS_TOTAL,
-            ETL_DUCKLAKE_POOL_SIZE, query_catalog_maintenance_metrics, query_table_storage_metrics,
-            register_metrics, resolve_ducklake_metadata_schema_blocking,
-            spawn_ducklake_metrics_sampler,
+            ETL_DUCKLAKE_POOL_SIZE, query_table_storage_metrics, register_metrics,
+            resolve_ducklake_metadata_schema_blocking, spawn_ducklake_metrics_sampler,
         },
         replay_epoch::{
             begin_table_replay_epoch_transition, complete_table_replay_epoch_transition,
@@ -4616,63 +4615,88 @@ where
         }
     }
 
-    /// Samples catalog state and returns which externally coordinated
-    /// maintenance operations should be requested now, applying the operation
-    /// policy before selecting file maintenance.
+    /// Checks snapshot eligibility without scanning file and deletion metrics.
+    async fn sample_snapshot_expiration(&self) -> EtlResult<bool> {
+        let now = Timestamp::now();
+        let Some(retention_seconds) =
+            self.expire_snapshots_retention.seconds_before(now.to_zoned(TimeZone::UTC).datetime())
+        else {
+            warn!(
+                metadata_schema = %self.metadata_schema,
+                expire_snapshots_older_than = %self.expire_snapshots_older_than,
+                "ducklake could not compute snapshot expiration cutoff"
+            );
+            return Ok(false);
+        };
+        let cutoff_epoch_ms = now.as_millisecond() - retention_seconds * 1_000;
+        let metadata_schema = quote_postgres_identifier(&self.metadata_schema);
+        // Preserve the epoch comparison regardless of session timezone.
+        let sql = format!(
+            "select exists(select 1 from {metadata_schema}.ducklake_snapshot offset 1)
+                 and exists(select 1 from {metadata_schema}.ducklake_snapshot
+                            where (extract(epoch from snapshot_time) * 1000)::bigint <= $1)",
+        );
+
+        self.metadata_pg_pool
+            .read("snapshot_expiration", (sql, cutoff_epoch_ms), |connection, (sql, cutoff)| {
+                Box::pin(
+                    sqlx::query_scalar(AssertSqlSafe(sql.as_str()))
+                        .persistent(false)
+                        .bind(*cutoff)
+                        .fetch_one(connection),
+                )
+            })
+            .await
+            .map_err(|source| {
+                classified_error(
+                    ErrorKind::DestinationQueryFailed,
+                    "DuckLake snapshot expiration sample failed",
+                    source,
+                )
+            })
+    }
+
+    /// Samples independent maintenance triggers without discarding successful
+    /// samples when another optional catalog read fails. Copy-state failures
+    /// still abort sampling because they guard file maintenance.
     pub(super) async fn sample_external_maintenance_operations(
         &self,
         inline_flush_min_inlined_bytes: u64,
         rewrite_data_files_min_active_data_files: i64,
         policy: ExternalMaintenanceOperationPolicy,
+        resume_after: &mut Option<DuckLakeTableName>,
     ) -> EtlResult<ExternalMaintenanceOperationSample> {
-        let table_names = self.list_active_ducklake_tables().await?;
-        let inline_sampler = DuckLakePendingInlineSizeSampler::new(
-            self.metadata_schema.to_string(),
-            self.metadata_pg_pool.clone(),
-        );
         let copy_phase_active = self.has_active_table_copy().await?;
         let mut operations = ExternalMaintenanceOperations::default();
         let mut rewrite_data_files_reason = None;
         let mut file_maintenance_requested = false;
-        let catalog_metrics = query_catalog_maintenance_metrics(
-            &self.metadata_pg_pool,
-            self.metadata_schema.as_ref(),
-        )
-        .await?;
 
-        let now = Timestamp::now().to_zoned(TimeZone::UTC).datetime();
-        match self.expire_snapshots_retention.seconds_before(now) {
-            Some(retention_seconds) => {
-                operations.expire_snapshots = catalog_metrics.snapshots_total > 1
-                    && catalog_metrics.oldest_snapshot_age_seconds >= retention_seconds;
-                debug!(
-                    metadata_schema = %self.metadata_schema,
-                    expire_snapshots_older_than = %self.expire_snapshots_older_than,
-                    retention_seconds,
-                    snapshots_total = catalog_metrics.snapshots_total,
-                    oldest_snapshot_age_seconds = catalog_metrics.oldest_snapshot_age_seconds,
-                    expire_snapshots = operations.expire_snapshots,
-                    "ducklake sampled expire snapshots trigger: metadata_schema={}, \
-                     expire_snapshots_older_than={}, retention_seconds={}, snapshots_total={}, \
-                     oldest_snapshot_age_seconds={}, expire_snapshots={}",
-                    self.metadata_schema,
-                    self.expire_snapshots_older_than,
-                    retention_seconds,
-                    catalog_metrics.snapshots_total,
-                    catalog_metrics.oldest_snapshot_age_seconds,
-                    operations.expire_snapshots
-                );
+        match self.sample_snapshot_expiration().await {
+            Ok(expire_snapshots) => operations.expire_snapshots = expire_snapshots,
+            Err(error) => {
+                warn!(error = %error, "failed to sample ducklake snapshot expiration trigger");
             }
-            None => {
-                warn!(
-                    metadata_schema = %self.metadata_schema,
-                    expire_snapshots_older_than = %self.expire_snapshots_older_than,
-                    "ducklake could not compute expire_snapshots_older_than cutoff for external \
-                     maintenance trigger sampling: metadata_schema={}, expire_snapshots_older_than={}",
-                    self.metadata_schema,
-                    self.expire_snapshots_older_than
-                );
+        }
+
+        let mut table_names = match self.list_active_ducklake_tables().await {
+            Ok(table_names) => table_names,
+            Err(error) => {
+                warn!(error = %error, "failed to discover ducklake table maintenance triggers");
+                Vec::new()
             }
+        };
+        let inline_sampler = DuckLakePendingInlineSizeSampler::new(
+            self.metadata_schema.to_string(),
+            self.metadata_pg_pool.clone(),
+        );
+
+        // A pass that stopped at a failed table gives the next table the
+        // first turn. Discovery returns tables in schema and name order.
+        if !table_names.is_empty()
+            && let Some(previous) = resume_after.take()
+            && let Some(index) = table_names.iter().position(|table| *table == previous)
+        {
+            table_names.rotate_left(index + 1);
         }
 
         for table_name in table_names {
@@ -4680,18 +4704,43 @@ where
                 continue;
             }
 
+            let mut inline_failed = false;
             if !operations.inline_flush {
-                let sizes = inline_sampler.sample_table(&table_name).await?;
-                operations.inline_flush = sizes.inlined_bytes >= inline_flush_min_inlined_bytes;
+                match inline_sampler.sample_table(&table_name).await {
+                    Ok(sizes) => {
+                        operations.inline_flush =
+                            sizes.inlined_bytes >= inline_flush_min_inlined_bytes;
+                    }
+                    Err(error) => {
+                        warn!(
+                            error = %error,
+                            table = %table_name.id(),
+                            "failed to sample ducklake inline flush trigger"
+                        );
+                        inline_failed = true;
+                    }
+                }
             }
 
             if !file_maintenance_requested && !copy_phase_active {
-                let metrics = query_table_storage_metrics(
+                let metrics = match query_table_storage_metrics(
                     &self.metadata_pg_pool,
                     self.metadata_schema.as_ref(),
                     &table_name,
                 )
-                .await?;
+                .await
+                {
+                    Ok(metrics) => metrics,
+                    Err(error) => {
+                        warn!(
+                            error = %error,
+                            table = %table_name.id(),
+                            "failed to sample ducklake file maintenance triggers"
+                        );
+                        *resume_after = Some(table_name);
+                        break;
+                    }
+                };
                 let sample = ExternalMaintenanceOperationSample::for_file_metrics(
                     copy_phase_active,
                     metrics.active_data_files,
@@ -4704,6 +4753,11 @@ where
                 operations.rewrite_data_files = sample.operations.rewrite_data_files;
                 operations.cleanup_old_files = sample.operations.cleanup_old_files;
                 rewrite_data_files_reason = sample.rewrite_data_files_reason;
+            }
+
+            if inline_failed {
+                *resume_after = Some(table_name);
+                break;
             }
 
             if operations.inline_flush && file_maintenance_requested {
@@ -4729,19 +4783,18 @@ where
         let sql = namespaced_tables_query(self.metadata_schema.as_ref());
         let rows: Vec<(Option<String>, String, String)> = self
             .metadata_pg_pool
-            .read("list_tables", |pool| {
-                let sql = &sql;
-                async move {
-                    let mut transaction = pool.begin().await?;
-                    let result = sqlx::query_as(AssertSqlSafe(sql.as_str()))
-                        .persistent(false)
-                        .bind(self.table_namespace.as_deref())
-                        .fetch_all(&mut *transaction)
-                        .await?;
-                    transaction.commit().await?;
-                    Ok::<_, sqlx::Error>(result)
-                }
-            })
+            .read(
+                "list_tables",
+                (sql, self.table_namespace.as_deref()),
+                |connection, (sql, table_namespace)| {
+                    Box::pin(
+                        sqlx::query_as(AssertSqlSafe(sql.as_str()))
+                            .persistent(false)
+                            .bind(*table_namespace)
+                            .fetch_all(connection),
+                    )
+                },
+            )
             .await
             .map_err(|source| {
                 classified_error_with_detail(
@@ -6272,10 +6325,375 @@ mod tests {
     }
 
     mod postgres_backed {
+        use etl_maintenance::{
+            ExternalMaintenancePausePolicy, ExternalMaintenanceStore,
+            ExternalMaintenanceWatcherConfig, PostgresExternalMaintenanceStore,
+        };
         use etl_telemetry::metrics::init_metrics_handle;
+        use sqlx::error::DatabaseError;
         use tokio::{net::TcpListener, time::timeout};
 
         use super::*;
+        use crate::ducklake::external_maintenance::run_external_maintenance_watcher;
+
+        /// Timed-out metadata queries stop on PostgreSQL, and successful reads
+        /// leave the shared foreground session's timeout unchanged.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn metadata_timeout_stops_server_queries_and_preserves_session_settings() {
+            /// Identifies the backend and its statement timeout in
+            /// milliseconds.
+            const SESSION_SETTINGS_QUERY: &str = "select pg_backend_pid(), setting::bigint
+                from pg_settings where name = 'statement_timeout'";
+            /// Exported counter contract for shared metadata readers.
+            const METADATA_READ_ERRORS: &str = "etl_ducklake_catalog_metadata_read_errors_total";
+
+            let metrics = init_metrics_handle().unwrap();
+            let (database, catalog) = create_catalog_database().await;
+            let observer = database.client.as_ref().unwrap();
+            let direct = build_ducklake_catalog_pg_pool(&catalog).unwrap();
+            let reader = DuckLakeMetadataPool::new(direct.clone(), None).unwrap();
+
+            let before: (i32, i64) =
+                sqlx::query_as(SESSION_SETTINGS_QUERY).fetch_one(&direct).await.unwrap();
+
+            let during: (i32, i64) = reader
+                .read("session_settings", (), |connection, _| {
+                    Box::pin(
+                        sqlx::query_as(SESSION_SETTINGS_QUERY)
+                            .persistent(false)
+                            .fetch_one(connection),
+                    )
+                })
+                .await
+                .unwrap();
+
+            let after: (i32, i64) =
+                sqlx::query_as(SESSION_SETTINGS_QUERY).fetch_one(&direct).await.unwrap();
+
+            assert_eq!(during.0, before.0);
+            assert!(during.1 > 0);
+            assert_eq!(after, before);
+
+            // Follow the configured budget so tuning it does not require
+            // duplicating its value in this regression.
+            let query_delay = Duration::from_millis(u64::try_from(during.1).unwrap()) * 2;
+            let read_limit = DUCKLAKE_CATALOG_ACQUIRE_TIMEOUT + query_delay;
+
+            for canceled_queries in 1..=2 {
+                let error = timeout(
+                    read_limit,
+                    reader.read("slow_metadata", query_delay, |connection, delay| {
+                        Box::pin(
+                            sqlx::query("select pg_sleep($1)")
+                                .persistent(false)
+                                .bind(delay.as_secs_f64())
+                                .execute(connection),
+                        )
+                    }),
+                )
+                .await
+                .unwrap()
+                .unwrap_err();
+
+                assert_eq!(
+                    error.as_database_error().and_then(DatabaseError::code).as_deref(),
+                    Some("57014")
+                );
+                assert_eq!(direct.size(), 0);
+
+                let rendered = metrics.render();
+                let sample = rendered
+                    .lines()
+                    .find(|line| {
+                        line.starts_with(METADATA_READ_ERRORS)
+                            && line.contains("route=\"direct\"")
+                            && line.contains("reason=\"query_canceled\"")
+                    })
+                    .unwrap();
+
+                assert_eq!(sample.split_whitespace().last().unwrap(), canceled_queries.to_string());
+
+                let active: i64 = observer
+                    .query_one(
+                        "select count(*) from pg_stat_activity
+                         where datname = current_database() and pid <> pg_backend_pid()
+                           and state = 'active'",
+                        &[],
+                    )
+                    .await
+                    .unwrap()
+                    .get(0);
+
+                assert_eq!(active, 0);
+                assert_eq!(
+                    sqlx::query_scalar::<_, i32>("select 1").fetch_one(&direct).await.unwrap(),
+                    1
+                );
+            }
+
+            direct.close().await;
+        }
+
+        /// Failed catalog reads still allow the watcher to handle a pause,
+        /// resume at the next table, and request independently eligible work.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn maintenance_progress_survives_failed_catalog_samples() {
+            let directory = TempDir::new().unwrap();
+            let data = path_to_file_url(directory.path());
+            let (mut database, catalog) = create_catalog_database().await;
+            let conn = open_lake_conn(&catalog, &data);
+            conn.execute_batch(
+                "create table lake.main.maintenance_rows (id integer);
+                 insert into lake.main.maintenance_rows values (1), (2);",
+            )
+            .unwrap();
+            drop(conn);
+
+            let destination = DuckLakeDestination::builder(
+                catalog.clone(),
+                data.clone(),
+                NonZeroU16::MIN,
+                MemoryStore::new(),
+            )
+            .build()
+            .await
+            .unwrap();
+            let metadata_schema = destination.metadata_schema.to_string();
+            let prefix = quote_identifier(&metadata_schema);
+            // Exercise the existing UTC epoch comparison even if a shared
+            // connection's session timezone changes.
+            sqlx::query("set timezone = 'Pacific/Honolulu'")
+                .execute(&destination.direct_pg_pool)
+                .await
+                .unwrap();
+
+            let client = database.client.as_mut().unwrap();
+            client
+                .batch_execute(&format!(
+                    "update {prefix}.ducklake_snapshot
+                     set snapshot_time = current_timestamp - interval '6 days 23 hours';",
+                ))
+                .await
+                .unwrap();
+
+            assert!(!destination.sample_snapshot_expiration().await.unwrap());
+
+            client
+                .batch_execute(&format!(
+                    "update {prefix}.ducklake_snapshot
+                     set snapshot_time = current_timestamp - interval '8 days'
+                     where snapshot_id < (select max(snapshot_id) from {prefix}.ducklake_snapshot);",
+                ))
+                .await
+                .unwrap();
+
+            assert!(destination.sample_snapshot_expiration().await.unwrap());
+
+            // Each failed observation suppresses only the triggers that need
+            // it. None of these failures invents file-maintenance work.
+            for (relation, inline_flush, expire_snapshots) in [
+                ("ducklake_snapshot", true, false),
+                ("ducklake_inlined_data_tables", false, true),
+                ("ducklake_table", false, true),
+            ] {
+                let lock = client.transaction().await.unwrap();
+                lock.batch_execute(&format!(
+                    "lock table {prefix}.{} in access exclusive mode;",
+                    quote_identifier(relation),
+                ))
+                .await
+                .unwrap();
+
+                let sample = destination
+                    .sample_external_maintenance_operations(
+                        0,
+                        40,
+                        ExternalMaintenanceOperationPolicy::default(),
+                        &mut None,
+                    )
+                    .await
+                    .unwrap();
+
+                assert_eq!(
+                    sample.operations,
+                    ExternalMaintenanceOperations {
+                        inline_flush,
+                        expire_snapshots,
+                        ..Default::default()
+                    },
+                    "{relation}"
+                );
+
+                lock.rollback().await.unwrap();
+            }
+
+            // The empty table sorts before the table with rows to flush.
+            let conn = open_lake_conn(&catalog, &data);
+            conn.execute_batch("create table lake.main.aaa_empty (id integer)").unwrap();
+            drop(conn);
+
+            let coordination_pool = build_ducklake_catalog_pg_pool(&catalog).unwrap();
+            let coordination = PostgresExternalMaintenanceStore::new(
+                "maintenance-progress",
+                coordination_pool.clone(),
+            );
+            coordination.ensure_schema().await.unwrap();
+            coordination
+                .ensure_pipeline_state(
+                    ExternalMaintenancePausePolicy::default(),
+                    ExternalMaintenanceOperationPolicy::default(),
+                )
+                .await
+                .unwrap();
+
+            // Keep the fault present until the watcher publishes its request.
+            // Both the full catalog scan and per-table storage sample need
+            // this relation; snapshot and inline-size reads do not.
+            let lock = client.transaction().await.unwrap();
+            lock.batch_execute(&format!(
+                "lock table {prefix}.ducklake_data_file in access exclusive mode;",
+            ))
+            .await
+            .unwrap();
+            assert!(
+                query_catalog_maintenance_metrics(&destination.metadata_pg_pool, &metadata_schema)
+                    .await
+                    .is_err()
+            );
+
+            let mut watcher = Box::pin(run_external_maintenance_watcher(
+                destination.clone(),
+                coordination.clone(),
+                ExternalMaintenanceWatcherConfig {
+                    poll_interval: Duration::from_millis(100),
+                    inline_flush_min_inlined_bytes: 1,
+                    ..Default::default()
+                },
+            ));
+            let operations = tokio::select! {
+                result = &mut watcher => panic!("Watcher exited: {result:?}"),
+
+                request = timeout(Duration::from_secs(30), async {
+                    let wait_for_operations = async |want_flush: bool| {
+                        loop {
+                            let state = coordination.load_state().await.unwrap();
+                            if let Some(request) = state.operation_request
+                                && (!want_flush || request.operations.inline_flush)
+                            {
+                                break request.operations;
+                            }
+
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                        }
+                    };
+
+                    let first = wait_for_operations(false).await;
+
+                    assert!(first.expire_snapshots);
+                    assert!(!first.inline_flush);
+
+                    sqlx::query(
+                        "update etl.external_maintenance_state set
+                         active_run = jsonb_build_object('runId', 'test-pause'),
+                         pause_request = jsonb_build_object('runId', 'test-pause',
+                             'requestedAt', now(), 'expiresAt', now() + interval '5 minutes')
+                         where pipeline_id = 'maintenance-progress'",
+                    )
+                    .execute(&coordination_pool)
+                    .await
+                    .unwrap();
+
+                    loop {
+                        let state = coordination.load_state().await.unwrap();
+                        if state.replicator.is_some_and(|status| {
+                            status.state_name() == "Quiesced"
+                                && status.observed_run_id.as_deref() == Some("test-pause")
+                        }) {
+                            break;
+                        }
+
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+
+                    sqlx::query(
+                        "update etl.external_maintenance_state set
+                         active_run = null, pause_request = null
+                         where pipeline_id = 'maintenance-progress'",
+                    )
+                    .execute(&coordination_pool)
+                    .await
+                    .unwrap();
+
+                    wait_for_operations(true).await
+                }) => request.unwrap(),
+            };
+            drop(watcher);
+
+            assert_eq!(
+                operations,
+                ExternalMaintenanceOperations {
+                    inline_flush: true,
+                    expire_snapshots: true,
+                    ..Default::default()
+                }
+            );
+
+            // Native maintenance must write this relation, so release the
+            // synthetic read blocker before executing the requested work.
+            lock.rollback().await.unwrap();
+            destination.shutdown().await.unwrap();
+            drop(destination);
+
+            let outcome = run_maintenance_once(DuckLakeMaintenanceConfig {
+                catalog_url: catalog.clone(),
+                catalog_pooler_url: None,
+                data_path: data.clone(),
+                s3: None,
+                metadata_schema: Some(metadata_schema.clone()),
+                table_namespace: None,
+                writer_config: DuckLakeWriterConfig::default(),
+                inline_flush: InlineFlushMaintenanceConfig {
+                    enabled: operations.inline_flush,
+                    min_inlined_bytes: 0,
+                },
+                merge_adjacent_files: MergeAdjacentFilesMaintenanceConfig {
+                    enabled: operations.merge_adjacent_files,
+                    max_compacted_files: 40,
+                    max_tables_per_run: 8,
+                    target_file_size: "256MiB".to_owned(),
+                },
+                rewrite_data_files: RewriteDataFilesMaintenanceConfig {
+                    enabled: operations.rewrite_data_files,
+                    min_active_data_files: 40,
+                    max_tables_per_run: 8,
+                },
+                expire_snapshots: ExpireSnapshotsMaintenanceConfig {
+                    enabled: operations.expire_snapshots,
+                    older_than: "7 days".to_owned(),
+                },
+                cleanup_old_files: CleanupOldFilesMaintenanceConfig {
+                    enabled: operations.cleanup_old_files,
+                },
+            })
+            .await
+            .unwrap();
+
+            assert_eq!(outcome.inline_flush_rows, 2);
+            assert!(outcome.expired_snapshots > 0);
+            let retained: i64 = client
+                .query_one(&format!("select count(*) from {prefix}.ducklake_snapshot"), &[])
+                .await
+                .unwrap()
+                .get(0);
+            assert!(retained >= 1);
+            let conn = open_lake_conn(&catalog, &data);
+            let rows: i64 = conn
+                .query_row("select count(*) from lake.main.maintenance_rows", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(rows, 2);
+
+            coordination_pool.close().await;
+        }
 
         /// Both runtime sampling and maintenance survive an unavailable
         /// metadata pooler.
@@ -6322,13 +6740,14 @@ mod tests {
             let tables = destination.list_active_ducklake_tables().await.unwrap();
             assert!(tables.contains(&table));
             // All later reads, including the sampler's cloned reader, must
-            // avoid another five-second wait on the unavailable endpoint.
+            // avoid another checkout timeout on the unavailable endpoint.
             timeout(Duration::from_secs(2), async {
                 destination
                     .sample_external_maintenance_operations(
                         0,
                         40,
                         ExternalMaintenanceOperationPolicy::default(),
+                        &mut None,
                     )
                     .await
                     .unwrap();

@@ -3,6 +3,7 @@
 mod compatibility;
 mod duckdb_error;
 mod metadata;
+mod metrics;
 mod namespace;
 mod rewrite;
 mod runner;

@@ -97,50 +97,42 @@ fn parse_json(str: &str) -> EtlResult<serde_json::Value> {
 pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<Cell> {
     match *typ {
         Type::BOOL => Ok(Cell::Bool(parse_bool(str)?)),
-        Type::BOOL_ARRAY => parse_cell_from_postgres_text_array(
-            str,
-            |str| Ok(Some(parse_bool(str)?)),
-            ArrayCell::Bool,
-        ),
+        Type::BOOL_ARRAY => parse_cell_from_postgres_text_array(str, parse_bool, ArrayCell::Bool),
         Type::INT2 => Ok(Cell::I16(str.parse()?)),
         Type::INT2_ARRAY => {
-            parse_cell_from_postgres_text_array(str, |str| Ok(Some(str.parse()?)), ArrayCell::I16)
+            parse_cell_from_postgres_text_array(str, |str| Ok(str.parse()?), ArrayCell::I16)
         }
         Type::INT4 => Ok(Cell::I32(str.parse()?)),
         Type::INT4_ARRAY => {
-            parse_cell_from_postgres_text_array(str, |str| Ok(Some(str.parse()?)), ArrayCell::I32)
+            parse_cell_from_postgres_text_array(str, |str| Ok(str.parse()?), ArrayCell::I32)
         }
         Type::INT8 => Ok(Cell::I64(str.parse()?)),
         Type::INT8_ARRAY => {
-            parse_cell_from_postgres_text_array(str, |str| Ok(Some(str.parse()?)), ArrayCell::I64)
+            parse_cell_from_postgres_text_array(str, |str| Ok(str.parse()?), ArrayCell::I64)
         }
         Type::FLOAT4 => Ok(Cell::F32(str.parse()?)),
         Type::FLOAT4_ARRAY => {
-            parse_cell_from_postgres_text_array(str, |str| Ok(Some(str.parse()?)), ArrayCell::F32)
+            parse_cell_from_postgres_text_array(str, |str| Ok(str.parse()?), ArrayCell::F32)
         }
         Type::FLOAT8 => Ok(Cell::F64(str.parse()?)),
         Type::FLOAT8_ARRAY => {
-            parse_cell_from_postgres_text_array(str, |str| Ok(Some(str.parse()?)), ArrayCell::F64)
+            parse_cell_from_postgres_text_array(str, |str| Ok(str.parse()?), ArrayCell::F64)
         }
         Type::NUMERIC => Ok(Cell::Numeric(str.parse()?)),
-        Type::NUMERIC_ARRAY => parse_cell_from_postgres_text_array(
-            str,
-            |str| Ok(Some(str.parse()?)),
-            ArrayCell::Numeric,
-        ),
+        Type::NUMERIC_ARRAY => {
+            parse_cell_from_postgres_text_array(str, |str| Ok(str.parse()?), ArrayCell::Numeric)
+        }
         Type::BYTEA => Ok(Cell::Bytes(hex::parse_bytea_hex_string(str)?)),
-        Type::BYTEA_ARRAY => parse_cell_from_postgres_text_array(
-            str,
-            |str| Ok(Some(hex::parse_bytea_hex_string(str)?)),
-            ArrayCell::Bytes,
-        ),
+        Type::BYTEA_ARRAY => {
+            parse_cell_from_postgres_text_array(str, hex::parse_bytea_hex_string, ArrayCell::Bytes)
+        }
         Type::DATE => {
             let val = parse_postgres_date(str)?;
             Ok(Cell::Date(val))
         }
         Type::DATE_ARRAY => parse_cell_from_postgres_text_array(
             str,
-            |str| Ok(Some(parse_postgres_date(str)?)),
+            |str| Ok(parse_postgres_date(str)?),
             ArrayCell::Date,
         ),
         Type::TIME => {
@@ -149,7 +141,7 @@ pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<
         }
         Type::TIME_ARRAY => parse_cell_from_postgres_text_array(
             str,
-            |str| Ok(Some(parse_postgres_time(str)?)),
+            |str| Ok(parse_postgres_time(str)?),
             ArrayCell::Time,
         ),
         Type::TIMETZ => {
@@ -158,7 +150,7 @@ pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<
         }
         Type::TIMETZ_ARRAY => parse_cell_from_postgres_text_array(
             str,
-            |str| Ok(Some(parse_postgres_timetz(str)?)),
+            |str| Ok(parse_postgres_timetz(str)?),
             ArrayCell::TimeTz,
         ),
         Type::TIMESTAMP => {
@@ -167,7 +159,7 @@ pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<
         }
         Type::TIMESTAMP_ARRAY => parse_cell_from_postgres_text_array(
             str,
-            |str| Ok(Some(parse_postgres_timestamp(str)?)),
+            |str| Ok(parse_postgres_timestamp(str)?),
             ArrayCell::Timestamp,
         ),
         Type::TIMESTAMPTZ => {
@@ -176,7 +168,7 @@ pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<
         }
         Type::TIMESTAMPTZ_ARRAY => parse_cell_from_postgres_text_array(
             str,
-            |str| Ok(Some(parse_postgres_timestamptz(str)?)),
+            |str| Ok(parse_postgres_timestamptz(str)?),
             ArrayCell::TimestampTz,
         ),
         Type::UUID => {
@@ -185,38 +177,34 @@ pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<
         }
         Type::UUID_ARRAY => parse_cell_from_postgres_text_array(
             str,
-            |str| Ok(Some(Uuid::parse_str(str)?)),
+            |str| Ok(Uuid::parse_str(str)?),
             ArrayCell::Uuid,
         ),
         Type::JSON | Type::JSONB => Ok(Cell::Json(parse_json(str)?)),
-        Type::JSON_ARRAY | Type::JSONB_ARRAY => parse_cell_from_postgres_text_array(
-            str,
-            |str| Ok(Some(parse_json(str)?)),
-            ArrayCell::Json,
-        ),
+        Type::JSON_ARRAY | Type::JSONB_ARRAY => {
+            parse_cell_from_postgres_text_array(str, parse_json, ArrayCell::Json)
+        }
         Type::OID => {
             let val: u32 = str.parse()?;
             Ok(Cell::U32(val))
         }
         Type::OID_ARRAY => {
-            parse_cell_from_postgres_text_array(str, |str| Ok(Some(str.parse()?)), ArrayCell::U32)
+            parse_cell_from_postgres_text_array(str, |str| Ok(str.parse()?), ArrayCell::U32)
         }
         // `box` is the only built-in type whose array elements are separated by
         // `;` instead of `,`, because its text output itself contains commas.
         Type::BOX_ARRAY => parse_cell_from_postgres_text_array_with_delimiter(
             str,
             b';',
-            |str| Ok(Some(str.to_owned())),
+            |str| Ok(str.to_owned()),
             ArrayCell::String,
         ),
         // [`Cell`] is only the internal Rust value representation. The source Postgres type is
         // still available from the corresponding [`ColumnSchema`], so values that do not need a
         // specialized Rust type preserve their Postgres text output here.
-        _ if is_array_type(typ) => parse_cell_from_postgres_text_array(
-            str,
-            |str| Ok(Some(str.to_owned())),
-            ArrayCell::String,
-        ),
+        _ if is_array_type(typ) => {
+            parse_cell_from_postgres_text_array(str, |str| Ok(str.to_owned()), ArrayCell::String)
+        }
         _ => Ok(Cell::String(str.to_owned())),
     }
 }
@@ -287,7 +275,7 @@ fn strip_array_dimensions_prefix(input: &str) -> EtlResult<&str> {
 /// This function handles Postgres's array format with curly braces, comma
 /// separation, and proper quoting. It supports null values (unquoted "null"),
 /// escaped characters within quoted strings, an explicit dimensions prefix
-/// (e.g. `[0:1]={7,8}`), and delegates element parsing to the provided closure.
+/// (e.g. `[0:1]={7,8}`), and passes non-null elements to the provided parser.
 ///
 /// The parser correctly handles quote escaping, comma separation within quotes,
 /// and distinguishes between null values and the string "null".
@@ -295,7 +283,7 @@ fn strip_array_dimensions_prefix(input: &str) -> EtlResult<&str> {
 /// one-dimensional.
 fn parse_cell_from_postgres_text_array<P, M, T>(str: &str, parse: P, m: M) -> EtlResult<Cell>
 where
-    P: FnMut(&str) -> EtlResult<Option<T>>,
+    P: FnMut(&str) -> EtlResult<T>,
     M: FnOnce(Vec<Option<T>>) -> ArrayCell,
 {
     parse_cell_from_postgres_text_array_with_delimiter(str, b',', parse, m)
@@ -316,7 +304,7 @@ fn parse_cell_from_postgres_text_array_with_delimiter<P, M, T>(
     m: M,
 ) -> EtlResult<Cell>
 where
-    P: FnMut(&str) -> EtlResult<Option<T>>,
+    P: FnMut(&str) -> EtlResult<T>,
     M: FnOnce(Vec<Option<T>>) -> ArrayCell,
 {
     let str = strip_array_dimensions_prefix(str)?;
@@ -414,8 +402,11 @@ where
 
         // PostgreSQL treats unquoted `NULL` as a null array element, while
         // quoted `"NULL"` is just the literal string. Keep that distinction.
-        let val =
-            if !quoted && element.eq_ignore_ascii_case("null") { None } else { parse(element)? };
+        let val = if !quoted && element.eq_ignore_ascii_case("null") {
+            None
+        } else {
+            Some(parse(element)?)
+        };
         res.push(val);
 
         if element_end == bytes.len() {
