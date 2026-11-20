@@ -4729,19 +4729,18 @@ where
         let sql = namespaced_tables_query(self.metadata_schema.as_ref());
         let rows: Vec<(Option<String>, String, String)> = self
             .metadata_pg_pool
-            .read("list_tables", |pool| {
-                let sql = &sql;
-                async move {
-                    let mut transaction = pool.begin().await?;
-                    let result = sqlx::query_as(AssertSqlSafe(sql.as_str()))
-                        .persistent(false)
-                        .bind(self.table_namespace.as_deref())
-                        .fetch_all(&mut *transaction)
-                        .await?;
-                    transaction.commit().await?;
-                    Ok::<_, sqlx::Error>(result)
-                }
-            })
+            .read(
+                "list_tables",
+                (sql, self.table_namespace.as_deref()),
+                |connection, (sql, table_namespace)| {
+                    Box::pin(
+                        sqlx::query_as(AssertSqlSafe(sql.as_str()))
+                            .persistent(false)
+                            .bind(*table_namespace)
+                            .fetch_all(connection),
+                    )
+                },
+            )
             .await
             .map_err(|source| {
                 classified_error_with_detail(
@@ -6273,9 +6272,93 @@ mod tests {
 
     mod postgres_backed {
         use etl_telemetry::metrics::init_metrics_handle;
+        use sqlx::error::DatabaseError;
         use tokio::{net::TcpListener, time::timeout};
 
         use super::*;
+
+        /// Timed-out metadata queries stop on PostgreSQL, and successful reads
+        /// leave the shared foreground session's timeout unchanged.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn metadata_timeout_stops_server_queries_and_preserves_session_settings() {
+            /// Identifies the backend and its statement timeout in
+            /// milliseconds.
+            const SESSION_SETTINGS_QUERY: &str = "select pg_backend_pid(), setting::bigint
+                from pg_settings where name = 'statement_timeout'";
+
+            let (database, catalog) = create_catalog_database().await;
+            let observer = database.client.as_ref().unwrap();
+            let direct = build_ducklake_catalog_pg_pool(&catalog).unwrap();
+            let reader = DuckLakeMetadataPool::new(direct.clone(), None).unwrap();
+
+            let before: (i32, i64) =
+                sqlx::query_as(SESSION_SETTINGS_QUERY).fetch_one(&direct).await.unwrap();
+
+            let during: (i32, i64) = reader
+                .read("session_settings", (), |connection, _| {
+                    Box::pin(
+                        sqlx::query_as(SESSION_SETTINGS_QUERY)
+                            .persistent(false)
+                            .fetch_one(connection),
+                    )
+                })
+                .await
+                .unwrap();
+
+            let after: (i32, i64) =
+                sqlx::query_as(SESSION_SETTINGS_QUERY).fetch_one(&direct).await.unwrap();
+
+            assert_eq!(during.0, before.0);
+            assert!(during.1 > 0);
+            assert_eq!(after, before);
+
+            // Follow the configured budget so tuning it does not require
+            // duplicating its value in this regression.
+            let query_delay = Duration::from_millis(u64::try_from(during.1).unwrap()) * 2;
+            let read_limit = DUCKLAKE_CATALOG_ACQUIRE_TIMEOUT + query_delay;
+
+            for _ in 0..2 {
+                let error = timeout(
+                    read_limit,
+                    reader.read("slow_metadata", query_delay, |connection, delay| {
+                        Box::pin(
+                            sqlx::query("select pg_sleep($1)")
+                                .persistent(false)
+                                .bind(delay.as_secs_f64())
+                                .execute(connection),
+                        )
+                    }),
+                )
+                .await
+                .unwrap()
+                .unwrap_err();
+
+                assert_eq!(
+                    error.as_database_error().and_then(DatabaseError::code).as_deref(),
+                    Some("57014")
+                );
+                assert_eq!(direct.size(), 0);
+
+                let active: i64 = observer
+                    .query_one(
+                        "select count(*) from pg_stat_activity
+                         where datname = current_database() and pid <> pg_backend_pid()
+                           and state = 'active'",
+                        &[],
+                    )
+                    .await
+                    .unwrap()
+                    .get(0);
+
+                assert_eq!(active, 0);
+                assert_eq!(
+                    sqlx::query_scalar::<_, i32>("select 1").fetch_one(&direct).await.unwrap(),
+                    1
+                );
+            }
+
+            direct.close().await;
+        }
 
         /// Both runtime sampling and maintenance survive an unavailable
         /// metadata pooler.
@@ -6322,7 +6405,7 @@ mod tests {
             let tables = destination.list_active_ducklake_tables().await.unwrap();
             assert!(tables.contains(&table));
             // All later reads, including the sampler's cloned reader, must
-            // avoid another five-second wait on the unavailable endpoint.
+            // avoid another checkout timeout on the unavailable endpoint.
             timeout(Duration::from_secs(2), async {
                 destination
                     .sample_external_maintenance_operations(
