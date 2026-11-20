@@ -194,9 +194,6 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
             run_id,
             inline_flush: outcome.inline_flush_summaries.clone(),
             results: MaintenanceResults {
-                replay_helper_rows_deleted: outcome.replay_helper_rows_deleted,
-                replay_helper_files_created: outcome.replay_helper_files_created,
-                replay_helper_tables_rewritten: u64::from(outcome.replay_helper_tables_rewritten),
                 merge_adjacent_files_created: outcome.merge_adjacent_files_created,
                 rewrite_data_files_created: outcome.rewrite_data_files_created,
                 expired_snapshots: outcome.expired_snapshots,

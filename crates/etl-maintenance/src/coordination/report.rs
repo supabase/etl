@@ -28,19 +28,13 @@ pub struct InlineFlushSummaries {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MaintenanceResults {
-    /// replay helper rows deleted returned by this successful attempt.
-    pub replay_helper_rows_deleted: u64,
-    /// replay helper files created returned by this successful attempt.
-    pub replay_helper_files_created: u64,
-    /// replay helper tables rewritten returned by this successful attempt.
-    pub replay_helper_tables_rewritten: u64,
-    /// merge adjacent files created returned by this successful attempt.
+    /// Files created by merge-adjacent-files in this successful attempt.
     pub merge_adjacent_files_created: u64,
-    /// rewrite data files created returned by this successful attempt.
+    /// Files created by rewrite-data-files in this successful attempt.
     pub rewrite_data_files_created: u64,
-    /// expired snapshots returned by this successful attempt.
+    /// Snapshots expired in this successful attempt.
     pub expired_snapshots: u64,
-    /// cleaned up files returned by this successful attempt.
+    /// Files removed in this successful attempt.
     pub cleaned_up_files: u64,
 }
 
