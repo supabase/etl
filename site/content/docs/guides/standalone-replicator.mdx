@@ -4,35 +4,21 @@ description: Build, configure, and run Supabase ETL as a standalone process.
 icon: Terminal
 ---
 
-The standalone replicator is the ready-made `etl-replicator` application for
-running Supabase ETL without embedding the library in another Rust program.
+`etl-replicator` runs one pipeline with a Postgres-backed state store and a
+built-in destination. It loads settings from files and environment variables.
 
 <Callout className="etl-callout" type="info" title="Active development">
-  Supabase ETL is under active development. APIs and setup steps may change
-  before the first stable release.
+  Supabase ETL is under active development. We are holding the first versioned
+  release while breaking changes to APIs and setup are still frequent.
 </Callout>
 
-## What the replicator is
-
-The replicator packages one ETL pipeline, a Postgres-backed state store, and
-one configured built-in destination into a long-lived process. It loads the
-source, destination, batching, retry, and operational settings from files and
-environment variables, starts replication, and handles graceful shutdown. It
-does not require Kubernetes or the managed Supabase product.
-
-Use the standalone replicator when a built-in destination and the standard
-Postgres-backed store fit your deployment. Embed the `etl` crate instead when
-you need a custom destination, a custom store, or application-specific runtime
-orchestration. See [First Pipeline](/guides/first-pipeline/) for the library
-path.
+For a custom store or destination, start with [First Pipeline](/guides/first-pipeline/).
 
 ## Fastest local start
 
-ClickHouse is the default destination. `cargo x init` starts Postgres and
-ClickHouse; no cloud account is required. First clone the repository and
-complete the toolchain prerequisites in
-[DEVELOPMENT.md](https://github.com/supabase/etl/blob/main/DEVELOPMENT.md).
-Run the following commands from the repository root.
+This setup runs PostgreSQL 19 and ClickHouse locally. Install the tools listed
+in the [development guide](https://github.com/supabase/etl/blob/main/DEVELOPMENT.md),
+then run:
 
 ```bash title="Terminal"
 git clone https://github.com/supabase/etl.git
@@ -63,13 +49,13 @@ use the same binary with a different `--features` flag; see
 ## Prerequisites
 
 - Rust 1.95.0, as pinned by `rust-toolchain.toml`.
-- PostgreSQL 14 through 18 configured for logical replication, including a
+- PostgreSQL 14 through 19 configured for logical replication, including a
   replication user and publication. Complete
   [Configure Postgres](/guides/configure-postgres/) first, or use the local
   Postgres from `cargo x init`.
 - ClickHouse 23.5 or newer. Local Docker from `cargo x init` is enough.
 
-PostgreSQL 15 or newer is recommended for column and row publication filters,
+PostgreSQL 15 or newer is required for column and row publication filters,
 and PostgreSQL 16 or newer is required when replication connects to a physical
 read replica.
 

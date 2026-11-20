@@ -4,13 +4,10 @@ description: A high-performance Postgres replication engine written in Rust. Emb
 icon: House
 ---
 
-**Supabase ETL** is a high-performance Postgres replication engine written in
-Rust. Embed it in your Rust application or run it as a standalone binary. For
-each published table, it performs an initial sync of existing rows, then
-replicates changes to a built-in or custom destination.
+**Supabase ETL** replicates Postgres tables to built-in and custom destinations.
+Embed it in a Rust application or run the standalone replicator.
 
-For the managed product in the Supabase Dashboard—including availability,
-pricing, and operations—use the
+For the managed service in the Supabase Dashboard, see the
 [Supabase Pipelines documentation](https://supabase.com/docs/guides/database/replication/pipelines).
 
 ## Start Here
@@ -75,11 +72,8 @@ Supabase ETL replicates each table in two phases:
 2. **Ongoing replication:** Capture subsequent inserts, updates, deletes, and
    truncates, then deliver those changes as ordered [events](/explanation/events/).
 
-Across both phases, a [store](/explanation/traits/) persists checkpoints,
-schemas, destination metadata, and table state so replication can recover
-safely after a restart. Copy and change data capture (CDC) are replication
-paths, not customer-visible phases. Initial sync uses the copy path followed by
-CDC catch-up; ongoing replication uses the CDC path after the table is ready.
+A [store](/explanation/traits/) persists checkpoints, schemas, destination
+metadata, and table state for recovery after a restart.
 
 Continue with the [First Pipeline tutorial](/guides/first-pipeline/), or read the
 [architecture overview](/explanation/architecture/) before integrating ETL.

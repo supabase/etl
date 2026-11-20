@@ -11,7 +11,7 @@ use etl::{
     etl_error,
     event::{Event, EventType},
     pipeline::{Pipeline, PipelineId},
-    schema::{ColumnSchema, ReplicatedTableSchema, TableId},
+    schema::{ColumnSchema, ReplicatedTableSchema, TableId, TableName},
     store::{SchemaStore, StateStore, TableRetryPolicy, TableState, TableStateType, WorkerType},
     test_utils::{
         database::{
@@ -45,7 +45,7 @@ use etl_postgres::{
     below_version,
     slots::EtlReplicationSlot,
     tokio::test_utils::{PgDatabase, ReplicationSlotState, id_column_schema},
-    version::POSTGRES_15,
+    version::{POSTGRES_15, POSTGRES_19},
 };
 use etl_telemetry::tracing::init_test_tracing;
 use futures::FutureExt;
@@ -1682,6 +1682,84 @@ async fn publication_row_filter_changes_apply_without_restart() {
     assert_eq!(update.updated_table_row, UpdatedTableRow::Full(row(1, 11)));
     assert_eq!(exit.old_table_row, Some(OldTableRow::Full(row(2, 20))));
     assert_eq!(entry.table_row, row(3, 20));
+}
+
+/// Verifies copy and CDC for a database-wide publication with an exclusion.
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_respects_publication_table_exclusions() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    if below_version!(database.server_version(), POSTGRES_19) {
+        eprintln!("Skipping test: PostgreSQL 19+ required for publication exclusions");
+        return;
+    }
+
+    let published = test_table_name("published");
+    let published_id =
+        database.create_table(published.clone(), true, &[("value", "int4")]).await.unwrap();
+    let published_in_public = TableName::new("public".to_owned(), "published".to_owned());
+    let published_in_public_id = database
+        .create_table(published_in_public.clone(), true, &[("value", "int4")])
+        .await
+        .unwrap();
+    let excluded = test_table_name("excluded");
+    let excluded_id =
+        database.create_table(excluded.clone(), true, &[("value", "int4")]).await.unwrap();
+    let publication_name = "test_pub_exclusions";
+    database
+        .run_sql(&format!(
+            "create publication {publication_name} for all tables except (table {})",
+            excluded.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    database.insert_values(published.clone(), &["value"], &[&1]).await.unwrap();
+    database.insert_values(published_in_public.clone(), &["value"], &[&2]).await.unwrap();
+    database.insert_values(excluded.clone(), &["value"], &[&2]).await.unwrap();
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+    let pipeline_id = random_pipeline_id();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id.as_str(),
+        publication_name.to_owned(),
+        store.clone(),
+        destination.clone(),
+    );
+    let sync_complete = store.notify_on_table_sync_complete(published_id).await;
+    let public_sync_complete = store.notify_on_table_sync_complete(published_in_public_id).await;
+
+    pipeline.start().await.unwrap();
+
+    sync_complete.notified().await;
+    public_sync_complete.notified().await;
+
+    let insert = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Insert, published_id, 1),
+            EventCondition::TableCount(EventType::Insert, published_in_public_id, 1),
+        ])
+        .await;
+
+    database.insert_values(excluded, &["value"], &[&3]).await.unwrap();
+    database.insert_values(published, &["value"], &[&4]).await.unwrap();
+    database.insert_values(published_in_public, &["value"], &[&5]).await.unwrap();
+
+    insert.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let copied_rows = destination.get_table_rows().await;
+    assert_eq!(copied_rows.get(&published_id).unwrap().len(), 1);
+    assert_eq!(copied_rows.get(&published_in_public_id).unwrap().len(), 1);
+    assert!(!copied_rows.contains_key(&excluded_id));
+
+    let events = destination.get_events().await;
+    let grouped = group_events_by_type_and_table_id(&events);
+    assert_eq!(grouped.get(&(EventType::Insert, published_id)).unwrap().len(), 1);
+    assert_eq!(grouped.get(&(EventType::Insert, published_in_public_id)).unwrap().len(), 1);
+    assert!(!grouped.contains_key(&(EventType::Insert, excluded_id)));
 }
 
 #[tokio::test(flavor = "multi_thread")]
