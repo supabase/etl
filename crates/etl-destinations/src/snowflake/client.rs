@@ -85,6 +85,18 @@ pub(super) struct DetachedTableForCopy<C> {
     preserve_view: bool,
 }
 
+/// One table's open channel, looked up once and reused for a run of events.
+///
+/// The table ID travels with the handle so replay checks cannot pair a channel
+/// with another table's pending durability state. A cached channel is replaced
+/// only by a copy reset, which first drains the event tasks that hold this.
+pub(super) struct TableChannel<C> {
+    /// Table that owns the channel.
+    table_id: TableId,
+    /// Shared channel state, locked per operation.
+    channel: Arc<Mutex<ChannelHandle<C>>>,
+}
+
 /// Maximum accepted Snowflake row batches before forcing a durability wait.
 const STREAMING_PENDING_MAX_ROW_BATCHES: usize = 64;
 
@@ -911,6 +923,11 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         Ok(self.get_channel(table_id).await?.lock().await.is_offset_committed(offset))
     }
 
+    /// Looks up a table's open channel for reuse across consecutive events.
+    pub(super) async fn table_channel(&self, table_id: TableId) -> Result<TableChannel<C>> {
+        Ok(TableChannel { table_id, channel: self.get_channel(table_id).await? })
+    }
+
     /// Reconciles overlapping CDC replay before checking whether to encode it.
     ///
     /// The channel lock serializes recovery with append and target recording.
@@ -918,16 +935,16 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
     /// shared pending-state lock. Only this channel's proven target is retired.
     pub(super) async fn reconcile_replay_offset(
         &self,
-        table_id: TableId,
+        channel: &TableChannel<C>,
         offset: &OffsetToken,
     ) -> etl::error::EtlResult<bool> {
-        let channel = self.get_channel(table_id).await?;
+        let TableChannel { table_id, channel } = channel;
         let mut channel = channel.lock().await;
         if channel.needs_replay_recovery(offset) {
-            let target = self.pending_durability.lock().await.targets.get(&table_id).cloned();
+            let target = self.pending_durability.lock().await.targets.get(table_id).cloned();
             channel.recover_streaming_replay(target.as_ref()).await?;
             let mut pending = self.pending_durability.lock().await;
-            pending.discard(table_id)?;
+            pending.discard(*table_id)?;
             pending.observe_metrics();
         }
         Ok(channel.is_offset_committed(offset))
@@ -1019,6 +1036,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
 mod tests {
     use std::{
         future::{Future, pending},
+        num::NonZeroU64,
         pin::Pin,
         sync::atomic::{AtomicBool, AtomicUsize, Ordering},
         task::{Context, Poll, Waker},
@@ -1484,7 +1502,10 @@ mod tests {
         assert_eq!(client.pending_durability.lock().await.row_batches, 2);
         assert!(
             client
-                .reconcile_replay_offset(schemas[0].id(), &OffsetToken::new(10.into(), 1))
+                .reconcile_replay_offset(
+                    &client.table_channel(schemas[0].id()).await.unwrap(),
+                    &OffsetToken::new(10.into(), 1)
+                )
                 .await
                 .unwrap()
         );
@@ -1789,7 +1810,11 @@ mod tests {
             store.clone(),
             destination.clone(),
         )
-        .with_batch_config(BatchConfig { max_bytes: 1, max_fill_ms: 100, memory_budget_ratio: 0.2 })
+        .with_batch_config(BatchConfig {
+            max_bytes: NonZeroU64::MIN,
+            max_fill_ms: 100,
+            memory_budget_ratio: 0.2,
+        })
         .with_settle_durable_interval_ms(Some(if source_failure { 600_000 } else { 1 }))
         .with_drain_on_shutdown(shutdown_drain.unwrap_or(true))
         .with_shutdown_drain_timeout_ms(if shutdown_drain.is_some() { 100 } else { 5_000 })

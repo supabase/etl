@@ -46,19 +46,21 @@ enum CatchupWaitReason {
 
 /// Wait for a table-sync worker in catchup to hand its table back.
 ///
-/// It holds no state lock, so the table-sync worker can reach `SyncDone`.
-struct CatchupWait {
+/// Waiting consumes the state guard, releasing the lock so the table-sync
+/// worker can reach `SyncDone`.
+struct CatchupWait<'a> {
     /// Table the worker synchronizes.
     table_id: TableId,
-    /// Shared state of the running worker.
-    worker_state: TableSyncWorkerState,
+    /// State guard of the running worker, consumed to release the lock while
+    /// waiting.
+    guard: TableSyncWorkerStateGuard<'a>,
     /// LSN the worker streams up to before `SyncDone`.
     catchup_lsn: PgLsn,
     /// How the worker came to be in catchup.
     reason: CatchupWaitReason,
 }
 
-impl CatchupWait {
+impl CatchupWait<'_> {
     /// Waits until the table-sync worker reaches `SyncDone` or `Errored`.
     ///
     /// The table-sync worker owns the table through `SyncDone`; reaching it
@@ -71,7 +73,7 @@ impl CatchupWait {
         shutdown_token: &CancellationToken,
         activity_handle: &ActivityHandle,
     ) -> Option<ExitIntent> {
-        let Self { table_id, worker_state, catchup_lsn, reason } = self;
+        let Self { table_id, guard, catchup_lsn, reason } = self;
         let catchup_state = match reason {
             CatchupWaitReason::EnteredCatchup => "entered",
             CatchupWaitReason::AlreadyInCatchup => "already_in",
@@ -88,7 +90,7 @@ impl CatchupWait {
         // We wait for both states since if the table sync worker errors, we
         // don't want to stall forever.
         let _activity_suspension = activity_handle.suspend();
-        let result = worker_state
+        let result = guard
             .wait_for_state_type(
                 &[TableStateType::SyncDone, TableStateType::Errored],
                 shutdown_token.clone(),
@@ -136,21 +138,19 @@ impl CatchupWait {
 ///
 /// Holding the lock makes the observed state and any transition one atomic
 /// step.
-pub(super) struct ActiveTable {
+pub(super) struct ActiveTable<'a> {
     /// Table the worker synchronizes.
     table_id: TableId,
-    /// Shared state of the running worker.
-    worker_state: TableSyncWorkerState,
-    /// Lock on `worker_state`, held from observation through transition.
-    guard: TableSyncWorkerStateGuard,
+    /// Lock on the worker's state, held from observation through transition.
+    guard: TableSyncWorkerStateGuard<'a>,
 }
 
-impl ActiveTable {
+impl<'a> ActiveTable<'a> {
     /// Locks the state of a running worker.
-    pub(super) async fn lock(table_id: TableId, worker_state: TableSyncWorkerState) -> Self {
-        let guard = worker_state.lock_owned().await;
+    pub(super) async fn lock(table_id: TableId, worker_state: &'a TableSyncWorkerState) -> Self {
+        let guard = worker_state.lock().await;
 
-        Self { table_id, worker_state, guard }
+        Self { table_id, guard }
     }
 
     /// Returns the worker's current table state.
@@ -209,12 +209,11 @@ impl ActiveTable {
         self.guard.set_and_store(TableState::Ready, store).await
     }
 
-    /// Releases the lock and returns the catchup wait.
-    fn into_catchup_wait(self, catchup_lsn: PgLsn, reason: CatchupWaitReason) -> CatchupWait {
-        let Self { table_id, worker_state, guard } = self;
-        drop(guard);
+    /// Converts this active table into a catchup wait that consumes the lock.
+    fn into_catchup_wait(self, catchup_lsn: PgLsn, reason: CatchupWaitReason) -> CatchupWait<'a> {
+        let Self { table_id, guard } = self;
 
-        CatchupWait { table_id, worker_state, catchup_lsn, reason }
+        CatchupWait { table_id, guard, catchup_lsn, reason }
     }
 }
 
@@ -275,7 +274,7 @@ mod tests {
                 table_id,
                 TableState::SyncWait { lsn: PgLsn::from(10) },
             );
-            let table = ActiveTable::lock(table_id, worker_state.clone()).await;
+            let table = ActiveTable::lock(table_id, &worker_state).await;
             let mut handoff = pin!(table.execute(
                 ActiveAction::StartCatchup {
                     snapshot_lsn: PgLsn::from(10),
@@ -311,7 +310,7 @@ mod tests {
         let catchup_lsn = PgLsn::from(20);
         let worker_state =
             TableSyncWorkerState::new_for_test(table_id, TableState::Catchup { lsn: catchup_lsn });
-        let table = ActiveTable::lock(table_id, worker_state).await;
+        let table = ActiveTable::lock(table_id, &worker_state).await;
         let mut handoff = pin!(table.execute(
             ActiveAction::AwaitCatchup { catchup_lsn },
             &store,
@@ -340,7 +339,7 @@ mod tests {
         let proof = ReadinessInputs::new(sync_done_lsn, Some(sync_done_lsn), true)
             .ready_proof(sync_done_lsn)
             .unwrap();
-        let table = ActiveTable::lock(table_id, worker_state.clone()).await;
+        let table = ActiveTable::lock(table_id, &worker_state).await;
 
         let exit_intent = table
             .execute(

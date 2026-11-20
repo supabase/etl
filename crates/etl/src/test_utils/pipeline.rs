@@ -1,4 +1,7 @@
-use std::time::Duration;
+use std::{
+    num::{NonZeroU16, NonZeroU64},
+    time::Duration,
+};
 
 use etl_config::shared::{
     BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
@@ -82,50 +85,16 @@ pub fn random_pipeline_id() -> String {
 ///     .with_batch_config(BatchConfig {
 ///         max_fill_ms: 5000,
 ///         memory_budget_ratio: 0.2,
-///         max_bytes: 32 * 1024 * 1024,
+///         max_bytes: BatchConfig::DEFAULT_MAX_BYTES,
 ///     })
 ///     .with_retry_config(2000, 10)
 ///     .build();
 /// ```
 pub struct PipelineBuilder<S, D> {
-    pg_connection_config: PgConnectionConfig,
-    pipeline_id: PipelineId,
-    publication_name: String,
+    /// Complete pipeline configuration with test-specific defaults.
+    config: PipelineConfig,
     store: S,
     destination: D,
-    /// Batch configuration.
-    batch: BatchConfig,
-    /// Delay in milliseconds before retrying a failed table operation. Default:
-    /// 1000ms.
-    table_error_retry_delay_ms: u64,
-    /// Maximum number of retry attempts for table operations. Default: 2.
-    table_error_retry_max_attempts: u32,
-    /// Maximum number of concurrent table sync workers. Default: 1.
-    max_table_sync_workers: u16,
-    /// Table sync copy configuration. Uses default if not specified.
-    table_sync_copy: TableSyncCopyConfig,
-    /// Behavior when the main replication slot is found to be invalidated.
-    invalidated_slot_behavior: InvalidatedSlotBehavior,
-    /// Maximum worker connections per table during initial copy.
-    max_copy_connections_per_table: u16,
-    /// Milliseconds between memory samples. Defaults to 100 milliseconds.
-    memory_refresh_interval_ms: u64,
-    /// Milliseconds between copy-slot checks. Defaults to 10,000 milliseconds.
-    table_sync_monitor_refresh_interval_ms: u64,
-    /// Milliseconds between lag samples. Defaults to 10,000 milliseconds.
-    replication_lag_refresh_interval_ms: u64,
-    /// Minimum age of an accepted write before an idle keepalive may force
-    /// durability. Defaults to `None`, allowing any eligible keepalive.
-    settle_durable_interval_ms: Option<u64>,
-    /// Memory-based backpressure configuration. Default: enabled with defaults.
-    memory_backpressure: MemoryBackpressureConfig,
-    /// Logical replication slot configuration.
-    replication_slot: ReplicationSlotConfig,
-    /// Whether shutdown drains buffered apply work. Default:
-    /// [`PipelineConfig::DEFAULT_DRAIN_ON_SHUTDOWN`].
-    drain_on_shutdown: bool,
-    /// Maximum graceful drain duration in milliseconds.
-    shutdown_drain_timeout_ms: u64,
 }
 
 impl<S, D> PipelineBuilder<S, D>
@@ -159,56 +128,60 @@ where
         store: S,
         destination: D,
     ) -> Self {
-        Self {
-            pg_connection_config,
-            pipeline_id: pipeline_id.into(),
+        let pipeline_id: PipelineId = pipeline_id.into();
+
+        let config = PipelineConfig {
+            id: pipeline_id.into(),
             publication_name,
-            store,
-            destination,
+            pg_connection: pg_connection_config,
+            store_pg_connection: None,
             batch: BatchConfig {
                 max_fill_ms: 1000,
                 memory_budget_ratio: 0.2,
                 max_bytes: BatchConfig::DEFAULT_MAX_BYTES,
             },
             table_error_retry_delay_ms: 1000,
-            table_error_retry_max_attempts: 2,
-            max_table_sync_workers: 1,
+            table_error_retry_max_attempts: NonZeroU16::new(2).unwrap(),
+            max_table_sync_workers: NonZeroU16::MIN,
             table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
             invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
             max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
-            memory_refresh_interval_ms: 100,
+            memory_refresh_interval_ms: PipelineConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS,
             table_sync_monitor_refresh_interval_ms:
                 PipelineConfig::DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS,
             replication_lag_refresh_interval_ms:
                 PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS,
             settle_durable_interval_ms: None,
-            memory_backpressure: MemoryBackpressureConfig {
+            memory_backpressure: Some(MemoryBackpressureConfig {
                 activate_threshold: 0.95,
                 resume_threshold: 0.85,
-            },
+            }),
             replication_slot: ReplicationSlotConfig::default(),
+            run_source_migrations: true,
             drain_on_shutdown: PipelineConfig::DEFAULT_DRAIN_ON_SHUTDOWN,
             shutdown_drain_timeout_ms: PipelineConfig::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS,
-        }
+        };
+
+        Self { config, store, destination }
     }
 
     /// Sets whether shutdown drains buffered apply work before the apply loop
     /// exits, or abandons it for replay on the next start.
     pub fn with_drain_on_shutdown(mut self, drain_on_shutdown: bool) -> Self {
-        self.drain_on_shutdown = drain_on_shutdown;
+        self.config.drain_on_shutdown = drain_on_shutdown;
         self
     }
 
     /// Sets the maximum time workers may drain after shutdown.
     pub fn with_shutdown_drain_timeout_ms(mut self, timeout_ms: u64) -> Self {
-        self.shutdown_drain_timeout_ms = timeout_ms;
+        self.config.shutdown_drain_timeout_ms = timeout_ms;
         self
     }
 
     /// Sets whether PostgreSQL failover support is enabled for replication
     /// slots.
     pub fn with_replication_slot_failover(mut self, enabled: bool) -> Self {
-        self.replication_slot.failover = enabled;
+        self.config.replication_slot.failover = enabled;
         self
     }
 
@@ -217,58 +190,78 @@ where
         mut self,
         persistence: ReplicationSlotPersistence,
     ) -> Self {
-        self.replication_slot.persistence = persistence;
+        self.config.replication_slot.persistence = persistence;
         self
     }
 
     /// Sets custom batch configuration.
     pub fn with_batch_config(mut self, batch: BatchConfig) -> Self {
-        self.batch = batch;
+        self.config.batch = batch;
         self
     }
 
     /// Sets custom table sync copy configuration.
     pub fn with_table_sync_copy_config(mut self, table_sync_copy: TableSyncCopyConfig) -> Self {
-        self.table_sync_copy = table_sync_copy;
+        self.config.table_sync_copy = table_sync_copy;
         self
     }
 
     /// Sets custom retry configuration for table operations.
-    pub fn with_retry_config(mut self, delay_ms: u64, max_attempts: u32) -> Self {
-        self.table_error_retry_delay_ms = delay_ms;
-        self.table_error_retry_max_attempts = max_attempts;
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max_attempts` is zero.
+    pub fn with_retry_config(mut self, delay_ms: u64, max_attempts: u16) -> Self {
+        self.config.table_error_retry_delay_ms = delay_ms;
+        self.config.table_error_retry_max_attempts = NonZeroU16::new(max_attempts).unwrap();
         self
     }
 
     /// Sets the maximum number of concurrent table sync workers.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `workers` is zero.
     pub fn with_max_table_sync_workers(mut self, workers: u16) -> Self {
-        self.max_table_sync_workers = workers;
+        self.config.max_table_sync_workers = NonZeroU16::new(workers).unwrap();
         self
     }
 
     /// Sets the behavior when the main replication slot is found to be
     /// invalidated.
     pub fn with_invalidated_slot_behavior(mut self, behavior: InvalidatedSlotBehavior) -> Self {
-        self.invalidated_slot_behavior = behavior;
+        self.config.invalidated_slot_behavior = behavior;
         self
     }
 
     /// Sets the maximum number of parallel connections per table during initial
     /// copy.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `connections` is zero.
     pub fn with_max_copy_connections_per_table(mut self, connections: u16) -> Self {
-        self.max_copy_connections_per_table = connections;
+        self.config.max_copy_connections_per_table = NonZeroU16::new(connections).unwrap();
         self
     }
 
     /// Sets the milliseconds between copy-slot validity checks.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `interval_ms` is zero.
     pub fn with_table_sync_monitor_refresh_interval_ms(mut self, interval_ms: u64) -> Self {
-        self.table_sync_monitor_refresh_interval_ms = interval_ms;
+        self.config.table_sync_monitor_refresh_interval_ms = NonZeroU64::new(interval_ms).unwrap();
         self
     }
 
     /// Sets the milliseconds between pipeline-wide lag samples.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `interval_ms` is zero.
     pub fn with_replication_lag_refresh_interval_ms(mut self, interval_ms: u64) -> Self {
-        self.replication_lag_refresh_interval_ms = interval_ms;
+        self.config.replication_lag_refresh_interval_ms = NonZeroU64::new(interval_ms).unwrap();
         self
     }
 
@@ -278,7 +271,7 @@ where
     /// `None` allows forced durability at any keepalive. `Some` guarantees at
     /// least that window before a later keepalive can force durability.
     pub fn with_settle_durable_interval_ms(mut self, interval_ms: Option<u64>) -> Self {
-        self.settle_durable_interval_ms = interval_ms;
+        self.config.settle_durable_interval_ms = interval_ms;
         self
     }
 
@@ -288,30 +281,7 @@ where
     /// all the configured settings. Any options not explicitly set will use
     /// their default values.
     pub fn build(self) -> Pipeline<S, D> {
-        let config = PipelineConfig {
-            id: self.pipeline_id.into(),
-            publication_name: self.publication_name,
-            pg_connection: self.pg_connection_config,
-            store_pg_connection: None,
-            replication_slot: self.replication_slot,
-            batch: self.batch,
-            table_error_retry_delay_ms: self.table_error_retry_delay_ms,
-            table_error_retry_max_attempts: self.table_error_retry_max_attempts,
-            max_table_sync_workers: self.max_table_sync_workers,
-            table_sync_copy: self.table_sync_copy,
-            invalidated_slot_behavior: self.invalidated_slot_behavior,
-            max_copy_connections_per_table: self.max_copy_connections_per_table,
-            memory_refresh_interval_ms: self.memory_refresh_interval_ms,
-            table_sync_monitor_refresh_interval_ms: self.table_sync_monitor_refresh_interval_ms,
-            replication_lag_refresh_interval_ms: self.replication_lag_refresh_interval_ms,
-            settle_durable_interval_ms: self.settle_durable_interval_ms,
-            memory_backpressure: Some(self.memory_backpressure),
-            run_source_migrations: true,
-            drain_on_shutdown: self.drain_on_shutdown,
-            shutdown_drain_timeout_ms: self.shutdown_drain_timeout_ms,
-        };
-
-        Pipeline::new(config, self.store, self.destination)
+        Pipeline::new(self.config, self.store, self.destination)
     }
 }
 

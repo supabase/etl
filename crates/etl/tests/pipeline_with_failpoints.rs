@@ -1,6 +1,7 @@
 #![cfg(all(feature = "test-utils", feature = "failpoints"))]
 
 use std::{
+    num::NonZeroU64,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -25,8 +26,9 @@ use etl::{
     schema::{ReplicatedTableSchema, SnapshotId, TableId, TableName, TableSchema},
     store::{StateStore, TableRetryPolicy, TableState, TableStateType, WorkerType},
     test_utils::{
+        cdc_workload::notify_on_commit,
         database::{
-            replication_slot_state, spawn_source_database, test_table_name,
+            current_xid, replication_slot_state, spawn_source_database, test_table_name,
             wait_for_replication_slot_flush_lsn,
         },
         event::{EventCondition, group_events_by_type_and_table_id},
@@ -713,27 +715,34 @@ async fn table_sync_handover_preserves_decoder_across_post_handoff_noop_ddl() {
 
     finished_copy_notify.notified().await;
 
-    let apply_commits_notify = destination
-        .wait_for_events(vec![EventCondition::AnyCount(
-            EventType::Commit,
-            u64::try_from(catchup_rows).unwrap(),
-        )])
-        .await;
-
     // Rows inserted while the worker is paused after copy must be replayed by
     // table-sync streaming. Both replication connections receive these WAL
     // records: table sync processes its Relation and rows, while apply skips
     // the table-owned messages but still writes each transaction's commit.
     // Acknowledging the apply commits proves that its pgoutput connection has
-    // already sent and cached the table's Relation before handoff.
-    insert_users_data(
-        &mut database,
-        &users_schema.name,
-        copied_rows + 1..=copied_rows + catchup_rows,
-    )
-    .await;
+    // already sent and cached the table's Relation before handoff. Wait for
+    // these transactions by xid: PostgreSQL 14 also streams empty transactions
+    // such as autovacuum's catalog ANALYZE, so a global commit count can skip
+    // past its target within one batch.
+    let mut catchup_commit_notifies = Vec::with_capacity(catchup_rows);
+    for i in copied_rows + 1..=copied_rows + catchup_rows {
+        let transaction = database.begin_transaction().await;
+        transaction
+            .insert_values(
+                users_schema.name.clone(),
+                &["name", "age"],
+                &[&format!("user_{i}"), &i32::try_from(i).unwrap()],
+            )
+            .await
+            .unwrap();
+        let xid = current_xid(transaction.client.as_ref().unwrap()).await.unwrap();
+        catchup_commit_notifies.push(notify_on_commit(&destination, xid).await);
+        transaction.commit_transaction().await;
+    }
 
-    apply_commits_notify.notified().await;
+    for catchup_commit_notify in catchup_commit_notifies {
+        catchup_commit_notify.notified().await;
+    }
 
     let all_rows_notify = destination
         .wait_for_all_events(vec![EventCondition::TableCount(
@@ -1322,7 +1331,7 @@ impl Destination for HoldingDmlDispatchDestination {
             Event::Update(update) => Some(update.commit_lsn),
             Event::Delete(delete) => Some(delete.commit_lsn),
             Event::Truncate(truncate) => Some(truncate.commit_lsn),
-            Event::Begin(_) | Event::Commit(_) | Event::Relation(_) | Event::Unsupported => None,
+            Event::Begin(_) | Event::Commit(_) | Event::Relation(_) => None,
         }) {
             let gate = self.gate.lock().unwrap().take();
             if let Some(gate) = gate {
@@ -3268,7 +3277,11 @@ async fn durability_deadline_during_split_transaction_keeps_commit_boundary() {
     let _scenario = FailScenario::setup();
     let mut test = IdleDurabilityTest::start_with_batch(
         Some(600_000),
-        Some(BatchConfig { max_fill_ms: 100, max_bytes: 16_384, memory_budget_ratio: 0.2 }),
+        Some(BatchConfig {
+            max_fill_ms: 100,
+            max_bytes: NonZeroU64::new(16_384).unwrap(),
+            memory_budget_ratio: 0.2,
+        }),
     )
     .await;
     test.insert(1).await;

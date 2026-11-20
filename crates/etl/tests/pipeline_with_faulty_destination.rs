@@ -8,10 +8,10 @@ use etl::{
     store::{StateStore, TableRetryPolicy, TableState, TableStateType},
     test_utils::{
         cdc_workload::{
-            AfterFaultStep, DeliveryOrder, TxPhase, WORKLOAD_PUBLICATION, WORKLOAD_TIMEOUT,
-            Workload, WorkloadCoverage, WorkloadHistory, WorkloadRunner, WorkloadShape,
-            WorkloadTables, assert_workload_converged, create_workload_tables, read_source_rows,
-            wait_for_notification, workloads,
+            AfterFaultStep, DeliveryOrder, TxPhase, WORKLOAD_TIMEOUT, Workload, WorkloadCoverage,
+            WorkloadHistory, WorkloadRunner, WorkloadShape, WorkloadTables,
+            assert_workload_converged, create_workload_pipeline, create_workload_tables,
+            read_source_rows, wait_for_notification, workloads,
         },
         database::{
             WalsenderTermination, replication_slot_state, spawn_source_database,
@@ -199,10 +199,9 @@ async fn run_walsender_roulette_case(
     let pipeline_id = random_pipeline_id();
     let apply_slot_name: String =
         EtlReplicationSlot::for_apply_worker(&pipeline_id).try_into().unwrap();
-    let mut pipeline = create_pipeline(
+    let mut pipeline = create_workload_pipeline(
         &database.config,
         pipeline_id.as_str(),
-        WORKLOAD_PUBLICATION.to_owned(),
         store.clone(),
         destination.clone(),
     );

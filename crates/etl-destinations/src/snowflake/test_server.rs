@@ -66,7 +66,7 @@ pub(crate) async fn serve_sql_responses(
 
 /// Reads complete requests before recording them and returning scripted
 /// replies.
-async fn serve_requests(
+pub(super) async fn serve_requests(
     responses: Vec<(u16, String)>,
     record: impl Fn(&[u8], usize) -> Option<String> + Send + 'static,
 ) -> (String, JoinHandle<Vec<String>>) {

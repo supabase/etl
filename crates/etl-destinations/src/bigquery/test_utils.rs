@@ -3,7 +3,10 @@
 //! Provides a database wrapper for managing BigQuery datasets and constants for
 //! connecting to Google Cloud BigQuery in test environments.
 
-use std::{error::Error as _, fmt, future::Future, path::Path, str::FromStr, time::Duration};
+use std::{
+    error::Error as _, fmt, future::Future, num::NonZeroU16, path::Path, str::FromStr,
+    time::Duration,
+};
 
 use etl::{error::EtlError, pipeline::PipelineId, schema::TableName, store::DestinationStore};
 use gcp_bigquery_client::{
@@ -76,7 +79,6 @@ where
         attempt_fn,
     )
     .await
-    .map_err(|failure| failure.last_error)
 }
 
 /// Recognizes a missing table while preserving the query's typed error chain.
@@ -486,8 +488,8 @@ impl BigQueryDatabase {
             self.project_id.clone(),
             self.dataset_id.clone(),
             &self.sa_key_path,
-            Some(0), // Zero staleness for immediate consistency in tests
-            10,      // Allow concurrent streams for testing
+            Some(0),                      // Zero staleness for immediate consistency in tests
+            NonZeroU16::new(10).unwrap(), // Allow concurrent streams for testing
             pipeline_id,
             schema_store,
         )

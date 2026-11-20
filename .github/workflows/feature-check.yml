@@ -1,0 +1,55 @@
+name: Feature combinations
+
+on:
+  schedule:
+    - cron: "37 3 * * 1"
+  pull_request:
+    paths:
+      - ".github/workflows/feature-check.yml"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  each-feature:
+    name: Clippy (each feature)
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 240
+    steps:
+      - name: Check out source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          rustflags: ''
+          cache-key: feature-check
+          cache-on-failure: false
+          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install cargo-hack
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-hack@0.6.45
+      # Each package runs alone, with no default features, with default
+      # features, and with each feature by itself; the all-features run is
+      # the Clippy job in ci.yml. Crates that link Postgres require a TLS
+      # backend, so every run of a package that has `tls-rustls-ring` enables
+      # it; the AWS-LC backend has its own job in ci.yml. The replicator's
+      # `any-destination` feature is internal and rejects being enabled alone.
+      - name: Run Clippy for each feature
+        env:
+          RUSTFLAGS: --cfg tokio_unstable
+        run: |
+          cargo hack clippy --locked --workspace --each-feature --all-targets --no-deps \
+            --keep-going --features tls-rustls-ring --ignore-unknown-features \
+            --exclude-features any-destination \
+            -- -D warnings

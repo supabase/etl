@@ -2,6 +2,7 @@
 
 mod copy_cdc_differential;
 mod default_expression_property;
+mod hostname_connections;
 mod migrations;
 mod pipeline;
 mod pipeline_copy_locks;

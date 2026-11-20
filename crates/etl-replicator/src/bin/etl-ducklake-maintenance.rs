@@ -115,11 +115,11 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
         },
         merge_adjacent_files: MergeAdjacentFilesMaintenanceConfig {
             enabled: env_bool("ETL_DUCKLAKE_MAINTENANCE__MERGE_ADJACENT_FILES__ENABLED", true),
-            max_compacted_files: env_u32(
+            max_compacted_files: env_u16(
                 "ETL_DUCKLAKE_MAINTENANCE__MERGE_ADJACENT_FILES__MAX_COMPACTED_FILES",
                 40,
             )?,
-            max_tables_per_run: env_u32(
+            max_tables_per_run: env_u16(
                 "ETL_DUCKLAKE_MAINTENANCE__MERGE_ADJACENT_FILES__MAX_TABLES_PER_RUN",
                 8,
             )?,
@@ -131,7 +131,7 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
                 "ETL_DUCKLAKE_MAINTENANCE__REWRITE_DATA_FILES__MIN_ACTIVE_DATA_FILES",
                 40,
             )?,
-            max_tables_per_run: env_u32(
+            max_tables_per_run: env_u16(
                 "ETL_DUCKLAKE_MAINTENANCE__REWRITE_DATA_FILES__MAX_TABLES_PER_RUN",
                 8,
             )?,
@@ -227,8 +227,8 @@ fn env_u64(name: &str, default: u64) -> MaintenanceResult<u64> {
     })
 }
 
-/// Reads a `u32` environment variable.
-fn env_u32(name: &str, default: u32) -> MaintenanceResult<u32> {
+/// Reads a `u16` environment variable.
+fn env_u16(name: &str, default: u16) -> MaintenanceResult<u16> {
     Ok(match env::var(name) {
         Ok(value) => value.parse()?,
         Err(_) => default,

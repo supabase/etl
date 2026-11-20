@@ -1,9 +1,11 @@
 #[cfg(feature = "test-utils")]
 use std::sync::atomic::AtomicUsize;
 use std::{
-    error, process,
+    error,
+    num::NonZeroU16,
+    process,
     sync::{
-        Arc, Mutex, Weak,
+        Arc, Mutex, PoisonError, Weak,
         atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
     time::Duration,
@@ -329,8 +331,7 @@ pub(super) struct DuckLakeInterruptRegistry {
 impl DuckLakeInterruptRegistry {
     /// Registers one live DuckLake connection interrupt handle.
     fn register(&self, handle: &Arc<RegisteredDuckLakeInterrupt>) {
-        let mut handles =
-            self.handles.lock().expect("ducklake interrupt registry mutex should not be poisoned");
+        let mut handles = self.handles.lock().unwrap_or_else(PoisonError::into_inner);
         handles.retain(|registered| registered.strong_count() > 0);
         handles.push(Arc::downgrade(handle));
     }
@@ -344,8 +345,7 @@ impl DuckLakeInterruptRegistry {
     /// Interrupts all live connections and records one shared reason.
     fn interrupt_all_with_reason(&self, reason: DuckLakeInterruptReason) -> usize {
         let mut interrupted = 0;
-        let mut handles =
-            self.handles.lock().expect("ducklake interrupt registry mutex should not be poisoned");
+        let mut handles = self.handles.lock().unwrap_or_else(PoisonError::into_inner);
         handles.retain(|handle| {
             let Some(handle) = handle.upgrade() else {
                 return false;
@@ -879,7 +879,7 @@ pub(super) fn format_query_error_detail(sql: &str) -> String {
 /// retaining the caller's lifecycle guard through native setup.
 pub(super) async fn build_warm_ducklake_pool(
     manager: DuckLakeConnectionManager,
-    pool_size: u32,
+    pool_size: NonZeroU16,
     purpose: &'static str,
     guard: impl Send + 'static,
 ) -> EtlResult<r2d2::Pool<DuckLakeConnectionManager>> {
@@ -890,7 +890,7 @@ pub(super) async fn build_warm_ducklake_pool(
         }
         let started = Instant::now();
         let pool = r2d2::Pool::builder()
-            .max_size(pool_size)
+            .max_size(u32::from(pool_size.get()))
             .min_idle(Some(0))
             .connection_timeout(Duration::from_mins(4))
             .test_on_check_out(true)
@@ -906,17 +906,18 @@ pub(super) async fn build_warm_ducklake_pool(
                 )
             })?;
 
-        let mut warmed_connections = Vec::with_capacity(pool_size as usize);
-        for _ in 0..pool_size {
-            let conn = pool.get().map_err(|e| {
-                classified_error(
-                    ErrorKind::DestinationConnectionFailed,
-                    "Failed to warm DuckLake connection pool",
-                    e,
-                )
-            })?;
-            warmed_connections.push(conn);
-        }
+        // Holding every connection at once forces the pool to open all of them.
+        let warmed_connections = (0..pool_size.get())
+            .map(|_| {
+                pool.get().map_err(|e| {
+                    classified_error(
+                        ErrorKind::DestinationConnectionFailed,
+                        "Failed to warm DuckLake connection pool",
+                        e,
+                    )
+                })
+            })
+            .collect::<EtlResult<Vec<_>>>()?;
         drop(warmed_connections);
 
         trace!(
@@ -968,11 +969,11 @@ impl<G> DuckLakeBlockingGuard<G> {
 /// exceeding that deadline aborts the process so unacknowledged WAL can replay.
 pub(super) async fn drain_duckdb_blocking_operations(
     blocking_slots: Arc<Semaphore>,
-    pool_size: u32,
+    pool_size: NonZeroU16,
 ) {
     match tokio::time::timeout(
         BLOCKING_ABORT_GRACE,
-        Arc::clone(&blocking_slots).acquire_many_owned(pool_size),
+        Arc::clone(&blocking_slots).acquire_many_owned(u32::from(pool_size.get())),
     )
     .await
     {
@@ -1280,7 +1281,10 @@ mod tests {
                 .start_paused(true)
                 .build()
                 .unwrap();
-            runtime.block_on(drain_duckdb_blocking_operations(Arc::new(Semaphore::new(0)), 1));
+            runtime.block_on(drain_duckdb_blocking_operations(
+                Arc::new(Semaphore::new(0)),
+                NonZeroU16::MIN,
+            ));
             panic!("native cleanup returned without owning every permit");
         }
         let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -1534,7 +1538,7 @@ mod tests {
     #[tokio::test]
     async fn run_duckdb_blocking_timeout_releases_resources_for_follow_up_queries() {
         let pool = Arc::new(
-            build_warm_ducklake_pool(make_blocking_test_manager(), 1, "test", ())
+            build_warm_ducklake_pool(make_blocking_test_manager(), NonZeroU16::MIN, "test", ())
                 .await
                 .expect("failed to build blocking test pool"),
         );
@@ -1590,7 +1594,9 @@ mod tests {
     #[tokio::test]
     async fn cancelled_blocking_caller_retains_watchdog_and_permit() {
         let pool = Arc::new(
-            build_warm_ducklake_pool(make_blocking_test_manager(), 1, "test", ()).await.unwrap(),
+            build_warm_ducklake_pool(make_blocking_test_manager(), NonZeroU16::MIN, "test", ())
+                .await
+                .unwrap(),
         );
         let slots = Arc::new(Semaphore::new(1));
         let (started_tx, started_rx) = oneshot::channel();
@@ -1688,20 +1694,23 @@ mod tests {
         assert_eq!(slots.available_permits(), 1);
 
         manager.interrupt_all_connections_for_shutdown();
-        let mut drain = Box::pin(drain_duckdb_blocking_operations(Arc::clone(&slots), 2));
+        let mut drain = Box::pin(drain_duckdb_blocking_operations(
+            Arc::clone(&slots),
+            NonZeroU16::new(2).unwrap(),
+        ));
         assert!(drain.as_mut().now_or_never().is_none());
         drop(drain);
         assert!(!slots.is_closed());
         resume.send(()).unwrap();
         tokio::time::timeout(
             Duration::from_secs(5),
-            drain_duckdb_blocking_operations(Arc::clone(&slots), 2),
+            drain_duckdb_blocking_operations(Arc::clone(&slots), NonZeroU16::new(2).unwrap()),
         )
         .await
         .unwrap();
         assert!(gate.try_read().is_ok());
         assert!(slots.is_closed());
-        drain_duckdb_blocking_operations(Arc::clone(&slots), 2).await;
+        drain_duckdb_blocking_operations(Arc::clone(&slots), NonZeroU16::new(2).unwrap()).await;
         manager.shared_instance.lock().unwrap().execute_batch("select * from original").unwrap();
         assert!(is_ducklake_shutdown_requested_error(
             &manager.recreate_shared_instance(()).await.unwrap_err()
@@ -2029,8 +2038,18 @@ mod tests {
                     }
                 });
 
+                // Wait for the watchdog itself to observe the deadline. A fixed
+                // sleep can expire in the same driver turn as the deadline, and
+                // the watchdog then sees `done` first and correctly skips the
+                // timeout.
                 if signal_after_deadline {
-                    tokio::time::sleep(WATCHDOG_DEADLINE * 2).await;
+                    tokio::time::timeout(WATCHDOG_JOIN_TIMEOUT, async {
+                        while !watchdog.timed_out() {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .expect("watchdog should observe its deadline");
                 }
 
                 barrier.wait().await;
@@ -2123,34 +2142,40 @@ mod tests {
         assert!(delayed_handle.completed());
     }
 
+    /// A blocking `interrupt()` holds the only worker, so no other task runs
+    /// until it returns.
+    ///
+    /// The test body runs on the `block_on` thread, not on the worker. That
+    /// lets it see the interrupt start and spawn the observer while the
+    /// worker is still blocked. The check relies on ordering, not
+    /// wall-clock timers, so a runner stall cannot let the observer run
+    /// before the interrupt.
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn query_watchdog_slow_interrupt_starves_single_worker_runtime_until_it_returns() {
-        let interrupt_delay = Duration::from_millis(100);
-        let (delayed_handle, interrupt_handle) = delayed_interrupt_handle(interrupt_delay);
+        let (delayed_handle, interrupt_handle) =
+            delayed_interrupt_handle(Duration::from_millis(100));
         let mut watchdog = DuckDbQueryWatchdog::spawn(Instant::now() + WATCHDOG_DEADLINE);
         let watchdog_task = watchdog.async_task_handle().expect("failed to extract watchdog task");
-        let (observer_started_tx, observer_started_rx) = oneshot::channel();
-        let started_at = std::time::Instant::now();
-        let observer_task = tokio::spawn(async move {
-            observer_started_tx.send(()).expect("observer start receiver should be open");
-            tokio::time::sleep(WATCHDOG_DEADLINE * 2).await;
-            std::time::Instant::now()
-        });
 
-        observer_started_rx.await.expect("observer should start");
         watchdog.publish_query_interrupt_handle(interrupt_handle);
+        wait_for_delayed_interrupt_to_start(&delayed_handle).await;
+        let observer_task = tokio::spawn({
+            let delayed_handle = Arc::clone(&delayed_handle);
+            async move { delayed_handle.completed() }
+        });
 
         tokio::time::timeout(WATCHDOG_JOIN_TIMEOUT, watchdog_task)
             .await
             .expect("watchdog should not deadlock on a single worker runtime")
             .expect("watchdog task should not panic");
-        let observer_finished_at = observer_task.await.expect("observer task should not panic");
+        let interrupt_completed_before_observer =
+            observer_task.await.expect("observer task should not panic");
 
         assert!(watchdog.timed_out());
         assert_eq!(delayed_handle.calls(), 1);
         assert!(delayed_handle.completed());
         assert!(
-            observer_finished_at.duration_since(started_at) >= interrupt_delay,
+            interrupt_completed_before_observer,
             "single worker runtime should not poll other async tasks while interrupt() blocks"
         );
     }
@@ -2218,7 +2243,7 @@ mod tests {
     async fn interrupt_all_connections_cancels_running_query() {
         let manager = make_blocking_test_manager();
         let pool = Arc::new(
-            build_warm_ducklake_pool(manager.clone(), 1, "test", ())
+            build_warm_ducklake_pool(manager.clone(), NonZeroU16::MIN, "test", ())
                 .await
                 .expect("failed to build blocking test pool"),
         );
@@ -2275,7 +2300,7 @@ mod tests {
     async fn shutdown_requested_skips_new_blocking_operations() {
         let manager = make_blocking_test_manager();
         let pool = Arc::new(
-            build_warm_ducklake_pool(manager.clone(), 1, "shutdown-skip-test", ())
+            build_warm_ducklake_pool(manager.clone(), NonZeroU16::MIN, "shutdown-skip-test", ())
                 .await
                 .expect("failed to build blocking test pool"),
         );

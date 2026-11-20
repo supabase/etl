@@ -1,9 +1,8 @@
 use std::{
     collections::{BTreeMap, HashMap},
-    sync::Arc,
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
 
-use tokio::sync::Mutex;
 use tokio_postgres::types::PgLsn;
 
 use crate::{
@@ -208,6 +207,12 @@ impl MemoryStore {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Locks the store contents; every operation leaves them valid, so
+    /// poisoning is ignored.
+    fn data(&self) -> MutexGuard<'_, MemoryStoreData> {
+        self.data.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 impl CachedStore for MemoryStore {
@@ -218,28 +223,28 @@ impl CachedStore for MemoryStore {
 
 impl StateStore for MemoryStore {
     async fn get_table_state(&self, table_id: TableId) -> EtlResult<Option<TableState>> {
-        Ok(self.data.lock().await.table_state(table_id))
+        Ok(self.data().table_state(table_id))
     }
 
     async fn get_table_states(&self) -> EtlResult<TableStates> {
-        Ok(self.data.lock().await.table_states())
+        Ok(self.data().table_states())
     }
 
     async fn update_table_states(&self, updates: Vec<(TableId, TableState)>) -> EtlResult<()> {
-        self.data.lock().await.update_table_states(updates);
+        self.data().update_table_states(updates);
 
         Ok(())
     }
 
     async fn rollback_table_state(&self, table_id: TableId) -> EtlResult<TableState> {
-        self.data.lock().await.rollback_table_state(table_id)
+        self.data().rollback_table_state(table_id)
     }
 
     async fn get_replication_checkpoint(
         &self,
         worker_type: WorkerType,
     ) -> EtlResult<Option<PgLsn>> {
-        Ok(self.data.lock().await.replication_checkpoint(worker_type))
+        Ok(self.data().replication_checkpoint(worker_type))
     }
 
     async fn upsert_replication_checkpoint(
@@ -247,11 +252,11 @@ impl StateStore for MemoryStore {
         worker_type: WorkerType,
         checkpoint_lsn: PgLsn,
     ) -> EtlResult<PgLsn> {
-        Ok(self.data.lock().await.upsert_replication_checkpoint(worker_type, checkpoint_lsn))
+        Ok(self.data().upsert_replication_checkpoint(worker_type, checkpoint_lsn))
     }
 
     async fn delete_replication_checkpoint(&self, worker_type: WorkerType) -> EtlResult<()> {
-        self.data.lock().await.delete_replication_checkpoint(worker_type);
+        self.data().delete_replication_checkpoint(worker_type);
 
         Ok(())
     }
@@ -260,7 +265,7 @@ impl StateStore for MemoryStore {
         &self,
         table_id: TableId,
     ) -> EtlResult<Option<DestinationTableMetadata>> {
-        Ok(self.data.lock().await.destination_table_metadata(table_id))
+        Ok(self.data().destination_table_metadata(table_id))
     }
 
     async fn store_destination_table_metadata(
@@ -268,7 +273,7 @@ impl StateStore for MemoryStore {
         table_id: TableId,
         metadata: DestinationTableMetadata,
     ) -> EtlResult<()> {
-        self.data.lock().await.store_destination_table_metadata(table_id, metadata);
+        self.data().store_destination_table_metadata(table_id, metadata);
 
         Ok(())
     }
@@ -280,28 +285,28 @@ impl SchemaStore for MemoryStore {
         table_id: &TableId,
         snapshot_id: SnapshotId,
     ) -> EtlResult<Option<Arc<TableSchema>>> {
-        Ok(self.data.lock().await.table_schema(*table_id, snapshot_id))
+        Ok(self.data().table_schema(*table_id, snapshot_id))
     }
 
     async fn get_table_schemas(&self) -> EtlResult<Vec<Arc<TableSchema>>> {
-        Ok(self.data.lock().await.table_schemas())
+        Ok(self.data().table_schemas())
     }
 
     async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<Arc<TableSchema>> {
-        Ok(self.data.lock().await.store_table_schema(table_schema))
+        Ok(self.data().store_table_schema(table_schema))
     }
 
     async fn prune_table_schemas(
         &self,
         retention_snapshot_ids: BTreeMap<TableId, SnapshotId>,
     ) -> EtlResult<u64> {
-        Ok(self.data.lock().await.prune_table_schemas(&retention_snapshot_ids))
+        Ok(self.data().prune_table_schemas(&retention_snapshot_ids))
     }
 }
 
 impl TableStateLifecycleStore for MemoryStore {
     async fn apply_table_state_operation(&self, operation: TableStateOperation) -> EtlResult<()> {
-        self.data.lock().await.apply_table_state_operation(operation);
+        self.data().apply_table_state_operation(operation);
 
         Ok(())
     }

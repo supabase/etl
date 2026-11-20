@@ -230,7 +230,7 @@ where
                             .insert(replicated_table_schema.id(), replicated_table_schema.clone());
                     }
                 }
-                Event::Begin(_) | Event::Commit(_) | Event::Unsupported => {}
+                Event::Begin(_) | Event::Commit(_) => {}
             }
         }
 

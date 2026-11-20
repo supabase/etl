@@ -3,7 +3,8 @@
 //!
 //! The producer converts nextest's JUnit reports to this JSON format, so the
 //! collector reads JSON only. Coverage runs are flagged because instrumented
-//! binaries run slower and their durations are not comparable.
+//! binaries run slower and their durations are not comparable. The property
+//! budget is recorded for the same reason: properties run until it is spent.
 
 use std::{collections::HashSet, env};
 
@@ -13,6 +14,8 @@ use quick_xml::{
     events::{BytesStart, Event},
 };
 use serde::{Deserialize, Serialize};
+
+use crate::utils::PROPERTY_TEST_BUDGET_ENV;
 
 /// Artifact name prefix. The suffix is the producing job's id.
 pub(crate) const ARTIFACT_PREFIX: &str = "test-results-";
@@ -28,14 +31,29 @@ pub(crate) struct TestManifest {
     kind: String,
     /// Whether the tests ran instrumented for coverage.
     coverage: bool,
+    /// Wall-clock budget of every property in seconds, when the job set one.
+    /// Absent from manifests written before the field existed.
+    property_budget_secs: Option<u32>,
     github: TestJob,
     tests: Vec<TestCase>,
 }
 
 impl TestManifest {
     /// Builds a manifest of the current format.
-    pub(crate) fn new(coverage: bool, github: TestJob, tests: Vec<TestCase>) -> Self {
-        Self { schema_version: SCHEMA_VERSION, kind: KIND.to_owned(), coverage, github, tests }
+    pub(crate) fn new(
+        coverage: bool,
+        property_budget_secs: Option<u32>,
+        github: TestJob,
+        tests: Vec<TestCase>,
+    ) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            kind: KIND.to_owned(),
+            coverage,
+            property_budget_secs,
+            github,
+            tests,
+        }
     }
 
     /// Returns whether the manifest has a supported kind and schema version.
@@ -46,6 +64,11 @@ impl TestManifest {
     /// Returns whether the tests ran instrumented for coverage.
     pub(crate) fn coverage(&self) -> bool {
         self.coverage
+    }
+
+    /// Returns the property budget in seconds, when the job set one.
+    pub(crate) fn property_budget_secs(&self) -> Option<u32> {
+        self.property_budget_secs
     }
 
     /// Returns the job that ran the tests.
@@ -61,6 +84,27 @@ impl TestManifest {
     /// Returns the test results, consuming the manifest.
     pub(crate) fn into_tests(self) -> Vec<TestCase> {
         self.tests
+    }
+}
+
+/// Parses a property budget in whole seconds. An unset budget is `None`; any
+/// set value, including an empty one, must be a valid `u32`.
+fn parse_property_budget(value: Option<&str>) -> Result<Option<u32>> {
+    value
+        .map(|value| {
+            value.parse().with_context(|| {
+                format!("{PROPERTY_TEST_BUDGET_ENV} must be a whole number of seconds")
+            })
+        })
+        .transpose()
+}
+
+/// Reads the property budget the job exported to the tests, if any.
+pub(crate) fn property_budget_from_env() -> Result<Option<u32>> {
+    match env::var(PROPERTY_TEST_BUDGET_ENV) {
+        Ok(value) => parse_property_budget(Some(&value)),
+        Err(env::VarError::NotPresent) => parse_property_budget(None),
+        Err(error) => Err(error).with_context(|| format!("{PROPERTY_TEST_BUDGET_ENV} is invalid")),
     }
 }
 
@@ -243,7 +287,7 @@ fn read_case(element: &BytesStart<'_>) -> Result<TestCase> {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_manifest::{TestCase, TestStatus, parse_junit};
+    use crate::test_manifest::{TestCase, TestStatus, parse_junit, parse_property_budget};
 
     fn case(binary: &str, name: &str, status: TestStatus, duration_ms: u32) -> TestCase {
         TestCase { binary: binary.to_owned(), name: name.to_owned(), status, duration_ms }
@@ -298,6 +342,17 @@ mod tests {
             r#"<testsuites><testcase name="a&bogus;" classname="b" time="1"/></testsuites>"#,
         ] {
             assert!(parse_junit(xml).is_err(), "{xml}");
+        }
+    }
+
+    #[test]
+    fn property_budget_is_unset_or_a_whole_number_of_seconds() {
+        assert_eq!(parse_property_budget(None).unwrap(), None);
+        assert_eq!(parse_property_budget(Some("30")).unwrap(), Some(30));
+        assert_eq!(parse_property_budget(Some("4294967295")).unwrap(), Some(u32::MAX));
+
+        for value in ["", "abc", "-1", "1.5", " 30", "4294967296"] {
+            assert!(parse_property_budget(Some(value)).is_err(), "{value:?}");
         }
     }
 }

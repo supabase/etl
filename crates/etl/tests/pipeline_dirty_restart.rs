@@ -3,9 +3,9 @@ use etl::{
     store::{PostgresStore, StateStore, TableStateType},
     test_utils::{
         cdc_workload::{
-            AfterFaultStep, DeliveryOrder, TxPhase, WORKLOAD_PUBLICATION, WORKLOAD_TIMEOUT,
-            Workload, WorkloadCoverage, WorkloadRunner, WorkloadShape, assert_phase_delivered_once,
-            assert_workload_converged, create_workload_tables, notify_on_commit, read_source_rows,
+            AfterFaultStep, DeliveryOrder, TxPhase, WORKLOAD_TIMEOUT, Workload, WorkloadCoverage,
+            WorkloadRunner, WorkloadShape, assert_phase_delivered_once, assert_workload_converged,
+            create_workload_pipeline, create_workload_tables, notify_on_commit, read_source_rows,
             wait_for_apply_disconnect, wait_for_notification, wait_for_sync_slot_removal,
             workloads,
         },
@@ -13,7 +13,6 @@ use etl::{
         faults::FaultyOp,
         memory_destination::MemoryDestination,
         notifying_store::NotifyingStore,
-        pipeline::create_pipeline,
         property::{block_on, run_expensive_property},
         store::{wait_for_table_state_type, wait_for_table_sync_complete},
         test_destination_wrapper::TestDestinationWrapper,
@@ -71,10 +70,9 @@ async fn run_dirty_restart_case(
         })?;
     let apply_slot_name: String =
         EtlReplicationSlot::for_apply_worker(&pipeline_id).try_into().unwrap();
-    let mut first_pipeline = create_pipeline(
+    let mut first_pipeline = create_workload_pipeline(
         &database.config,
         &pipeline_id,
-        WORKLOAD_PUBLICATION.to_owned(),
         first_store.clone(),
         first_destination.clone(),
     );
@@ -143,10 +141,9 @@ async fn run_dirty_restart_case(
             TestCaseError::fail(format!("failed to reopen the Postgres store: {error}"))
         })?;
     let restarted_destination = TestDestinationWrapper::wrap(memory_destination.clone());
-    let mut restarted_pipeline = create_pipeline(
+    let mut restarted_pipeline = create_workload_pipeline(
         &database.config,
         &pipeline_id,
-        WORKLOAD_PUBLICATION.to_owned(),
         restarted_store.clone(),
         restarted_destination.clone(),
     );

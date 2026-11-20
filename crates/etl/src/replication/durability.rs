@@ -1,11 +1,11 @@
 //! Live main apply-worker durability observations, independent of write waits.
 
 use std::{
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::Duration,
 };
 
-use metrics::gauge;
+use metrics::{Gauge, gauge};
 use tokio::time::{Instant, MissedTickBehavior};
 use tokio_postgres::types::PgLsn;
 use tokio_util::task::AbortOnDropHandle;
@@ -66,8 +66,10 @@ impl DurabilityState {
 /// an indefinite stall.
 #[derive(Clone, Debug)]
 pub(crate) struct DurabilityMonitor {
-    /// Explicit pipeline identity also supports library-hosted pipelines.
-    pipeline_id: PipelineId,
+    /// Age series registered once for this pipeline. Set only while holding
+    /// [`Self::state`], so a late update cannot overwrite a newer age or the
+    /// unavailable sentinel.
+    gauge: Gauge,
     /// Locks cover only local state and gauge updates, never asynchronous work.
     state: Arc<Mutex<DurabilityState>>,
 }
@@ -75,40 +77,47 @@ pub(crate) struct DurabilityMonitor {
 impl DurabilityMonitor {
     /// Creates an unavailable observation until the main apply loop starts.
     pub(crate) fn new(pipeline_id: PipelineId) -> Self {
-        Self { pipeline_id, state: Arc::default() }
+        let labels = [
+            (PIPELINE_ID_LABEL, pipeline_id.to_string()),
+            (WORKER_TYPE_LABEL, "apply".to_owned()),
+            (REPLICATION_PATH_LABEL, CDC_REPLICATION_PATH.to_owned()),
+        ];
+        let gauge = gauge!(ETL_DESTINATION_DURABILITY_AGE_SECONDS, &labels);
+
+        Self { gauge, state: Arc::default() }
     }
 
     /// Starts an attempt without declaring abandoned work durable.
     pub(crate) fn begin_attempt(&self) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.lock_state();
         state.observing = true;
         if let Some(pending) = &mut state.outstanding {
             pending.replay_until = Some(pending.dispatched_lsn);
         }
-        self.emit(state.age());
+        self.gauge.set(state.age());
     }
 
     /// Opens or extends an interval before a nonempty destination call.
     pub(crate) fn dispatched(&self, replay_frontier: PgLsn) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.lock_state();
         let pending = state.outstanding.get_or_insert_with(|| OutstandingDurability {
             since: Instant::now(),
             dispatched_lsn: replay_frontier,
             replay_until: None,
         });
         pending.dispatched_lsn = pending.dispatched_lsn.max(replay_frontier);
-        self.emit(state.age());
+        self.gauge.set(state.age());
     }
 
     /// Closes only intervals covered by a successfully handled durable result.
     pub(crate) fn confirmed(&self, commit_end_lsn: Option<PgLsn>) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.lock_state();
         if state.outstanding.as_ref().is_some_and(|pending| {
             pending.replay_until.is_none_or(|frontier| commit_end_lsn >= Some(frontier))
         }) {
             state.outstanding = None;
         }
-        self.emit(state.age());
+        self.gauge.set(state.age());
     }
 
     /// Starts the sampler whose owner must abort and join it during teardown.
@@ -119,20 +128,15 @@ impl DurabilityMonitor {
             interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
             loop {
                 interval.tick().await;
-                let state = lifetime.0.state.lock().unwrap();
-                lifetime.0.emit(state.age());
+                let state = lifetime.0.lock_state();
+                lifetime.0.gauge.set(state.age());
             }
         })
     }
 
-    /// Publishes age with a bounded label set.
-    fn emit(&self, age: f64) {
-        let labels = [
-            (PIPELINE_ID_LABEL, self.pipeline_id.to_string()),
-            (WORKER_TYPE_LABEL, "apply".to_owned()),
-            (REPLICATION_PATH_LABEL, CDC_REPLICATION_PATH.to_owned()),
-        ];
-        gauge!(ETL_DESTINATION_DURABILITY_AGE_SECONDS, &labels).set(age);
+    /// Locks the state; every update leaves it valid, so poisoning is ignored.
+    fn lock_state(&self) -> MutexGuard<'_, DurabilityState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -142,9 +146,9 @@ struct DurabilitySamplerLifetime(DurabilityMonitor);
 
 impl Drop for DurabilitySamplerLifetime {
     fn drop(&mut self) {
-        let mut state = self.0.state.lock().unwrap();
+        let mut state = self.0.lock_state();
         state.observing = false;
-        self.0.emit(UNAVAILABLE_AGE);
+        self.0.gauge.set(UNAVAILABLE_AGE);
     }
 }
 

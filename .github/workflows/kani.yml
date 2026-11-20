@@ -1,0 +1,68 @@
+name: Kani proofs
+
+on:
+  schedule:
+    - cron: "17 4 * * 1"
+  pull_request:
+    paths:
+      - ".github/workflows/kani.yml"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  kani:
+    name: Kani proofs
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 120
+    steps:
+      - name: Check out source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          rustflags: ''
+          cache: false
+      # Kani pins its own nightly toolchain and CBMC release, so the proofs do
+      # not follow rust-toolchain.toml. Setup downloads both, so cache them
+      # per Kani version.
+      - name: Restore Kani
+        id: kani_cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/bin/cargo-kani
+            ~/.cargo/bin/kani
+            ~/.kani
+            ~/.rustup/toolchains/nightly-2026-08-21-*
+          key: kani-0.68.0-${{ runner.os }}-${{ runner.arch }}
+      - name: Install Kani
+        if: steps.kani_cache.outputs.cache-hit != 'true'
+        run: |
+          cargo install --locked kani-verifier --version 0.68.0
+          cargo kani setup
+      # cargo-kani has no --locked flag, so fail here on a stale Cargo.lock
+      # instead of letting the proof builds re-resolve dependencies.
+      - name: Check lockfile
+        run: cargo fetch --locked
+      # Proofs stub functions Kani cannot model: core's word-at-a-time memchr
+      # in the UTC offset proofs, and backtrace capture in proofs that can
+      # build an EtlError.
+      - name: Prove etl-postgres
+        run: cargo kani -p etl-postgres -Z stubbing --output-format terse
+      - name: Prove etl
+        run: cargo kani -p etl -Z stubbing --output-format terse
+      - name: Prove etl-destinations
+        run: |
+          cargo kani -p etl-destinations --no-default-features \
+            --features clickhouse,tls-rustls-ring -Z stubbing --output-format terse

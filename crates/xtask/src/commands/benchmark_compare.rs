@@ -49,6 +49,11 @@ const TABLE_COPY_METRICS: &[Metric] = &[
         policy: RegressionPolicy::HigherIsBetter { max_drop_pct: 15.0 },
     },
     Metric {
+        key: "copy_cpu_micros_per_row",
+        label: "CPU µs/row",
+        policy: RegressionPolicy::LowerIsBetter { max_increase_pct: 15.0 },
+    },
+    Metric {
         key: "copy_wait_ms",
         label: "Copy wait ms",
         policy: RegressionPolicy::LowerIsBetter { max_increase_pct: 20.0 },
@@ -79,6 +84,11 @@ const TABLE_STREAMING_METRICS: &[Metric] = &[
         key: "end_to_end_with_shutdown_estimated_mib_per_second",
         label: "Est. decoded MiB/s",
         policy: RegressionPolicy::HigherIsBetter { max_drop_pct: 15.0 },
+    },
+    Metric {
+        key: "end_to_end_cpu_micros_per_event",
+        label: "CPU µs/event",
+        policy: RegressionPolicy::LowerIsBetter { max_increase_pct: 15.0 },
     },
     Metric {
         key: "total_ms",

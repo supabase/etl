@@ -103,6 +103,13 @@ implementation details private.
 - `Cargo.toml` workspace lints, `rustfmt.toml`, and compiler diagnostics are
   the enforceable style source of truth. Prefer tightening static checks over
   adding prose rules here.
+- Use blank lines to separate logically distinct steps in generated and edited
+  code: setup, validation, execution, error handling, and results or assertions.
+  Keep closely related statements together, but avoid dense blocks containing
+  several separate operations. Prefer readable grouping over minimizing line
+  count. Apply this to production code, tests, and code snippets. Before
+  finishing, explicitly inspect the changed code for appropriate blank-line
+  separation; passing the formatter alone does not satisfy this check.
 - Migrations already on `main` are immutable (SQL, comments, whitespace,
   filenames). Add a new file. Do not edit a migration that is not yet on `main`
   unless the user asks, including comments.
@@ -215,6 +222,26 @@ lints.
   range-checked. Use `as` for intentionally lossy conversions or ones Rust does
   not expose (`u64` → `f64` metrics). `From` only when the mapping is
   infallible, semantically lossless, value-preserving, and obvious.
+- Integer types in config (fields, their constants, and builders) follow the
+  value's domain, not taste. First ask whether another system defines the
+  domain: Postgres OIDs and 32-bit session settings, TCP ports, DuckLake's
+  signed 32-bit bucket argument, BigQuery's `INT64` ranges, persisted or
+  sentinel fields (for example `i64::MAX` meaning "never"). Honor that domain
+  with the smallest standard type that contains it, and add a range check when
+  the domain is a strict subset of the type. Only for values a user chooses
+  freely, with no fixed domain, use `u16` for counts and small limits (pool
+  sizes, workers, attempts, per-run limits) and `u64` for values that can get
+  large (bytes, millisecond durations, row limits), never `u32`. Revisit a width
+  only with evidence that valid values exceed it.
+- Use `NonZeroU16`/`NonZeroU64`/etc. for any config value where zero is invalid
+  instead of a `== 0` check or a `.max(1)` guard; deserialization rejects zero
+  and `validate()` keeps only range and cross-field rules. `NonZero*` has no
+  `ToSchema` impl, so add `#[cfg_attr(feature = "utoipa", schema(value_type =
+  u16))]` with the matching primitive to keep the schema unchanged.
+- `usize` is for in-memory lengths, indexes, capacities, and values an API
+  requires as `usize`. Never use it in config or wire types. Convert at the
+  boundary: `usize::from` for `u16`; for wider types `usize::try_from`, with
+  `unwrap_or(usize::MAX)` only for ceilings and a typed error otherwise.
 - Patch-style API updates: omitted fields preserve stored values, explicit
   `null` clears or resets defaults, non-null replaces. Converting a non-patch
   API config into an update config needs an explicit helper such as
@@ -233,6 +260,11 @@ uppercase letter (`thiserror` included).
 - Panics only for programmer errors or broken invariants. `debug_assert!` /
   `unreachable!` for internal invariants; typed errors for external input or
   system state. Document `# Panics` only when the function can panic.
+- Sync locks: recover poisoned locks with
+  `unwrap_or_else(PoisonError::into_inner)` when every critical section leaves
+  the data valid (`parking_lot` never poisons). When a panic can leave the
+  guarded resource unusable, such as a native DuckDB connection, return a typed
+  `InvalidState` error. Never `unwrap` or `expect` a lock outside tests.
 
 Parser entrypoints must not panic on malformed input: typed parse error,
 `EtlError`, `None`, or an explicit failure. Unexpected EOF, bad tokens, invalid

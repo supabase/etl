@@ -1,4 +1,4 @@
-use std::{error::Error as _, fmt, io};
+use std::{error::Error as _, fmt, io, num::NonZeroU16};
 
 use etl::{
     data::Cell,
@@ -30,7 +30,7 @@ use gcp_bigquery_client::{
 };
 use metrics::counter;
 use prost::Message;
-use rand::random;
+use rand::{random, random_range};
 use serde::{
     Deserialize, Deserializer,
     de::{self, MapAccess, Visitor},
@@ -327,7 +327,6 @@ enum AppendRequestProcessResult {
 enum AppendProcessingResult {
     Success,
     Retry { pending_requests: Vec<RetryableAppendRequest> },
-    Error(EtlError),
 }
 
 /// An append request that should be retried after a local Storage Write delay.
@@ -385,34 +384,29 @@ fn create_append_trace_id(pipeline_id: PipelineId, table_id: &str, request_index
 /// Computes the maximum number of inflight requests for the BigQuery Storage
 /// Write API.
 ///
-/// Uses checked arithmetic to safely multiply the connection pool size by the
+/// Uses saturating arithmetic to multiply the connection pool size by the
 /// per-connection limit, clamping the result to [`MAX_SAFE_INFLIGHT_REQUESTS`]
 /// to prevent overflow and resource exhaustion.
-fn compute_max_inflight_requests(connection_pool_size: usize) -> usize {
-    connection_pool_size
-        .checked_mul(MAX_INFLIGHT_REQUESTS_PER_CONNECTION)
-        .unwrap_or(MAX_SAFE_INFLIGHT_REQUESTS)
+fn compute_max_inflight_requests(connection_pool_size: NonZeroU16) -> usize {
+    usize::from(connection_pool_size.get())
+        .saturating_mul(MAX_INFLIGHT_REQUESTS_PER_CONNECTION)
         .min(MAX_SAFE_INFLIGHT_REQUESTS)
+}
+
+/// Builds the Storage Write API configuration for a connection pool size.
+fn storage_api_config(connection_pool_size: NonZeroU16) -> StorageApiConfig {
+    StorageApiConfig {
+        connection_pool_size: usize::from(connection_pool_size.get()),
+        max_inflight_requests: compute_max_inflight_requests(connection_pool_size),
+        // Gzip is CPU-bound on every append with no compression-level control,
+        // and rows can carry large text/JSON payloads.
+        compression: false,
+    }
 }
 
 /// Adds equal jitter to a retry delay.
 fn retry_delay_with_jitter(delay: Duration) -> Duration {
-    if delay.is_zero() {
-        return delay;
-    }
-
-    let half_delay = delay / 2;
-    let jitter_range = delay.saturating_sub(half_delay);
-    let jitter_range_nanos = jitter_range.as_nanos();
-
-    if jitter_range_nanos == 0 {
-        return delay;
-    }
-
-    let jitter_nanos = u128::from(random::<u64>()) % (jitter_range_nanos + 1);
-    let jitter = Duration::from_nanos(jitter_nanos as u64);
-
-    half_delay + jitter
+    random_range((delay / 2)..=delay)
 }
 
 /// Processes one append result and determines its success or failure mode.
@@ -857,13 +851,9 @@ impl BigQueryClient {
     pub async fn new_with_key_path(
         project_id: BigQueryProjectId,
         sa_key_file: &str,
-        connection_pool_size: usize,
+        connection_pool_size: NonZeroU16,
     ) -> EtlResult<BigQueryClient> {
-        let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
-        // Gzip is CPU-bound on every append with no compression-level control,
-        // and rows can carry large text/JSON payloads.
-        let storage_config =
-            StorageApiConfig { connection_pool_size, max_inflight_requests, compression: false };
+        let storage_config = storage_api_config(connection_pool_size);
 
         let sa_key = read_service_account_key(sa_key_file).await.map_err(bq_error_to_etl_error)?;
         let client = ClientBuilder::new()
@@ -882,13 +872,9 @@ impl BigQueryClient {
     pub async fn new_with_key(
         project_id: BigQueryProjectId,
         sa_key: &str,
-        connection_pool_size: usize,
+        connection_pool_size: NonZeroU16,
     ) -> EtlResult<BigQueryClient> {
-        let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
-        // Gzip is CPU-bound on every append with no compression-level control,
-        // and rows can carry large text/JSON payloads.
-        let storage_config =
-            StorageApiConfig { connection_pool_size, max_inflight_requests, compression: false };
+        let storage_config = storage_api_config(connection_pool_size);
 
         let sa_key = parse_service_account_key(sa_key.as_bytes()).map_err(bq_error_to_etl_error)?;
         let client = ClientBuilder::new()
@@ -907,13 +893,9 @@ impl BigQueryClient {
     /// error if credentials are missing or invalid.
     pub async fn new_with_adc(
         project_id: BigQueryProjectId,
-        connection_pool_size: usize,
+        connection_pool_size: NonZeroU16,
     ) -> EtlResult<BigQueryClient> {
-        let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
-        // Gzip is CPU-bound on every append with no compression-level control,
-        // and rows can carry large text/JSON payloads.
-        let storage_config =
-            StorageApiConfig { connection_pool_size, max_inflight_requests, compression: false };
+        let storage_config = storage_api_config(connection_pool_size);
 
         let client = ClientBuilder::new()
             .with_storage_config(storage_config)
@@ -933,13 +915,9 @@ impl BigQueryClient {
         project_id: BigQueryProjectId,
         secret: S,
         persistent_file_path: P,
-        connection_pool_size: usize,
+        connection_pool_size: NonZeroU16,
     ) -> EtlResult<BigQueryClient> {
-        let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
-        // Gzip is CPU-bound on every append with no compression-level control,
-        // and rows can carry large text/JSON payloads.
-        let storage_config =
-            StorageApiConfig { connection_pool_size, max_inflight_requests, compression: false };
+        let storage_config = storage_api_config(connection_pool_size);
 
         let client = ClientBuilder::new()
             .with_storage_config(storage_config)
@@ -1405,7 +1383,6 @@ impl BigQueryClient {
                     retry_delay = (retry_delay * 2).min(STORAGE_WRITE_MAX_RETRY_DELAY);
                     attempt += 1;
                 }
-                AppendProcessingResult::Error(error) => return Err(error),
             }
         }
     }
@@ -1460,7 +1437,7 @@ impl BigQueryClient {
                     });
                 }
 
-                return Ok(AppendProcessingResult::Error(bq_error_to_etl_error(error)));
+                return Err(bq_error_to_etl_error(error));
             }
         };
 
@@ -1523,7 +1500,7 @@ impl BigQueryClient {
         }
 
         if !errors.is_empty() {
-            return Ok(AppendProcessingResult::Error(errors.into()));
+            return Err(errors.into());
         }
 
         if retryable_request_details.iter().any(Option::is_some) {
@@ -1742,13 +1719,17 @@ mod tests {
         let document = serde_json::to_string(SERVICE_ACCOUNT_DOCUMENT).unwrap();
         let file = tempfile::NamedTempFile::new().unwrap();
         tokio::fs::write(file.path(), &document).await.unwrap();
-        let inline = BigQueryClient::new_with_key("placeholder-project".to_owned(), &document, 1)
-            .await
-            .unwrap_err();
+        let inline = BigQueryClient::new_with_key(
+            "placeholder-project".to_owned(),
+            &document,
+            NonZeroU16::MIN,
+        )
+        .await
+        .unwrap_err();
         let from_file = BigQueryClient::new_with_key_path(
             "placeholder-project".to_owned(),
             file.path().to_str().unwrap(),
-            1,
+            NonZeroU16::MIN,
         )
         .await
         .unwrap_err();
@@ -1783,7 +1764,7 @@ mod tests {
         let error = BigQueryClient::new_with_key_path(
             "placeholder-project".to_owned(),
             path.to_str().unwrap(),
-            1,
+            NonZeroU16::MIN,
         )
         .await
         .unwrap_err();
@@ -2255,15 +2236,28 @@ mod tests {
         assert!(retryable_storage_write_schema_update_detail(&error).is_none());
     }
 
+    /// Keeps equal jitter within bounds for zero, fractional, and capped
+    /// delays.
     #[test]
     fn retry_jitter_stays_within_delay_bounds() {
-        let delay = Duration::from_secs(10);
+        for delay in [
+            Duration::ZERO,
+            Duration::from_nanos(1),
+            Duration::from_nanos(2),
+            Duration::from_nanos(3),
+            Duration::from_nanos(999_999_999),
+            STORAGE_WRITE_RETRY_DELAY,
+            Duration::new(1, 1),
+            Duration::from_secs(10),
+            STORAGE_WRITE_MAX_RETRY_DELAY - Duration::from_nanos(1),
+            STORAGE_WRITE_MAX_RETRY_DELAY,
+        ] {
+            for _ in 0..100 {
+                let jittered_delay = retry_delay_with_jitter(delay);
 
-        for _ in 0..100 {
-            let jittered_delay = retry_delay_with_jitter(delay);
-
-            assert!(jittered_delay >= Duration::from_secs(5));
-            assert!(jittered_delay <= delay);
+                assert!(jittered_delay >= delay / 2);
+                assert!(jittered_delay <= delay);
+            }
         }
     }
 

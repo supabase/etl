@@ -1528,9 +1528,9 @@ pub struct MergeAdjacentFilesMaintenanceConfig {
     /// Whether merge-adjacent-files is enabled.
     pub enabled: bool,
     /// Maximum compacted output files per table.
-    pub max_compacted_files: u32,
+    pub max_compacted_files: u16,
     /// Maximum tables selected in one run.
-    pub max_tables_per_run: u32,
+    pub max_tables_per_run: u16,
     /// Target file size used during compaction.
     pub target_file_size: String,
 }
@@ -1544,7 +1544,7 @@ pub struct RewriteDataFilesMaintenanceConfig {
     /// table.
     pub min_active_data_files: i64,
     /// Maximum tables selected in one run.
-    pub max_tables_per_run: u32,
+    pub max_tables_per_run: u16,
 }
 
 /// Snapshot-expiration operation config.
@@ -2277,7 +2277,7 @@ async fn run_replay_helper_cleanup(
     metadata_pg_pool: &DuckLakeMetadataPool,
     metadata_schema: &str,
     table_names: &[DuckLakeMaintenanceTableName],
-    max_compacted_files: u32,
+    max_compacted_files: u16,
     table_namespace: Option<&str>,
 ) -> EtlResult<ReplayHelperCleanupOutcome> {
     let mut replay_epoch_state = load_replay_epoch_state(metadata_pg_pool, metadata_schema).await?;
@@ -2366,8 +2366,9 @@ async fn select_merge_tables(
     metadata_schema: &str,
     table_names: &[DuckLakeMaintenanceTableName],
     target_file_size_bytes: Option<i64>,
-    max_tables_per_run: u32,
+    max_tables_per_run: u16,
 ) -> EtlResult<Vec<DuckLakeMaintenanceTableName>> {
+    let max_tables_per_run = usize::from(max_tables_per_run);
     let mut selected = Vec::new();
     for table_name in table_names {
         if table_name.is_internal_helper() {
@@ -2400,7 +2401,7 @@ async fn select_merge_tables(
                 "ducklake merge-adjacent-files table skipped"
             );
         }
-        if selected.len() >= max_tables_per_run as usize {
+        if selected.len() >= max_tables_per_run {
             break;
         }
     }
@@ -2430,8 +2431,9 @@ async fn select_rewrite_tables(
     metadata_schema: &str,
     table_names: &[DuckLakeMaintenanceTableName],
     min_active_data_files: i64,
-    max_tables_per_run: u32,
+    max_tables_per_run: u16,
 ) -> EtlResult<Vec<DuckLakeMaintenanceTableName>> {
+    let max_tables_per_run = usize::from(max_tables_per_run);
     let mut selected = Vec::new();
     for table_name in table_names {
         if table_name.is_internal_helper() {
@@ -2464,7 +2466,7 @@ async fn select_rewrite_tables(
                 "ducklake rewrite-data-files table skipped"
             );
         }
-        if selected.len() >= max_tables_per_run as usize {
+        if selected.len() >= max_tables_per_run {
             break;
         }
     }
@@ -2536,7 +2538,7 @@ pub fn flush_table_inlined_data(
 fn merge_adjacent_files(
     conn: &duckdb::Connection,
     table_name: &DuckLakeMaintenanceTableName,
-    max_compacted_files: u32,
+    max_compacted_files: u16,
 ) -> EtlResult<u64> {
     let sql = format!(
         "SELECT COALESCE(SUM(files_created), 0) FROM ducklake_merge_adjacent_files({}, {}, schema \

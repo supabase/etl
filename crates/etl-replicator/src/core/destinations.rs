@@ -260,6 +260,7 @@ mod clickhouse {
             )?
         };
         destination.validate_engine_support().await?;
+        destination.start_server_diagnostics();
 
         Ok(Pipeline::new(replicator_config.pipeline, store, destination))
     }

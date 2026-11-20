@@ -41,7 +41,7 @@ type ReplicatorStore = ErrorReportingStateStore<PostgresStore>;
 
 /// Replicator lifecycle updated by the runner and observed by health probes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(not(feature = "any-destination"), allow(dead_code))]
+#[cfg_attr(not(any(feature = "any-destination", test)), expect(dead_code))]
 pub(crate) enum ReplicatorState {
     /// Store, destination, or pipeline initialization is still in progress.
     Initializing,
@@ -64,7 +64,7 @@ fn spawn_health_server(
     let Some(health_config) = health_config else {
         return Ok(None);
     };
-    let listener = bind_listener(health_config.port)?;
+    let listener = bind_listener(health_config.port.get())?;
 
     debug!(
         configured_port = health_config.port,

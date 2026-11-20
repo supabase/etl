@@ -1,4 +1,4 @@
-use std::{error::Error, sync::Arc, time::Duration};
+use std::{error::Error, num::NonZeroU64, sync::Arc, time::Duration};
 
 use etl::{
     activity::{self, ActivityKind},
@@ -639,13 +639,13 @@ async fn pipeline_failure_returns_without_destination_teardown() {
     destination
         .inject_fault(
             FaultyOp::WriteEvents,
-            FaultAction::reject(ErrorKind::WithNoRetry, "Test apply failure"),
+            FaultAction::reject(ErrorKind::DestinationError, "Test apply failure"),
         )
         .await;
     insert_users_data(&mut database, &schema.users_schema().name, 2..=2).await;
 
     let error = wait_for_pipeline_error(&pipeline).await;
-    assert_eq!(error.kind(), ErrorKind::WithNoRetry);
+    assert_eq!(error.kind(), ErrorKind::DestinationError);
     assert!(!destination.shutdown_called().await);
     assert_eq!(pipeline.wait().await.unwrap_err().kind(), ErrorKind::InvalidState);
     assert_eq!(pipeline.start().await.unwrap_err().kind(), ErrorKind::InvalidState);
@@ -1340,7 +1340,7 @@ async fn table_copy_replicates_many_rows_with_parallel_connections() {
     .with_batch_config(BatchConfig {
         max_fill_ms: 1000,
         memory_budget_ratio: 0.2,
-        max_bytes: 8 * 1024 * 1024,
+        max_bytes: NonZeroU64::new(8 * 1024 * 1024).unwrap(),
     })
     .build();
 
@@ -1385,7 +1385,11 @@ async fn table_copy_waits_for_durable_terminal_barrier_after_accepted_write() {
         destination.clone(),
     )
     .with_max_copy_connections_per_table(1)
-    .with_batch_config(BatchConfig { max_fill_ms: 1000, memory_budget_ratio: 0.2, max_bytes: 1 })
+    .with_batch_config(BatchConfig {
+        max_fill_ms: 1000,
+        memory_budget_ratio: 0.2,
+        max_bytes: NonZeroU64::MIN,
+    })
     .build();
 
     // Arm notifications before starting because they only observe future
@@ -1995,9 +1999,23 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
         database.create_table(table_2.clone(), true, &[("value", "int4 not null")]).await.unwrap();
     database.insert_values(table_2.clone(), &["value"], &[&1_i32]).await.unwrap();
 
-    // Wait for the events to come in from the new table to make sure the
-    // pipeline reacts to them gracefully even if they are not replicated.
-    sleep(Duration::from_secs(2)).await;
+    // A later marker on the ready table proves apply consumed the new table's
+    // WAL.
+    let marker_name = "apply_progress_marker";
+    let marker_notify = destination
+        .notify_on_events(move |events| {
+            events.iter().any(|event| {
+                matches!(event, Event::Insert(insert)
+                    if insert.replicated_table_schema.id() == table_1_id
+                        && matches!(insert.table_row.values().get(1), Some(Cell::String(name))
+                            if name == marker_name))
+            })
+        })
+        .await;
+
+    database.insert_values(table_1.clone(), &["name"], &[&marker_name]).await.unwrap();
+
+    marker_notify.notified().await;
 
     // Shutdown and verify no errors occurred.
     pipeline.shutdown_and_wait().await.unwrap();
@@ -2014,7 +2032,7 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
     let events = destination.get_events().await;
     let grouped_events = group_events_by_type_and_table_id(&events);
     let insert_events = grouped_events.get(&(EventType::Insert, table_1_id)).unwrap();
-    assert_eq!(insert_events.len(), 1);
+    assert_eq!(insert_events.len(), 2);
 
     // We restart the pipeline and verify that the new table is now processed.
     let mut pipeline = create_pipeline(

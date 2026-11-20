@@ -12,6 +12,7 @@ use std::{
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream},
+    sync::Notify,
     task::JoinSet,
 };
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
@@ -22,6 +23,8 @@ use url::Url;
 struct ProtocolStats {
     violations: AtomicUsize,
     preparations: AtomicUsize,
+    /// Wakes waiters after each statement preparation.
+    preparation_observed: Notify,
     replay_epoch_queries: AtomicUsize,
     /// Foreground layout reads observed on pooled connections.
     layout_queries: AtomicUsize,
@@ -96,6 +99,19 @@ impl TransactionPoolerGuard {
         self.stats.preparations.load(Ordering::Relaxed)
     }
 
+    /// Waits until at least one statement is prepared through the pooled
+    /// endpoint.
+    pub async fn wait_for_prepared_query(&self) {
+        let notified = self.stats.preparation_observed.notified();
+        tokio::pin!(notified);
+        // Register before checking so a preparation between the check and the
+        // wait still wakes this task.
+        notified.as_mut().enable();
+        if self.prepared_queries() == 0 {
+            notified.await;
+        }
+    }
+
     /// Returns the number of pooled statements accessing replay-epoch state.
     pub fn replay_epoch_queries(&self) -> usize {
         self.stats.replay_epoch_queries.load(Ordering::Relaxed)
@@ -141,6 +157,7 @@ async fn forward_messages(
         let body = read_body(&mut reader).await?;
         if !from_server && tag == b'P' {
             stats.preparations.fetch_add(1, Ordering::Relaxed);
+            stats.preparation_observed.notify_waiters();
             let mut fields = body[4..].split(|byte| *byte == 0);
             let _statement_name = fields.next();
             if let Some(sql) = fields.next() {

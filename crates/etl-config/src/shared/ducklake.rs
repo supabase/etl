@@ -1,6 +1,6 @@
 //! Typed DuckLake partition specifications shared by the API and replicator.
 
-use std::collections::HashSet;
+use std::{collections::HashSet, num::NonZeroU32};
 
 use serde::{Deserialize, Serialize};
 use tokio_postgres::types::Type;
@@ -28,7 +28,8 @@ pub enum DuckLakePartitionTransform {
     Bucket {
         /// Positive number of buckets, bounded by DuckLake's signed integer
         /// argument.
-        count: u32,
+        #[cfg_attr(feature = "utoipa", schema(value_type = u32))]
+        count: NonZeroU32,
     },
 }
 
@@ -185,7 +186,7 @@ impl Validate for DuckLakeTablePartitioningConfig {
                     });
                 }
                 if let DuckLakePartitionTransform::Bucket { count } = key.transform
-                    && (count == 0 || i32::try_from(count).is_err())
+                    && i32::try_from(count.get()).is_err()
                 {
                     return Err(ValidationError::InvalidFieldValue {
                         field,
@@ -215,15 +216,18 @@ mod tests {
         ] {
             assert!(serde_json::from_value::<DuckLakePartitionTransform>(transform).is_err());
         }
-        for count in [0, u32::MAX] {
-            let config: DuckLakeTablePartitioningConfig = serde_json::from_value(json!({
+        let bucket = |count: u32| {
+            serde_json::from_value::<DuckLakeTablePartitioningConfig>(json!({
                 "tables": [{"schema": "public", "table": "events", "partition_by": [
                     {"column": "id", "transform": {"kind": "bucket", "count": count}}
                 ]}]
             }))
-            .unwrap();
-            assert!(config.validate().is_err());
-        }
+        };
+        // Zero cannot be represented, so it fails while deserializing.
+        assert!(bucket(0).is_err());
+        // Counts beyond DuckLake's signed integer argument fail validation.
+        assert!(bucket(u32::MAX).unwrap().validate().is_err());
+        bucket(i32::MAX.cast_unsigned()).unwrap().validate().unwrap();
         let config: DuckLakeTablePartitioningConfig = serde_json::from_value(json!({
             "tables": [{"schema": "public", "table": "events", "partition_by": [
                 {"column": "id", "transform": {"kind": "identity"}},

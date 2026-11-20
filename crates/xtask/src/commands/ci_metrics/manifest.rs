@@ -659,6 +659,7 @@ mod tests {
             "schema_version": 1,
             "kind": "test",
             "coverage": false,
+            "property_budget_secs": 300,
             "github": { "repository": REPO, "run_id": RUN_ID, "run_attempt": 1, "job_id": JOB_ID },
             "tests": [
                 { "binary": "etl::main", "name": "replication::copy", "status": "passed", "duration_ms": 1200 },
@@ -675,6 +676,7 @@ mod tests {
     fn parses_producer_test_manifest() {
         let manifest = parse_tests(&test_manifest_json()).unwrap();
         assert!(!manifest.coverage());
+        assert_eq!(manifest.property_budget_secs(), Some(300));
         assert_eq!(manifest.github().run_attempt(), 1);
         let tests: Vec<_> = manifest
             .tests()
@@ -688,6 +690,14 @@ mod tests {
                 ("xtask::bin/xtask", "tests::plan", "failed", 3),
             ]
         );
+    }
+
+    /// Manifests uploaded before the budget field existed still parse.
+    #[test]
+    fn parses_test_manifest_without_property_budget() {
+        let mut manifest = test_manifest_json();
+        manifest.as_object_mut().unwrap().remove("property_budget_secs");
+        assert_eq!(parse_tests(&manifest).unwrap().property_budget_secs(), None);
     }
 
     #[test]
@@ -712,6 +722,8 @@ mod tests {
     fn rejects_malformed_test_manifest() {
         for (pointer, value) in [
             ("/github/run_attempt", json!(0)),
+            ("/property_budget_secs", json!(-1)),
+            ("/property_budget_secs", json!(5_000_000_000_u64)),
             ("/tests/0/status", json!("skipped")),
             ("/tests/0/duration_ms", json!(-1)),
             ("/tests/0/duration_ms", json!(1.5)),

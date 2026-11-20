@@ -274,8 +274,6 @@ pub enum Event {
     /// Relation (schema) event notifying about table schema and replication
     /// mask.
     Relation(RelationEvent),
-    /// Unsupported event type that cannot be processed.
-    Unsupported,
 }
 
 impl Event {
@@ -299,7 +297,7 @@ impl Event {
             Event::Delete(event) => event.replicated_table_schema.id() == *table_id,
             Event::Truncate(event) => event.truncated_tables.iter().any(|s| s.id() == *table_id),
             Event::Relation(event) => event.replicated_table_schema.id() == *table_id,
-            _ => false,
+            Event::Begin(_) | Event::Commit(_) => false,
         }
     }
 }
@@ -307,7 +305,7 @@ impl Event {
 impl SizeHint for Event {
     fn size_hint(&self) -> usize {
         let owned_heap_bytes = match self {
-            Self::Begin(_) | Self::Commit(_) | Self::Relation(_) | Self::Unsupported => 0,
+            Self::Begin(_) | Self::Commit(_) | Self::Relation(_) => 0,
             Self::Insert(event) => owned_heap_size_hint(&event.table_row),
             Self::Update(event) => {
                 let old_row_heap_bytes =
@@ -335,9 +333,13 @@ impl SizeHint for Event {
 /// which identifies work within one snapshot attempt and does not order row
 /// versions.
 ///
+/// Positions order by commit LSN first, then transaction-local ordinal. This
+/// ordering is meaningful within the same replication stream and replay epoch;
+/// it does not establish comparability across unrelated pipelines or epochs.
+///
 /// Destinations choose their own storage and wire representation instead of
 /// relying on a generic string encoding for this domain value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct EventPosition {
     /// Commit LSN identifying transaction order across transactions.
     pub commit_lsn: PgLsn,
@@ -383,8 +385,6 @@ pub enum EventType {
     Relation,
     /// Table truncation operation.
     Truncate,
-    /// Unsupported or unknown event.
-    Unsupported,
 }
 
 impl fmt::Display for EventType {
@@ -397,7 +397,6 @@ impl fmt::Display for EventType {
             Self::Delete => write!(f, "Delete"),
             Self::Relation => write!(f, "Relation"),
             Self::Truncate => write!(f, "Truncate"),
-            Self::Unsupported => write!(f, "Unsupported"),
         }
     }
 }
@@ -412,7 +411,6 @@ impl From<&Event> for EventType {
             Event::Delete(_) => EventType::Delete,
             Event::Truncate(_) => EventType::Truncate,
             Event::Relation(_) => EventType::Relation,
-            Event::Unsupported => EventType::Unsupported,
         }
     }
 }
@@ -422,6 +420,9 @@ impl From<Event> for EventType {
         (&event).into()
     }
 }
+
+#[cfg(kani)]
+mod verification;
 
 #[cfg(test)]
 mod tests {
@@ -444,6 +445,32 @@ mod tests {
         );
 
         ReplicatedTableSchema::all(Arc::new(table_schema))
+    }
+
+    /// Native ordering and packed CDC versions agree at unsigned boundaries.
+    #[test]
+    fn event_position_order_matches_packed_cdc_version() {
+        let positions = [
+            (0, 0),
+            (0, 1),
+            (0, u64::MAX),
+            (1, 0),
+            ((1 << 63) - 1, u64::MAX),
+            (1 << 63, 0),
+            (1 << 63, u64::MAX),
+            (u64::MAX, 0),
+            (u64::MAX, u64::MAX),
+        ]
+        .map(|(lsn, ordinal)| EventPosition::new(PgLsn::from(lsn), ordinal));
+
+        for (left_index, left) in positions.iter().enumerate() {
+            for (right_index, right) in positions.iter().enumerate() {
+                let expected = left_index.cmp(&right_index);
+
+                assert_eq!(left.cmp(right), expected);
+                assert_eq!(left.as_u128().cmp(&right.as_u128()), expected);
+            }
+        }
     }
 
     #[test]
@@ -510,7 +537,6 @@ mod tests {
 
         let relation = Event::Relation(RelationEvent { replicated_table_schema: schema });
         assert_eq!(relation.size_hint(), size_of::<Event>());
-        assert_eq!(Event::Unsupported.size_hint(), size_of::<Event>());
 
         let truncated_tables = Vec::with_capacity(8);
         let truncated_tables_capacity = truncated_tables.capacity();

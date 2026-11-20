@@ -140,28 +140,6 @@ impl Evaluation {
     }
 }
 
-/// A syncing table as the apply worker observed it.
-enum ObservedTable {
-    /// The table's sync worker is running.
-    Active(ActiveTable),
-    /// No sync worker is running; the state is the stored one.
-    Idle(TableState),
-}
-
-/// Observes a syncing table, locking its worker's state when one is running.
-async fn observe_table<S, D>(
-    ctx: &ApplyWorkerContext<S, D>,
-    table_id: TableId,
-    stored_state: TableState,
-) -> ObservedTable {
-    match ctx.pool.get_active_worker_state(table_id).await {
-        Some(worker_state) => {
-            ObservedTable::Active(ActiveTable::lock(table_id, worker_state).await)
-        }
-        None => ObservedTable::Idle(stored_state),
-    }
-}
-
 /// Returns syncing tables with the persisted apply checkpoint.
 ///
 /// The checkpoint is not read when no table is syncing. This apply loop
@@ -340,22 +318,21 @@ where
         let evaluation =
             Evaluation { trigger: Trigger::AfterCommit, table_id, current_lsn, readiness: None };
 
-        let exit_intent = match observe_table(ctx, table_id, stored_state).await {
-            ObservedTable::Active(table) => {
+        let exit_intent =
+            if let Some(worker_state) = ctx.pool.get_active_worker_state(table_id).await {
+                let table = ActiveTable::lock(table_id, &worker_state).await;
                 let table_state = table.table_state();
                 let action = active_after_commit(&table_state, current_lsn);
                 evaluation.log_active(&table_state, &action);
 
                 table.execute(action, &ctx.store, &ctx.shutdown_token, activity_handle).await?
-            }
-            ObservedTable::Idle(table_state) => {
-                let action = idle_after_commit(&table_state);
-                evaluation.log_idle(&table_state, &action);
+            } else {
+                let action = idle_after_commit(&stored_state);
+                evaluation.log_idle(&stored_state, &action);
                 execute_idle_action(ctx, table_id, action, table_decoding_states).await?;
 
                 None
-            }
-        };
+            };
 
         if exit_intent.is_some() {
             return Ok(exit_intent);
@@ -406,21 +383,19 @@ where
             readiness: Some(readiness),
         };
 
-        match observe_table(ctx, table_id, stored_state).await {
-            ObservedTable::Active(table) => {
-                let table_state = table.table_state();
-                let ready_proof = active_after_flush(&table_state, &readiness);
-                evaluation.log_active(&table_state, &ready_proof);
+        if let Some(worker_state) = ctx.pool.get_active_worker_state(table_id).await {
+            let table = ActiveTable::lock(table_id, &worker_state).await;
+            let table_state = table.table_state();
+            let ready_proof = active_after_flush(&table_state, &readiness);
+            evaluation.log_active(&table_state, &ready_proof);
 
-                if let Some(proof) = ready_proof {
-                    table.promote_to_ready(proof, &ctx.store).await?;
-                }
+            if let Some(proof) = ready_proof {
+                table.promote_to_ready(proof, &ctx.store).await?;
             }
-            ObservedTable::Idle(table_state) => {
-                let action = idle_after_flush(&table_state, &readiness);
-                evaluation.log_idle(&table_state, &action);
-                execute_idle_action(ctx, table_id, action, table_decoding_states).await?;
-            }
+        } else {
+            let action = idle_after_flush(&stored_state, &readiness);
+            evaluation.log_idle(&stored_state, &action);
+            execute_idle_action(ctx, table_id, action, table_decoding_states).await?;
         }
     }
 
@@ -461,22 +436,21 @@ where
             readiness: Some(readiness),
         };
 
-        let exit_intent = match observe_table(ctx, table_id, stored_state).await {
-            ObservedTable::Active(table) => {
+        let exit_intent =
+            if let Some(worker_state) = ctx.pool.get_active_worker_state(table_id).await {
+                let table = ActiveTable::lock(table_id, &worker_state).await;
                 let table_state = table.table_state();
                 let action = active_when_quiescent(&table_state, &readiness);
                 evaluation.log_active(&table_state, &action);
 
                 table.execute(action, &ctx.store, &ctx.shutdown_token, activity_handle).await?
-            }
-            ObservedTable::Idle(table_state) => {
-                let action = idle_after_flush(&table_state, &readiness);
-                evaluation.log_idle(&table_state, &action);
+            } else {
+                let action = idle_after_flush(&stored_state, &readiness);
+                evaluation.log_idle(&stored_state, &action);
                 execute_idle_action(ctx, table_id, action, table_decoding_states).await?;
 
                 None
-            }
-        };
+            };
 
         if exit_intent.is_some() {
             return Ok(exit_intent);

@@ -8,7 +8,7 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, Weak},
+    sync::{Arc, Mutex, PoisonError, Weak},
     time::Duration,
 };
 
@@ -122,7 +122,7 @@ impl ReplicationLagMetrics {
     /// apply loop. Its high-water mark matches monotonic PostgreSQL feedback,
     /// rather than dropping back to an older flush when new work starts.
     pub(crate) fn update_progress(&self, received: PgLsn, safe: PgLsn) {
-        let mut progress = self.inner.lock().unwrap();
+        let mut progress = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
 
         progress.received = progress.received.max(u64::from(received));
         progress.safe = progress.safe.max(u64::from(safe));
@@ -277,7 +277,10 @@ impl ReplicationLagMonitor {
         worker: WorkerType,
         progress: ReplicationLagMetrics,
     ) -> ReplicationLagMetrics {
-        self.workers.lock().unwrap().insert(worker, Arc::downgrade(&progress.inner));
+        self.workers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(worker, Arc::downgrade(&progress.inner));
 
         progress
     }
@@ -285,13 +288,14 @@ impl ReplicationLagMonitor {
     /// Captures progress before the source query to avoid mixing future local
     /// frontiers with an earlier source head.
     fn snapshot(&self) -> Vec<WorkerSample> {
-        let mut workers = self.workers.lock().unwrap();
+        let mut workers = self.workers.lock().unwrap_or_else(PoisonError::into_inner);
         workers.retain(|_, registration| registration.strong_count() > 0);
 
         workers
             .iter()
             .filter_map(|(&worker, registration)| {
-                let progress = *registration.upgrade()?.lock().unwrap();
+                let progress =
+                    *registration.upgrade()?.lock().unwrap_or_else(PoisonError::into_inner);
                 Some(WorkerSample { worker, progress })
             })
             .collect()

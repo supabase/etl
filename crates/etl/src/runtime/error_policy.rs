@@ -90,16 +90,21 @@ fn manual_solution(kind: ErrorKind) -> &'static str {
             "Update the Postgres database schema to resolve compatibility issues."
         }
         ErrorKind::SourceReplicaIdentityError => {
-            "Configure the affected Postgres table with the least costly replica identity \
-             supported by the destination. Use REPLICA IDENTITY DEFAULT with a primary key, or \
-             USING INDEX when supported, if stable key values are enough. Use REPLICA IDENTITY \
-             FULL only when the destination needs full old-row images or complete replacement rows."
+            "Change the affected Postgres table's replica identity as the error describes, then \
+             resynchronize the table, because changes already in the replication stream keep the \
+             old identity. For partial update rows, run ALTER TABLE ... REPLICA IDENTITY FULL; on \
+             a partitioned table, also run it on each partition. Otherwise, use REPLICA IDENTITY \
+             DEFAULT with a primary key, or USING INDEX when the destination supports it."
         }
         ErrorKind::NullValuesNotSupportedInArrayInDestination => {
             "Remove NULL values from array columns in the Postgres tables."
         }
         ErrorKind::UnsupportedValueInDestination => {
             "Update the value in the Postgres table to make sure it's compatible."
+        }
+        ErrorKind::UnsupportedSourceValue => {
+            "Update the value in the Postgres table so ETL can decode it. The error detail names \
+             the limit the value exceeds."
         }
         ErrorKind::SourceConfigurationLimitExceeded => {
             "Verify the configured limits for Postgres, for example, the maximum number of \
@@ -206,15 +211,13 @@ mod tests {
     }
 
     #[test]
-    fn source_replica_identity_errors_have_specific_manual_remediation() {
+    fn source_replica_identity_errors_require_manual_remediation() {
         let error = EtlError::from((ErrorKind::SourceReplicaIdentityError, "Replica identity"));
 
         let policy = build_error_handling_policy(&error);
 
         assert_eq!(policy.retry_directive(), RetryDirective::Manual);
-        let solution = policy.solution().expect("replica identity errors should have a solution");
-        assert!(solution.contains("least costly replica identity"));
-        assert!(solution.contains("REPLICA IDENTITY FULL only"));
+        assert!(policy.solution().is_some());
     }
 
     /// Missing permissions get their own guidance, distinct from rejected

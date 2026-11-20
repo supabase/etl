@@ -189,7 +189,11 @@ identity.
 Postgres omits unchanged TOASTed (large) values from update rows. ETL fills
 them from the old row image, which only `REPLICA IDENTITY FULL` guarantees;
 when it cannot, it rejects the update instead of writing `NULL`. Use `FULL` for
-tables with large columns.
+tables with large columns. Before copying such a table, ETL logs a warning with
+the `alter table ... replica identity full;` statement, and the rejection error
+repeats it. PostgreSQL does not cascade the statement to partitions, so run it
+on each partition of a partitioned table. Changing the identity only affects
+later changes, so after a rejection, resynchronize the table.
 
 ## Upgrading existing tables
 
@@ -284,3 +288,32 @@ passing password flags to keep secrets out of process arguments.
 ## Metrics
 
 See [Metrics](./METRICS.md).
+
+## Diagnostic logs
+
+After the startup version check passes, a background task logs one
+`clickhouse server detected` line. Replication does not wait for it. Fields:
+
+- `deployment`: `cloud` when the server's `cloud_mode` setting is `1`,
+  `self_hosted` when it is `0`, and `unknown` when the setting is missing or
+  `system.settings` is unreadable.
+- `server_version`: the full `version()` string.
+- `server_uptime_secs`: `uptime()` of the replica that answered. A low value
+  right after an outage means that replica restarted.
+- `round_trip_ms`: wall time of that request, including any connection setup.
+
+Each failed INSERT statement logs `clickhouse insert statement failed` with
+its `query_id`. Look that ID up in the server's `system.query_log` to see
+whether a timed-out insert committed:
+
+```sql
+select event_time, type, written_rows, exception_code
+from system.query_log
+where query_id = '<query_id>'
+order by event_time;
+```
+
+`system.query_log` is local to each replica, and on a multi-replica service such
+as ClickHouse Cloud the load balancer picks which one answers. No rows from one
+replica proves nothing, so read every replica there:
+`clusterAllReplicas('default', system.query_log)`.

@@ -124,10 +124,35 @@
           };
         };
 
+        # Minimal shell for scripts/lock-contention.sh: the build toolchain,
+        # native build inputs, and PostgreSQL, without the dev tools that the
+        # default shell builds from source. mkShell also provides the linker
+        # environment (libiconv and the SDK on macOS).
+        lockContentionShell = pkgs.mkShell {
+          packages = [ buildToolchain pkgs.git pkgs.postgresql ] ++ nativeBuildDeps ++ buildDeps;
+        };
+
+        # `nix run .#lock-contention`: profiles tokio lock waits against a
+        # throwaway Postgres. The script builds from the working tree, so local
+        # changes are what get measured.
+        lock-contention = pkgs.writeShellApplication {
+          name = "lock-contention";
+          text = ''
+            exec nix develop "path:${self}#lock-contention" --command \
+              sh ${./scripts/lock-contention.sh} "$@"
+          '';
+        };
+
       in {
         packages = {
           default = etl-replicator;
           inherit etl-replicator;
+        };
+
+        apps.lock-contention = {
+          type = "app";
+          program = pkgs.lib.getExe lock-contention;
+          meta.description = "Profile tokio lock waits in a pipeline run against a throwaway Postgres";
         };
 
         devShells.default = pkgs.mkShell {
@@ -142,5 +167,7 @@
             export RUST_SRC_PATH=${devToolchain}/lib/rustlib/src/rust/library
           '';
         };
+
+        devShells.lock-contention = lockContentionShell;
       });
 }

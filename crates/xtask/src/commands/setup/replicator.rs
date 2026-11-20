@@ -479,7 +479,7 @@ impl Drop for ConfigEnvGuard {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use tempfile::TempDir;
 
     use super::*;
 
@@ -487,28 +487,17 @@ mod tests {
         ReplicatorSetup::for_destination(&InitConfig::from_env(), destination)
     }
 
-    fn unique_temp_dir(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "etl-xtask-{label}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-        ))
-    }
-
-    fn write_replicator_yaml(yaml: &str) -> PathBuf {
-        let directory = unique_temp_dir("replicator-config");
-        fs::create_dir_all(&directory).unwrap();
-        fs::write(directory.join("base.yaml"), REPLICATOR_BASE_YAML).unwrap();
-        fs::write(directory.join("dev.yaml"), yaml).unwrap();
+    fn write_replicator_yaml(yaml: &str) -> TempDir {
+        let directory = TempDir::new().unwrap();
+        fs::write(directory.path().join("base.yaml"), REPLICATOR_BASE_YAML).unwrap();
+        fs::write(directory.path().join("dev.yaml"), yaml).unwrap();
         directory
     }
 
     fn load_replicator_yaml(yaml: &str) -> ReplicatorConfig {
         let directory = write_replicator_yaml(yaml);
-        let loaded = load_local_replicator_config(&directory)
-            .expect("generated replicator config should load");
-        let _ = fs::remove_dir_all(&directory);
-        loaded
+        load_local_replicator_config(directory.path())
+            .expect("generated replicator config should load")
     }
 
     #[test]
@@ -556,8 +545,7 @@ mod tests {
     fn detect_replicator_destination_reads_generated_yaml() {
         let yaml = test_setup(DestinationPreset::ClickHouse).to_yaml();
         let directory = write_replicator_yaml(&yaml);
-        let detected = detect_replicator_destination(&directory).unwrap();
-        let _ = fs::remove_dir_all(&directory);
+        let detected = detect_replicator_destination(directory.path()).unwrap();
         assert_eq!(detected, DestinationPreset::ClickHouse);
     }
 
@@ -565,8 +553,7 @@ mod tests {
     fn replicator_config_has_placeholders_for_generated_bigquery() {
         let yaml = test_setup(DestinationPreset::BigQuery).to_yaml();
         let directory = write_replicator_yaml(&yaml);
-        let has_placeholders = replicator_config_has_placeholders(&directory).unwrap();
-        let _ = fs::remove_dir_all(&directory);
+        let has_placeholders = replicator_config_has_placeholders(directory.path()).unwrap();
         assert!(has_placeholders);
     }
 
@@ -574,8 +561,7 @@ mod tests {
     fn replicator_config_has_no_placeholders_for_clickhouse() {
         let yaml = test_setup(DestinationPreset::ClickHouse).to_yaml();
         let directory = write_replicator_yaml(&yaml);
-        let has_placeholders = replicator_config_has_placeholders(&directory).unwrap();
-        let _ = fs::remove_dir_all(&directory);
+        let has_placeholders = replicator_config_has_placeholders(directory.path()).unwrap();
         assert!(!has_placeholders);
     }
 
@@ -584,8 +570,7 @@ mod tests {
         let options = test_setup(DestinationPreset::ClickHouse);
         let directory =
             write_replicator_yaml(&options.to_yaml().replace("etl_testdata", "existing_database"));
-        let loaded = write_replicator_config_to(&directory, &options, false).unwrap();
-        let _ = fs::remove_dir_all(&directory);
+        let loaded = write_replicator_config_to(directory.path(), &options, false).unwrap();
 
         assert_eq!(loaded.pipeline.pg_connection.name, "existing_database");
     }

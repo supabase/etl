@@ -8,8 +8,8 @@ use etl::{
     data::{Cell, Date, OldTableRow, TableRow, Timestamp, UpdatedTableRow},
     destination::{
         Destination, DestinationTableMetadata, DestinationTableSchema, DestinationWriteStatus,
-        DropTableForCopyResult, TableCopyBatchId, WriteEventsDurability, WriteEventsResult,
-        WriteTableRowsResult,
+        DropTableForCopyResult, TableCopyBatchId, UpdateRowRequirement, WriteEventsDurability,
+        WriteEventsResult, WriteTableRowsResult,
     },
     error::{ErrorKind, EtlError, EtlResult, Retryability},
     etl_error,
@@ -17,14 +17,15 @@ use etl::{
     schema::{
         ColumnAlterationKind, ColumnMetadataChange, ColumnPresenceChangeReason, ColumnSchema,
         IdentityType, PgLsn, ReplicatedTableSchema, SchemaDiff, SchemaOperation, SchemaPlan,
-        TableId, TableName, Type, is_array_type,
+        TableId, TableName, Type, is_array_type, partial_update_remediation,
     },
     store::{SchemaStore, StateStore},
-    task::{TaskGroup, TaskRegistry},
+    task::{TaskGroup, TaskRegistry, abort_and_join},
 };
 use etl_config::shared::ClickHouseEngine;
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::OwnedMutexGuard;
+use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, warn};
 use url::Url;
 
@@ -34,7 +35,8 @@ use crate::{
         client::{
             ClickHouseClient, ClickHouseTableColumn, DdlKind, InsertRowsError, RowBinaryLayout,
         },
-        encoding::{ClickHouseValue, cell_to_clickhouse_value},
+        diagnostics::spawn_server_diagnostics,
+        encoding::{CdcColumns, ClickHouseRow, ensure_finite_temporals},
         metrics::{CDC_REPLICATION_PATH, COPY_REPLICATION_PATH, register_metrics},
         schema::{
             CDC_LSN_COLUMN_NAME, CDC_OPERATION_COLUMN_NAME, CDC_TX_ORDINAL_COLUMN_NAME,
@@ -79,12 +81,13 @@ enum CdcOperation {
     Delete,
 }
 
-impl std::fmt::Display for CdcOperation {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl CdcOperation {
+    /// Returns the value written to the MergeTree `cdc_operation` column.
+    fn as_str(self) -> &'static str {
         match self {
-            CdcOperation::Insert => write!(f, "INSERT"),
-            CdcOperation::Update => write!(f, "UPDATE"),
-            CdcOperation::Delete => write!(f, "DELETE"),
+            CdcOperation::Insert => "INSERT",
+            CdcOperation::Update => "UPDATE",
+            CdcOperation::Delete => "DELETE",
         }
     }
 }
@@ -117,36 +120,61 @@ struct ClickHouseRowsForUpdate {
     destination_updated_row: TableRow,
 }
 
-/// Converts a Postgres LSN into the ClickHouse CDC LSN value.
-fn cdc_lsn_to_clickhouse_value(lsn: PgLsn) -> ClickHouseValue {
-    ClickHouseValue::UInt64(u64::from(lsn))
-}
-
-/// Appends the trailing engine-specific CDC columns to the row encoding.
+/// Returns the trailing engine-specific CDC column values of a row.
 ///
 /// MergeTree: `cdc_operation` (String), `cdc_lsn` (UInt64 commit LSN), and
 /// `cdc_tx_ordinal` (UInt64 transaction ordinal). ReplacingMergeTree:
 /// `_etl_version` (UInt128 packed `EventPosition`) and `_etl_deleted` (UInt8
 /// tombstone flag).
-fn append_cdc_columns(
-    values: &mut Vec<ClickHouseValue>,
+fn cdc_columns(
     operation: CdcOperation,
     event_position: EventPosition,
     engine: ClickHouseEngine,
-) {
+) -> CdcColumns {
     match engine {
-        ClickHouseEngine::MergeTree => {
-            values.push(ClickHouseValue::String(operation.to_string()));
-            values.push(cdc_lsn_to_clickhouse_value(event_position.commit_lsn));
-            values.push(ClickHouseValue::UInt64(event_position.tx_ordinal));
-        }
-        ClickHouseEngine::ReplacingMergeTree => {
-            let version = event_position.as_u128();
-            values.push(ClickHouseValue::UInt128(version));
-            values
-                .push(ClickHouseValue::UInt8(u8::from(matches!(operation, CdcOperation::Delete))));
-        }
+        ClickHouseEngine::MergeTree => CdcColumns::MergeTree {
+            operation: operation.as_str(),
+            commit_lsn: u64::from(event_position.commit_lsn),
+            tx_ordinal: event_position.tx_ordinal,
+        },
+        ClickHouseEngine::ReplacingMergeTree => CdcColumns::ReplacingMergeTree {
+            version: event_position.as_u128(),
+            deleted: matches!(operation, CdcOperation::Delete),
+        },
     }
+}
+
+/// Builds a destination row from user cells and their CDC metadata.
+///
+/// Infinite dates and timestamps are rejected here, while the batch is
+/// prepared, so they fail it before any INSERT statement is sent.
+fn clickhouse_row(
+    cells: Vec<Cell>,
+    operation: CdcOperation,
+    event_position: EventPosition,
+    engine: ClickHouseEngine,
+) -> EtlResult<ClickHouseRow> {
+    ensure_finite_temporals(&cells)?;
+
+    Ok(ClickHouseRow { cells, cdc: cdc_columns(operation, event_position, engine) })
+}
+
+/// Builds the destination row for one initial-copy row.
+///
+/// Initial-copy rows are tagged as INSERT with LSN 0 / tx_ordinal 0 (sentinel
+/// meaning "this row pre-dates the streaming cursor"). For ReplacingMergeTree,
+/// any streaming event then wins on FINAL because its packed `_etl_version` is
+/// non-zero.
+pub(super) fn clickhouse_copy_row(
+    table_row: TableRow,
+    engine: ClickHouseEngine,
+) -> EtlResult<ClickHouseRow> {
+    clickhouse_row(
+        table_row.into_values(),
+        CdcOperation::Insert,
+        EventPosition::new(PgLsn::from(0), 0),
+        engine,
+    )
 }
 
 /// Returns the ClickHouse columns ETL expects for a replicated schema under the
@@ -667,9 +695,9 @@ pub struct ClickHouseClientConfig {
     pub schema_query_timeout: Duration,
     /// Server-side budget for DDL (CREATE / ALTER / DROP / RENAME / TRUNCATE).
     pub ddl_timeout: Duration,
-    /// Server-side budget per INSERT statement. Wraps `insert.end().await`,
-    /// which is the only awaited network step inside `insert_rows`; each
-    /// flushed chunk therefore gets its own deadline.
+    /// Server-side budget for each network step of an INSERT statement:
+    /// sending one chunk of the body, or sending the last chunk and waiting
+    /// for ClickHouse to commit the statement.
     pub insert_timeout: Duration,
     /// Slack added to the server-side budget to derive the client-side
     /// `tokio::time::timeout`.
@@ -782,6 +810,12 @@ pub struct ClickHouseDestination<S> {
     tasks: TaskRegistry,
     /// Per-table ordering of event batches; see [`EventBatchFences`].
     fences: Arc<EventBatchFences>,
+    /// One-shot server diagnostics started by
+    /// [`ClickHouseDestination::start_server_diagnostics`].
+    ///
+    /// Kept apart from `tasks` so diagnostics never fail writes or delay
+    /// table resets. Aborted on shutdown or when the last clone drops.
+    diagnostics: Arc<Mutex<Option<AbortOnDropHandle<()>>>>,
 }
 
 // Manual impl: `S` sits behind `Arc`, so cloning must not require `S: Clone`.
@@ -791,6 +825,7 @@ impl<S> Clone for ClickHouseDestination<S> {
             writer: self.writer.clone(),
             tasks: self.tasks.clone(),
             fences: Arc::clone(&self.fences),
+            diagnostics: Arc::clone(&self.diagnostics),
         }
     }
 }
@@ -900,7 +935,7 @@ impl<S> Clone for DestinationWriter<S> {
 
 /// Returns the id of every table that `events` write, in ascending order.
 ///
-/// Transaction markers and unsupported events touch no table.
+/// Transaction markers touch no table.
 fn batch_table_ids(events: &[Event]) -> BTreeSet<TableId> {
     let mut table_ids = BTreeSet::new();
     for event in events {
@@ -920,7 +955,7 @@ fn batch_table_ids(events: &[Event]) -> BTreeSet<TableId> {
             Event::Truncate(truncate) => {
                 table_ids.extend(truncate.truncated_tables.iter().map(ReplicatedTableSchema::id));
             }
-            Event::Begin(_) | Event::Commit(_) | Event::Unsupported => {}
+            Event::Begin(_) | Event::Commit(_) => {}
         }
     }
     table_ids
@@ -1038,6 +1073,7 @@ where
             },
             tasks: TaskRegistry::new(),
             fences: Arc::new(EventBatchFences::new()),
+            diagnostics: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -1062,9 +1098,19 @@ where
             },
             || self.writer.client.server_version(),
         )
-        .await
-        .map_err(|failure| failure.last_error)?;
+        .await?;
         ensure_engine_supported(self.writer.inserter_config.engine, server_version)
+    }
+
+    /// Starts a background task that logs the server's version, uptime,
+    /// request round trip, and deployment kind.
+    ///
+    /// Returns at once: replication does not wait for the task, and its
+    /// failures are logged only. Calling it again replaces and aborts the
+    /// previous task.
+    pub fn start_server_diagnostics(&self) {
+        let diagnostics = spawn_server_diagnostics(self.writer.client.clone());
+        *self.diagnostics.lock() = Some(diagnostics);
     }
 
     /// Writes an initial-copy batch directly to the destination table,
@@ -1551,27 +1597,9 @@ where
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
         let engine = self.inserter_config.engine;
-        let rows: Vec<Vec<ClickHouseValue>> = table_rows
+        let rows = table_rows
             .into_iter()
-            .map(|table_row| {
-                let mut values: Vec<ClickHouseValue> = table_row
-                    .into_values()
-                    .into_iter()
-                    .map(cell_to_clickhouse_value)
-                    .collect::<EtlResult<Vec<_>>>()?;
-                // Initial-copy rows are tagged as INSERT with LSN 0 /
-                // tx_ordinal 0 (sentinel meaning "this row pre-dates the
-                // streaming cursor"). For ReplacingMergeTree, any streaming
-                // event then wins on FINAL because its packed `_etl_version` is
-                // non-zero.
-                append_cdc_columns(
-                    &mut values,
-                    CdcOperation::Insert,
-                    EventPosition::new(PgLsn::from(0), 0),
-                    engine,
-                );
-                Ok(values)
-            })
+            .map(|table_row| clickhouse_copy_row(table_row, engine))
             .collect::<EtlResult<_>>()?;
 
         self.client
@@ -2082,15 +2110,10 @@ where
             let max_bytes = self.inserter_config.max_bytes_per_insert;
 
             tasks.spawn(async move {
-                let rows: Vec<Vec<ClickHouseValue>> = rows
+                let rows = rows
                     .into_iter()
                     .map(|PendingRow { operation, event_position, cells }| {
-                        let mut values: Vec<ClickHouseValue> = cells
-                            .into_iter()
-                            .map(cell_to_clickhouse_value)
-                            .collect::<EtlResult<Vec<_>>>()?;
-                        append_cdc_columns(&mut values, operation, event_position, engine);
-                        Ok(values)
+                        clickhouse_row(cells, operation, event_position, engine)
                     })
                     .collect::<EtlResult<_>>()?;
 
@@ -2403,8 +2426,9 @@ fn clickhouse_full_update_row(
             format!(
                 "Table '{}' emitted a partial update row: some column values could not be \
                  reconstructed. Writing it would record NULL for the missing columns and \
-                 misrepresent the source.",
-                replicated_table_schema.name()
+                 misrepresent the source. {}",
+                replicated_table_schema.name(),
+                partial_update_remediation(replicated_table_schema.name())
             )
         ));
     };
@@ -2739,8 +2763,21 @@ where
         etl_config::shared::DestinationKind::ClickHouse.as_str()
     }
 
+    fn update_row_requirement() -> UpdateRowRequirement {
+        // Every engine stores an update as a complete new row, so the update
+        // must carry every column.
+        UpdateRowRequirement::RequiresFullRows
+    }
+
     async fn shutdown(&self) -> EtlResult<()> {
-        self.tasks.shutdown().await
+        self.tasks.shutdown().await?;
+
+        let diagnostics = self.diagnostics.lock().take();
+        if let Some(diagnostics) = diagnostics {
+            abort_and_join(diagnostics).await?;
+        }
+
+        Ok(())
     }
 
     // The trait methods below use `?` only for lifecycle failures raised
@@ -2884,7 +2921,7 @@ mod tests {
 
     use super::*;
     use crate::clickhouse::{
-        encoding::{ColumnEncoding, encode_to_row_binary},
+        encoding::{ColumnEncoding, encode_cell, encode_row},
         schema::{
             CDC_LSN_COLUMN_NAME, CDC_OPERATION_COLUMN_NAME, CDC_TX_ORDINAL_COLUMN_NAME,
             ETL_DELETED_COLUMN_NAME, ETL_VERSION_COLUMN_NAME, clickhouse_column_type,
@@ -2912,8 +2949,8 @@ mod tests {
 
     /// Every event kind that writes a table contributes that table to the
     /// fence set, including each table of a multi-table truncate, while
-    /// transaction markers and unsupported events contribute nothing. The
-    /// events name tables out of order; the result is ascending regardless.
+    /// transaction markers contribute nothing. The events name tables out of
+    /// order; the result is ascending regardless.
     #[test]
     fn batch_table_ids_cover_every_written_table() {
         let lsn = PgLsn::from(100);
@@ -2956,7 +2993,6 @@ mod tests {
                 end_lsn: lsn,
                 timestamp: 0,
             }),
-            Event::Unsupported,
         ];
 
         let table_ids: Vec<TableId> = batch_table_ids(&events).into_iter().collect();
@@ -3551,6 +3587,8 @@ mod tests {
         // THEN: The partial-row error precedes replica identity validation.
         assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
         assert!(error.to_string().contains("partial update row"));
+        // AND: It tells the user the statement that fixes the source table.
+        assert!(error.to_string().contains("`alter table public.users replica identity full;`"));
     }
 
     /// A full update row carrying a NULL array encodes as an empty array.
@@ -3570,14 +3608,8 @@ mod tests {
             UpdatedTableRow::Full(TableRow::new(vec![Cell::Null])),
         )
         .unwrap();
-        let values = row
-            .into_values()
-            .into_iter()
-            .map(cell_to_clickhouse_value)
-            .collect::<EtlResult<Vec<_>>>()
-            .unwrap();
         let mut buf = Vec::new();
-        encode_to_row_binary(values, &[ColumnEncoding::Array], &mut buf).unwrap();
+        encode_cell(&row.values()[0], ColumnEncoding::Array, &mut String::new(), &mut buf).unwrap();
 
         // THEN: RowBinary carries a zero-length array.
         assert_eq!(buf, [0x00]);
@@ -4006,14 +4038,26 @@ mod tests {
         assert_eq!(insertion_index, 1);
     }
 
+    /// A MergeTree delete at the largest LSN carries the full `u64` on the
+    /// wire, after the operation name and before the transaction ordinal.
     #[test]
-    fn cdc_lsn_value_preserves_full_u64_range() {
-        let value = cdc_lsn_to_clickhouse_value(PgLsn::from(u64::MAX));
+    fn merge_tree_trailer_carries_full_lsn_range() {
+        let row = clickhouse_row(
+            Vec::new(),
+            CdcOperation::Delete,
+            EventPosition::new(PgLsn::from(u64::MAX), 7),
+            ClickHouseEngine::MergeTree,
+        )
+        .unwrap();
+        let mut buf = Vec::new();
 
-        match value {
-            ClickHouseValue::UInt64(lsn) => assert_eq!(lsn, u64::MAX),
-            _ => panic!("expected UInt64 CDC LSN value"),
-        }
+        encode_row(&row, &[ColumnEncoding::Required; 3], &mut String::new(), &mut buf).unwrap();
+
+        let mut expected = vec![6];
+        expected.extend_from_slice(b"DELETE");
+        expected.extend_from_slice(&[0xff; 8]);
+        expected.extend_from_slice(&7u64.to_le_bytes());
+        assert_eq!(buf, expected);
     }
 
     #[test]

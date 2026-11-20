@@ -29,7 +29,7 @@ ducklake = [
     "dep:duckdb",
     "dep:etl-maintenance",
     "etl-maintenance/ducklake",
-    "dep:humantime",
+    "dep:jiff",
     "dep:metrics",
     "dep:parking_lot",
     "dep:pg_escape",
@@ -59,6 +59,7 @@ bigquery = [
 ]
 clickhouse = [
     "dep:thiserror",
+    "dep:bytes",
     "dep:clickhouse",
     "dep:metrics",
     "dep:hyper-rustls",
@@ -95,6 +96,8 @@ snowflake = [
 ]
 # Additional dependencies for destination test helpers.
 test-utils = ["dep:async-trait", "dep:uuid", "etl/test-utils"]
+# Benchmark-only entrypoints for internal hot paths.
+benchmarking = []
 
 [dependencies]
 
@@ -110,9 +113,9 @@ etl-config = { workspace = true }
 etl-maintenance = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 gcp-bigquery-client = { workspace = true, optional = true, features = ["rust-tls", "aws-lc-rs"] }
-humantime = { workspace = true, optional = true }
 hyper-rustls = { workspace = true, optional = true, features = ["aws-lc-rs", "http1", "webpki-tokio"] }
 hyper-util = { workspace = true, optional = true, features = ["client-legacy", "http1", "tokio"] }
+jiff = { workspace = true, optional = true }
 jsonwebtoken = { workspace = true, optional = true }
 metrics = { workspace = true, optional = true }
 parking_lot = { workspace = true, optional = true }

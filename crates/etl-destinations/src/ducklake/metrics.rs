@@ -5,6 +5,8 @@ use std::{
 
 use chrono::Utc;
 use etl::error::{ErrorKind, EtlResult};
+#[cfg(feature = "test-utils")]
+use etl::etl_error;
 use etl_maintenance::ducklake::{
     DuckLakeMetadataPool, RedactedDuckDbError, table_namespace_filter,
 };
@@ -12,6 +14,8 @@ use metrics::{Unit, describe_counter, describe_gauge, describe_histogram, gauge,
 use parking_lot::Mutex;
 use pg_escape::{quote_identifier, quote_literal};
 use sqlx::AssertSqlSafe;
+#[cfg(feature = "test-utils")]
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Duration, Instant, MissedTickBehavior};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::warn;
@@ -100,6 +104,29 @@ pub(crate) const MAINTENANCE_OUTCOME_LABEL: &str = "outcome";
 /// Shared state for the background DuckLake metrics sampler.
 pub(super) struct DuckLakeMetricsSampler {
     pub(super) handle: Mutex<Option<AbortOnDropHandle<()>>>,
+    /// Requests for an immediate pass, each answered once the pass completes.
+    #[cfg(feature = "test-utils")]
+    sample_requests: mpsc::UnboundedSender<oneshot::Sender<()>>,
+}
+
+impl DuckLakeMetricsSampler {
+    /// Runs one pass on the spawned sampler task and waits for it to finish.
+    ///
+    /// Tests use this instead of waiting out [`METRICS_POLL_INTERVAL`]; the
+    /// pass runs on the same task and pool as a timer-driven pass.
+    #[cfg(feature = "test-utils")]
+    pub(super) async fn sample_now_for_tests(&self) -> EtlResult<()> {
+        let (completed_tx, completed_rx) = oneshot::channel();
+        let stopped = || {
+            etl_error!(
+                ErrorKind::InvalidState,
+                "DuckLake metrics sampler is not running",
+                "The sampler task stopped before completing the requested pass"
+            )
+        };
+        self.sample_requests.send(completed_tx).map_err(|_| stopped())?;
+        completed_rx.await.map_err(|_| stopped())
+    }
 }
 
 /// Aggregated storage health sampled for one DuckLake table.
@@ -339,13 +366,21 @@ pub(super) fn spawn_ducklake_metrics_sampler(
     metadata_pg_pool: DuckLakeMetadataPool,
     applied_tables: Arc<Mutex<HashSet<DuckLakeTableName>>>,
 ) -> DuckLakeMetricsSampler {
+    #[cfg(feature = "test-utils")]
+    let (sample_requests, sample_request_rx) = mpsc::unbounded_channel();
     let handle = AbortOnDropHandle::new(tokio::spawn(run_ducklake_metrics_sampler(
         metadata_schema,
         metadata_pg_pool,
         applied_tables,
+        #[cfg(feature = "test-utils")]
+        sample_request_rx,
     )));
 
-    DuckLakeMetricsSampler { handle: Mutex::new(handle.into()) }
+    DuckLakeMetricsSampler {
+        handle: Mutex::new(handle.into()),
+        #[cfg(feature = "test-utils")]
+        sample_requests,
+    }
 }
 
 /// Periodically samples DuckLake metadata from PostgreSQL.
@@ -353,6 +388,9 @@ async fn run_ducklake_metrics_sampler(
     metadata_schema: String,
     metadata_pg_pool: DuckLakeMetadataPool,
     applied_tables: Arc<Mutex<HashSet<DuckLakeTableName>>>,
+    #[cfg(feature = "test-utils")] mut sample_requests: mpsc::UnboundedReceiver<
+        oneshot::Sender<()>,
+    >,
 ) {
     let mut interval =
         tokio::time::interval_at(Instant::now() + METRICS_POLL_INTERVAL, METRICS_POLL_INTERVAL);
@@ -361,40 +399,66 @@ async fn run_ducklake_metrics_sampler(
         DuckLakePendingInlineSizeSampler::new(metadata_schema.clone(), metadata_pg_pool.clone());
 
     loop {
+        #[cfg(feature = "test-utils")]
+        let completed = tokio::select! {
+            _ = interval.tick() => None,
+
+            Some(completed) = sample_requests.recv() => Some(completed),
+        };
+        #[cfg(not(feature = "test-utils"))]
         interval.tick().await;
+
+        sample_ducklake_metrics_once(
+            &metadata_pg_pool,
+            &metadata_schema,
+            &applied_tables,
+            &inline_sampler,
+        )
+        .await;
+
+        // The requester may have stopped waiting; the pass still counts.
+        #[cfg(feature = "test-utils")]
+        if let Some(completed) = completed {
+            let _ = completed.send(());
+        }
+    }
+}
+
+/// Records catalog and per-table metrics once, logging each failed sample.
+async fn sample_ducklake_metrics_once(
+    metadata_pg_pool: &DuckLakeMetadataPool,
+    metadata_schema: &str,
+    applied_tables: &Mutex<HashSet<DuckLakeTableName>>,
+    inline_sampler: &DuckLakePendingInlineSizeSampler,
+) {
+    if let Err(error) = record_catalog_maintenance_metrics(metadata_pg_pool, metadata_schema).await
+    {
+        warn!(error = %error, "ducklake catalog maintenance metrics collection failed");
+    }
+
+    let table_names = {
+        let cache = applied_tables.lock();
+        cache.iter().cloned().collect::<Vec<_>>()
+    };
+
+    for table_name in table_names {
         if let Err(error) =
-            record_catalog_maintenance_metrics(&metadata_pg_pool, &metadata_schema).await
+            record_table_storage_metrics(metadata_pg_pool, metadata_schema, table_name.clone())
+                .await
         {
-            warn!(error = %error, "ducklake catalog maintenance metrics collection failed");
+            warn!(
+                table = %table_name,
+                error = %error,
+                "ducklake table storage metrics collection failed"
+            );
         }
 
-        let table_names = {
-            let cache = applied_tables.lock();
-            cache.iter().cloned().collect::<Vec<_>>()
-        };
-
-        for table_name in table_names {
-            if let Err(error) = record_table_storage_metrics(
-                &metadata_pg_pool,
-                &metadata_schema,
-                table_name.clone(),
-            )
-            .await
-            {
-                warn!(
-                    table = %table_name,
-                    error = %error,
-                    "ducklake table storage metrics collection failed"
-                );
-            }
-
-            if let Err(error) = inline_sampler.sample_table(&table_name).await {
-                warn!(
-                    table = %table_name,
-                    error = %error,
-                    "ducklake table active inlined data metrics collection failed"
-                );
-            }
+        if let Err(error) = inline_sampler.sample_table(&table_name).await {
+            warn!(
+                table = %table_name,
+                error = %error,
+                "ducklake table active inlined data metrics collection failed"
+            );
         }
     }
 }

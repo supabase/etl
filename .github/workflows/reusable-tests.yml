@@ -19,6 +19,10 @@ on:
         description: Blacksmith runner size in vCPUs; the Postgres shard count follows the provisioned machine.
         type: number
         default: 8
+      property-budget-secs:
+        description: Wall-clock budget in seconds for every property; empty keeps each runner's default.
+        type: string
+        default: ''
     secrets:
       TESTS_BIGQUERY_PROJECT_ID:
         required: false
@@ -137,10 +141,20 @@ jobs:
       - name: Run tests
         env:
           COVERAGE: ${{ inputs.coverage }}
+          PROPERTY_BUDGET_SECS: ${{ inputs.property-budget-secs }}
           # Equals the jobs API `id`, so the test manifest joins to this job.
           # `GITHUB_JOB` is only the YAML key and is shared by every leg.
           JOB_CHECK_RUN_ID: ${{ job.check_run_id }}
         run: |
+          # The property runner panics on a non-integer budget, so export the
+          # variable only when a budget is requested.
+          if [[ -n "$PROPERTY_BUDGET_SECS" ]]; then
+            if [[ ! "$PROPERTY_BUDGET_SECS" =~ ^[1-9][0-9]*$ ]]; then
+              echo '::error::property-budget-secs must be a positive integer'
+              exit 1
+            fi
+            export PROPERTY_TEST_BUDGET_SECS="$PROPERTY_BUDGET_SECS"
+          fi
           if [[ "$COVERAGE" == true ]]; then
             # Bound raw-profile I/O when nextest launches one process per test.
             LLVM_PROFILE_FILE_NAME='etl-%8m.profraw' \

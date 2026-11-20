@@ -22,8 +22,8 @@ use crate::{
     activity::{ActivityKind, ActivityRegistration},
     bail,
     destination::{
-        DestinationTableMetadata, DestinationWriteStatus, DropTableForCopyResult,
-        PipelineDestination, WriteTableRowsResult,
+        Destination, DestinationTableMetadata, DestinationWriteStatus, DropTableForCopyResult,
+        PipelineDestination, UpdateRowRequirement, WriteTableRowsResult,
     },
     error::{ErrorKind, EtlResult},
     etl_error,
@@ -92,6 +92,39 @@ where
         ReplicatedTableSchema::from_mask(table_schema, current_metadata.replication_mask().clone());
 
     Ok(Some((current_metadata, existing_replicated_table_schema)))
+}
+
+/// Warns when `D` rejects partial update rows and the table can emit them.
+///
+/// Warning before the copy lets operators change the replica identity before
+/// the first such update stops replication. Once that update is in the WAL,
+/// recovering requires resynchronizing the table.
+fn warn_if_partial_updates_rejected<D>(replicated_table_schema: &ReplicatedTableSchema)
+where
+    D: Destination,
+{
+    match D::update_row_requirement() {
+        UpdateRowRequirement::AcceptsPartialRows => return,
+        UpdateRowRequirement::RequiresFullRows => {}
+    }
+
+    let column_names: Vec<&str> = replicated_table_schema
+        .partial_update_column_schemas()
+        .map(|column_schema| column_schema.name.as_str())
+        .collect();
+    if column_names.is_empty() {
+        return;
+    }
+
+    warn!(
+        table_id = replicated_table_schema.id().0,
+        table_name = %replicated_table_schema.name(),
+        column_names = %column_names.join(", "),
+        remediation_sql = %replicated_table_schema.name().replica_identity_full_sql(),
+        "destination rejects updates that omit unchanged toasted values; run remediation_sql on \
+         the source database, and on each partition of a partitioned table, before such an \
+         update stops replication"
+    );
 }
 
 /// Starts table synchronization for a specific table.
@@ -325,6 +358,7 @@ where
             // restarts.
             let replicated_table_schema =
                 ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask);
+            warn_if_partial_updates_rejected::<D>(&replicated_table_schema);
 
             let mut total_table_copy_rows = 0_u64;
             let mut total_table_copy_duration_secs = 0.0;
@@ -341,7 +375,7 @@ where
                     slot_name.clone(),
                     config.max_copy_connections_per_table,
                     replication_lag_monitor.clone(),
-                    Duration::from_millis(config.table_sync_monitor_refresh_interval_ms),
+                    Duration::from_millis(config.table_sync_monitor_refresh_interval_ms.get()),
                     config.batch.clone(),
                     shutdown_token.clone(),
                     destination.clone(),
@@ -435,17 +469,14 @@ where
     // We mark this worker as `SyncWait` (in memory only) to signal the apply
     // worker that we are ready to start catchup. We pass the snapshot LSN so
     // the apply worker can use max(snapshot_lsn, current_lsn) when setting the
-    // Catchup LSN.
-    {
-        let mut inner = table_sync_worker_state.lock().await;
-        inner.set_and_store(TableState::SyncWait { lsn: start_lsn }, &store).await?;
-    }
+    // Catchup LSN. Then we wait to be signaled to catch up with the main apply
+    // worker up to a specific lsn; the wait releases the state lock so the
+    // apply worker can make that transition.
+    let mut inner = table_sync_worker_state.lock().await;
+    inner.set_and_store(TableState::SyncWait { lsn: start_lsn }, &store).await?;
 
-    // We also wait to be signaled to catch up with the main apply worker up to
-    // a specific lsn.
-    let result = table_sync_worker_state
-        .wait_for_state_type(&[TableStateType::Catchup], shutdown_token.clone())
-        .await;
+    let result =
+        inner.wait_for_state_type(&[TableStateType::Catchup], shutdown_token.clone()).await;
 
     // If we are told to shut down while waiting for a state change, we will
     // signal this to the caller.

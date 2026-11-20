@@ -47,16 +47,6 @@ pub(crate) struct RetryAttempt<'a, E> {
     pub(crate) error: &'a E,
 }
 
-/// Final failure after the retry helper stops.
-#[derive(Debug)]
-pub(crate) struct RetryFailure<E> {
-    /// Total attempts including the initial attempt.
-    #[cfg_attr(not(test), expect(dead_code, reason = "attempt count is inspected by retry tests"))]
-    pub(crate) total_attempts: u32,
-    /// Last error returned by the operation.
-    pub(crate) last_error: E,
-}
-
 /// Executes an async operation with exponential backoff while it fails with a
 /// retryable error.
 ///
@@ -79,7 +69,7 @@ pub(crate) async fn retry_with_backoff<
     mut transform_delay: TransformDelay,
     mut on_retry: OnRetry,
     mut attempt_fn: AttemptFn,
-) -> Result<T, RetryFailure<E>>
+) -> Result<T, E>
 where
     E: ClassifiedError,
     AttemptFn: FnMut() -> AttemptFut,
@@ -102,7 +92,7 @@ where
                     || error.retryability() == Retryability::Permanent
                     || stop_early(&error)
                 {
-                    return Err(RetryFailure { total_attempts, last_error: error });
+                    return Err(error);
                 }
 
                 let sleep_delay = transform_delay(base_delay);
@@ -208,7 +198,10 @@ mod tests {
     /// Caps exponential delay growth at the configured maximum.
     #[tokio::test(start_paused = true)]
     async fn retry_with_backoff_caps_delay_growth() {
+        let attempts = Arc::new(AtomicUsize::new(0));
         let (base_delays_tx, base_delays) = mpsc::channel();
+
+        let attempts_for_task = Arc::clone(&attempts);
         let handle = tokio::spawn(async move {
             retry_with_backoff(
                 RetryPolicy {
@@ -221,7 +214,10 @@ mod tests {
                 move |attempt: RetryAttempt<'_, TestError>| {
                     base_delays_tx.send(attempt.base_delay).unwrap();
                 },
-                || async { Err::<(), _>(retryable(0)) },
+                move || {
+                    attempts_for_task.fetch_add(1, Ordering::SeqCst);
+                    async { Err::<(), _>(retryable(0)) }
+                },
             )
             .await
         });
@@ -235,8 +231,8 @@ mod tests {
         tokio::task::yield_now().await;
 
         let failure = handle.await.unwrap().unwrap_err();
-        assert_eq!(failure.total_attempts, 4);
-        assert_eq!(failure.last_error, retryable(0));
+        assert_eq!(attempts.load(Ordering::SeqCst), 4);
+        assert_eq!(failure, retryable(0));
         assert_eq!(
             base_delays.try_iter().collect::<Vec<_>>(),
             vec![Duration::from_millis(5), Duration::from_millis(8), Duration::from_millis(8),]
@@ -255,6 +251,7 @@ mod tests {
         };
         let permanent = TestError { attempt: 0, retryability: Retryability::Permanent };
 
+        let mut attempts = 0;
         let on_retry_calls_for_permanent = Arc::clone(&on_retry_calls);
         let failure = retry_with_backoff(
             policy,
@@ -263,15 +260,19 @@ mod tests {
             move |_attempt: RetryAttempt<'_, TestError>| {
                 on_retry_calls_for_permanent.fetch_add(1, Ordering::SeqCst);
             },
-            || async {
-                Err::<(), _>(TestError { attempt: 0, retryability: Retryability::Permanent })
+            || {
+                attempts += 1;
+                async {
+                    Err::<(), _>(TestError { attempt: 0, retryability: Retryability::Permanent })
+                }
             },
         )
         .await
         .unwrap_err();
-        assert_eq!(failure.total_attempts, 1);
-        assert_eq!(failure.last_error, permanent);
+        assert_eq!(attempts, 1);
+        assert_eq!(failure, permanent);
 
+        let mut attempts = 0;
         let on_retry_calls_for_stop = Arc::clone(&on_retry_calls);
         let failure = retry_with_backoff(
             policy,
@@ -280,12 +281,15 @@ mod tests {
             move |_attempt: RetryAttempt<'_, TestError>| {
                 on_retry_calls_for_stop.fetch_add(1, Ordering::SeqCst);
             },
-            || async { Err::<(), _>(retryable(0)) },
+            || {
+                attempts += 1;
+                async { Err::<(), _>(retryable(0)) }
+            },
         )
         .await
         .unwrap_err();
-        assert_eq!(failure.total_attempts, 1);
-        assert_eq!(failure.last_error, retryable(0));
+        assert_eq!(attempts, 1);
+        assert_eq!(failure, retryable(0));
 
         assert_eq!(on_retry_calls.load(Ordering::SeqCst), 0);
     }
@@ -334,6 +338,8 @@ mod tests {
     /// Returns the last error after exhausting retries.
     #[tokio::test(start_paused = true)]
     async fn retry_with_backoff_returns_last_error_after_exhaustion() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_for_task = Arc::clone(&attempts);
         let handle = tokio::spawn(async move {
             retry_with_backoff(
                 RetryPolicy {
@@ -344,12 +350,9 @@ mod tests {
                 |_| false,
                 |delay| delay,
                 |_attempt: RetryAttempt<'_, TestError>| {},
-                {
-                    let attempts = Arc::new(AtomicUsize::new(0));
-                    move || {
-                        let attempts = Arc::clone(&attempts);
-                        async move { Err::<(), _>(retryable(attempts.fetch_add(1, Ordering::SeqCst))) }
-                    }
+                move || {
+                    let attempts = Arc::clone(&attempts_for_task);
+                    async move { Err::<(), _>(retryable(attempts.fetch_add(1, Ordering::SeqCst))) }
                 },
             )
             .await
@@ -362,7 +365,7 @@ mod tests {
         tokio::task::yield_now().await;
 
         let failure = handle.await.unwrap().unwrap_err();
-        assert_eq!(failure.total_attempts, 3);
-        assert_eq!(failure.last_error, retryable(2));
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        assert_eq!(failure, retryable(2));
     }
 }

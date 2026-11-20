@@ -14,7 +14,10 @@ use etl::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
     event::{DeleteEvent, Event, InsertEvent, UpdateEvent},
-    schema::{ColumnAlterationKind, ColumnSchema, ReplicatedTableSchema, SchemaOperation, TableId},
+    schema::{
+        ColumnAlterationKind, ColumnSchema, IdentityMask, ReplicatedTableSchema, SchemaOperation,
+        TableId,
+    },
     store::DestinationStore,
     task::TaskRegistry,
 };
@@ -27,7 +30,11 @@ use crate::{
     snowflake::{
         Client, SNOWFLAKE_COLUMN_NAME_MAPPING,
         auth::{AuthManager, HttpExchanger, TokenProvider},
-        encoding::{CdcMeta, CdcOperation, normalize_delete_row, normalize_update_row},
+        client::TableChannel,
+        encoding::{
+            CdcMeta, CdcOperation, key_only_missing_columns, normalize_delete_row,
+            normalize_update_row,
+        },
         metrics::register_metrics,
         schema,
         streaming::{Completed, OffsetToken, RestStreamClient, RowBatchBuilder, StreamClient},
@@ -65,6 +72,10 @@ struct CachedColumns {
     schema: ReplicatedTableSchema,
     /// Snowflake column definitions, ordered to match the values in each row.
     columns: Vec<ColumnSchema>,
+    /// Positions a key-only delete omits, built on the first delete for the
+    /// identity it carried. Cache reuse checks only the snapshot and
+    /// projection, so the identity is kept to detect a change.
+    key_only_missing: Option<(IdentityMask, Vec<usize>)>,
 }
 
 type EventIter = std::iter::Peekable<std::vec::IntoIter<Event>>;
@@ -406,17 +417,18 @@ where
         for (table_id, events) in take_data_events(iter) {
             let mut builder = RowBatchBuilder::new(table_id);
             let mut columns = None;
+            let mut channel = None;
 
             for event in events {
                 let completed = match event {
                     Event::Insert(event) => {
-                        self.encode_insert(event, &mut builder, &mut columns).await?
+                        self.encode_insert(event, &mut builder, &mut columns, &mut channel).await?
                     }
                     Event::Update(event) => {
-                        self.encode_update(event, &mut builder, &mut columns).await?
+                        self.encode_update(event, &mut builder, &mut columns, &mut channel).await?
                     }
                     Event::Delete(event) => {
-                        self.encode_delete(event, &mut builder, &mut columns).await?
+                        self.encode_delete(event, &mut builder, &mut columns, &mut channel).await?
                     }
                     _ => unreachable!("data groups contain only row events"),
                 };
@@ -464,17 +476,18 @@ where
         e: InsertEvent,
         builder: &mut RowBatchBuilder,
         columns: &mut Option<CachedColumns>,
+        channel: &mut Option<TableChannel<C>>,
     ) -> EtlResult<Completed> {
         let table_id = e.replicated_table_schema.id();
-        let cols = self.prepare_columns(columns, &e.replicated_table_schema).await?;
+        let cached = self.prepare_columns(columns, &e.replicated_table_schema).await?;
         let offset = OffsetToken::new(e.commit_lsn, e.tx_ordinal);
-        if self.client.reconcile_replay_offset(table_id, &offset).await? {
+        if self.reconcile_replay_offset(channel, table_id, &offset).await? {
             return Ok(Completed::default());
         }
 
         builder
             .push_row(
-                cols,
+                &cached.columns,
                 &e.table_row,
                 CdcMeta::new(CdcOperation::Insert, offset.as_ref()),
                 &offset,
@@ -488,21 +501,22 @@ where
         e: UpdateEvent,
         builder: &mut RowBatchBuilder,
         columns: &mut Option<CachedColumns>,
+        channel: &mut Option<TableChannel<C>>,
     ) -> EtlResult<Completed> {
         let (full_row, missing) =
             normalize_update_row(&e.replicated_table_schema, e.updated_table_row, e.old_table_row)
                 .map_err(EtlError::from)?;
 
         let table_id = e.replicated_table_schema.id();
-        let cols = self.prepare_columns(columns, &e.replicated_table_schema).await?;
+        let cached = self.prepare_columns(columns, &e.replicated_table_schema).await?;
         let offset = OffsetToken::new(e.commit_lsn, e.tx_ordinal);
-        if self.client.reconcile_replay_offset(table_id, &offset).await? {
+        if self.reconcile_replay_offset(channel, table_id, &offset).await? {
             return Ok(Completed::default());
         }
 
         builder
             .push_row(
-                cols,
+                &cached.columns,
                 &full_row,
                 CdcMeta::new(CdcOperation::Update, offset.as_ref()).with_missing_columns(&missing),
                 &offset,
@@ -516,24 +530,48 @@ where
         e: DeleteEvent,
         builder: &mut RowBatchBuilder,
         columns: &mut Option<CachedColumns>,
+        channel: &mut Option<TableChannel<C>>,
     ) -> EtlResult<Completed> {
         let table_id = e.replicated_table_schema.id();
         let offset = OffsetToken::new(e.commit_lsn, e.tx_ordinal);
-        let cols = self.prepare_columns(columns, &e.replicated_table_schema).await?;
-        if self.client.reconcile_replay_offset(table_id, &offset).await? {
+        let cached = self.prepare_columns(columns, &e.replicated_table_schema).await?;
+        if self.reconcile_replay_offset(channel, table_id, &offset).await? {
             return Ok(Completed::default());
         }
 
-        let (row, missing) = normalize_delete_row(&e.replicated_table_schema, e.old_table_row)
-            .map_err(EtlError::from)?;
+        let identity_mask = e.replicated_table_schema.identity_mask();
+        cached.key_only_missing.take_if(|(mask, _)| mask != identity_mask);
+        let (_, key_only_missing) = cached.key_only_missing.get_or_insert_with(|| {
+            (identity_mask.clone(), key_only_missing_columns(&e.replicated_table_schema))
+        });
+        let (row, missing) =
+            normalize_delete_row(&e.replicated_table_schema, e.old_table_row, key_only_missing)
+                .map_err(EtlError::from)?;
         builder
             .push_row(
-                cols,
+                &cached.columns,
                 &row,
-                CdcMeta::new(CdcOperation::Delete, offset.as_ref()).with_missing_columns(&missing),
+                CdcMeta::new(CdcOperation::Delete, offset.as_ref()).with_missing_columns(missing),
                 &offset,
             )
             .map_err(EtlError::from)
+    }
+
+    /// Returns whether `offset` is already committed, looking up the table's
+    /// channel on the first event of a data group and reusing it after.
+    async fn reconcile_replay_offset(
+        &self,
+        channel: &mut Option<TableChannel<C>>,
+        table_id: TableId,
+        offset: &OffsetToken,
+    ) -> EtlResult<bool> {
+        let channel = match channel {
+            Some(channel) => channel,
+            None => {
+                channel.insert(self.client.table_channel(table_id).await.map_err(EtlError::from)?)
+            }
+        };
+        self.client.reconcile_replay_offset(channel, offset).await
     }
 
     /// Prepares the table and reuses its columns while the source schema is
@@ -542,7 +580,7 @@ where
         &self,
         columns: &'a mut Option<CachedColumns>,
         table_schema: &ReplicatedTableSchema,
-    ) -> EtlResult<&'a [ColumnSchema]> {
+    ) -> EtlResult<&'a mut CachedColumns> {
         match columns {
             Some(cached) => {
                 // The snapshot identifies the table definition; the replicated
@@ -555,17 +593,17 @@ where
                         "Snowflake data segment contains multiple schema snapshots or projections"
                     );
                 }
-                Ok(&cached.columns)
+                Ok(cached)
             }
             None => {
                 self.prepare_table_for_writes(table_schema).await?;
-                let cached = columns.insert(CachedColumns {
+                Ok(columns.insert(CachedColumns {
                     schema: table_schema.clone(),
                     columns: table_schema
                         .destination_column_schemas(SNOWFLAKE_COLUMN_NAME_MAPPING)
                         .collect(),
-                });
-                Ok(&cached.columns)
+                    key_only_missing: None,
+                }))
             }
         }
     }
@@ -858,15 +896,19 @@ where
             // so encoded output never accumulates for the whole copy batch.
             let zero = OffsetToken::zero();
             let mut builder = RowBatchBuilder::new(table_id);
-            for row in &table_rows {
+            for row in table_rows {
                 let completed = builder
                     .push_row(
                         &columns,
-                        row,
+                        &row,
                         CdcMeta::new(CdcOperation::Insert, zero.as_ref()),
                         &zero,
                     )
                     .map_err(EtlError::from)?;
+
+                // Encoded batches own their bytes; release rows before waiting.
+                drop(row);
+
                 for batch in completed {
                     self.writer
                         .client
@@ -1109,7 +1151,7 @@ mod tests {
                 options: 0,
                 truncated_tables: vec![schema.clone()],
             }),
-            Event::Unsupported,
+            Event::Relation(RelationEvent { replicated_table_schema: schema.clone() }),
         ]
         .into_iter()
         .peekable();
@@ -1121,7 +1163,7 @@ mod tests {
         assert_eq!(operations[0].1, first_offset);
         assert_eq!(operations[1].0.id(), schema.id());
         assert_eq!(operations[1].1, second_offset);
-        assert!(matches!(iter.next(), Some(Event::Unsupported)));
+        assert!(matches!(iter.next(), Some(Event::Relation(_))));
     }
 
     /// Rejection and restart leave metadata applied and send no DDL or channel
@@ -1451,6 +1493,7 @@ mod tests {
         let mut cache = Some(CachedColumns {
             schema: schema.clone(),
             columns: schema.column_schemas().cloned().collect(),
+            key_only_missing: None,
         });
         destination.writer.prepare_columns(&mut cache, &schema).await.unwrap();
         let mut changed = schema.inner().clone();
@@ -1462,10 +1505,13 @@ mod tests {
                 ReplicationMask::from_bytes(vec![1, 0]),
             ),
         ] {
-            assert_eq!(
-                destination.writer.prepare_columns(&mut cache, &changed).await.unwrap_err().kind(),
-                ErrorKind::DestinationLayoutUnsupported
-            );
+            let error = destination
+                .writer
+                .prepare_columns(&mut cache, &changed)
+                .await
+                .map(drop)
+                .unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::DestinationLayoutUnsupported);
         }
     }
 }

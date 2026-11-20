@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    num::NonZeroU16,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -7,6 +8,7 @@ use std::{
     time::Duration,
 };
 
+use duckdb::types::{FromSql, FromSqlError, FromSqlResult, ValueRef};
 use etl::{
     data::{OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
     destination::{
@@ -41,6 +43,7 @@ use etl_maintenance::{
         namespace_version_check_sql, namespaced_tables_query, table_namespace_filter,
     },
 };
+use jiff::{SignedDuration, Span, Timestamp, civil::DateTime, tz::TimeZone};
 use metrics::{counter, gauge};
 use parking_lot::{Mutex, RwLock as ParkingLotRwLock};
 use pg_escape::{quote_identifier as quote_postgres_identifier, quote_literal};
@@ -245,12 +248,43 @@ pub(super) fn is_create_table_conflict(error: &duckdb::Error, table_name: &str) 
         && message.contains(table_name)
 }
 
-/// Parses `expire_snapshots_older_than` into seconds for cheap metadata-only
-/// trigger sampling.
-fn expire_snapshots_retention_seconds(value: &str) -> Option<i64> {
-    humantime::parse_duration(value)
-        .ok()
-        .and_then(|duration| i64::try_from(duration.as_secs()).ok())
+/// Snapshot-retention interval as parsed by DuckDB's interval cast.
+///
+/// DuckDB accepts units in any order, repeated units, and mixed signs, so
+/// DuckDB is the only parser that agrees with startup validation and the
+/// expiry cutoff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExpireSnapshotsRetention {
+    months: i32,
+    days: i32,
+    nanos: i64,
+}
+
+impl ExpireSnapshotsRetention {
+    /// Returns the seconds between `now` and DuckLake's `now() - interval`
+    /// expiry cutoff, or `None` if the cutoff is outside the supported range.
+    ///
+    /// Subtracts months, then days, then time, like DuckDB timestamp
+    /// arithmetic, so calendar months and years keep their real length.
+    fn seconds_before(self, now: DateTime) -> Option<i64> {
+        let cutoff = now
+            .checked_sub(Span::new().try_months(self.months).ok()?)
+            .ok()?
+            .checked_sub(Span::new().try_days(self.days).ok()?)
+            .ok()?
+            .checked_sub(SignedDuration::from_nanos(self.nanos))
+            .ok()?;
+        Some(now.duration_since(cutoff).as_secs())
+    }
+}
+
+impl FromSql for ExpireSnapshotsRetention {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        match value {
+            ValueRef::Interval { months, days, nanos } => Ok(Self { months, days, nanos }),
+            _ => Err(FromSqlError::InvalidType),
+        }
+    }
 }
 
 /// Returns why file maintenance should run for a table.
@@ -601,7 +635,7 @@ pub struct DuckLakeDestination<S> {
     /// Atomically replaceable streaming and initial-copy connection pools.
     pools: Arc<DuckLakePoolHandle>,
     /// Number of warm connections created in each DuckDB pool.
-    pool_size: u32,
+    pool_size: NonZeroU16,
     blocking_slots: Arc<Semaphore>,
     /// Global gate that excludes external maintenance from foreground and
     /// table-scoped mutations after pinned copy sessions have drained.
@@ -615,6 +649,8 @@ pub struct DuckLakeDestination<S> {
     /// Immutable source namespace for this destination.
     table_namespace: Option<String>,
     expire_snapshots_older_than: Arc<str>,
+    /// Parsed `expire_snapshots_older_than` used for trigger sampling.
+    expire_snapshots_retention: ExpireSnapshotsRetention,
     /// Direct connection shared by foreground catalog queries and Postgres
     /// coordination.
     direct_pg_pool: PgPool,
@@ -676,7 +712,7 @@ pub struct DuckLakeDestinationBuilder<S> {
     /// Parquet data path.
     data_path: Url,
     /// Number of warm DuckDB connections per pool.
-    pool_size: u32,
+    pool_size: NonZeroU16,
     /// Optional S3 credentials and endpoint configuration.
     s3: Option<S3Config>,
     /// Optional schema that stores DuckLake metadata.
@@ -706,7 +742,7 @@ pub struct DuckLakeDestinationBuilder<S> {
 impl<S> DuckLakeDestinationBuilder<S> {
     /// Creates a builder with every optional runtime policy disabled or
     /// defaulted.
-    fn new(catalog_url: Url, data_path: Url, pool_size: u32, store: S) -> Self {
+    fn new(catalog_url: Url, data_path: Url, pool_size: NonZeroU16, store: S) -> Self {
         Self {
             catalog_url,
             catalog_pooler_url: None,
@@ -1817,7 +1853,7 @@ where
     pub fn builder(
         catalog_url: Url,
         data_path: Url,
-        pool_size: u32,
+        pool_size: NonZeroU16,
         store: S,
     ) -> DuckLakeDestinationBuilder<S> {
         DuckLakeDestinationBuilder::new(catalog_url, data_path, pool_size, store)
@@ -1855,7 +1891,7 @@ where
     pub async fn new(
         catalog_url: Url,
         data_path: Url,
-        pool_size: u32,
+        pool_size: NonZeroU16,
         s3: Option<S3Config>,
         metadata_schema: Option<String>,
         maintenance_target_file_size: Option<String>,
@@ -1876,7 +1912,7 @@ where
     pub async fn new_with_writer_config(
         catalog_url: Url,
         data_path: Url,
-        pool_size: u32,
+        pool_size: NonZeroU16,
         s3: Option<S3Config>,
         metadata_schema: Option<String>,
         writer_config: DuckLakeWriterConfig,
@@ -1908,7 +1944,7 @@ where
     pub async fn new_with_external_maintenance(
         catalog_url: Url,
         data_path: Url,
-        pool_size: u32,
+        pool_size: NonZeroU16,
         s3: Option<S3Config>,
         metadata_schema: Option<String>,
         maintenance_target_file_size: Option<String>,
@@ -1932,7 +1968,7 @@ where
     pub async fn new_with_table_sorting_and_external_maintenance(
         catalog_url: Url,
         data_path: Url,
-        pool_size: u32,
+        pool_size: NonZeroU16,
         s3: Option<S3Config>,
         metadata_schema: Option<String>,
         maintenance_target_file_size: Option<String>,
@@ -1958,7 +1994,7 @@ where
         catalog_url: Url,
         catalog_pooler_url: Option<Url>,
         data_path: Url,
-        pool_size: u32,
+        pool_size: NonZeroU16,
         s3: Option<S3Config>,
         metadata_schema: Option<String>,
         table_namespace: Option<String>,
@@ -1983,13 +2019,6 @@ where
             ));
         }
 
-        if pool_size == 0 {
-            return Err(etl_error!(
-                ErrorKind::ConfigError,
-                "DuckLake pool size must be greater than zero",
-                "Pool size must be at least 1"
-            ));
-        }
         copy_buffer_config.validate().map_err(|error| {
             classified_error(
                 ErrorKind::ConfigError,
@@ -2067,7 +2096,8 @@ where
         let pool = Arc::new(
             build_warm_ducklake_pool(manager.as_ref().clone(), pool_size, "write", ()).await?,
         );
-        let blocking_slots = Arc::new(Semaphore::new(pool_size as usize));
+        let pool_permits = usize::from(pool_size.get());
+        let blocking_slots = Arc::new(Semaphore::new(pool_permits));
 
         if table_namespace.is_some() {
             run_duckdb_blocking(Arc::clone(&pool), Arc::clone(&blocking_slots), |conn| {
@@ -2104,12 +2134,14 @@ where
         let expire_snapshots_validation_sql =
             validate_expire_snapshots_older_than_sql(expire_snapshots_older_than.as_ref());
         let expire_snapshots_older_than_for_error = Arc::clone(&expire_snapshots_older_than);
-        run_duckdb_blocking(
+        let expire_snapshots_retention = run_duckdb_blocking(
             Arc::clone(&pool),
             Arc::clone(&blocking_slots),
-            move |conn| -> EtlResult<()> {
-                let retention_is_safe: bool = conn
-                    .query_row(&expire_snapshots_validation_sql, [], |row| row.get(0))
+            move |conn| -> EtlResult<ExpireSnapshotsRetention> {
+                let (retention_is_safe, retention): (bool, ExpireSnapshotsRetention) = conn
+                    .query_row(&expire_snapshots_validation_sql, [], |row| {
+                        Ok((row.get(0)?, row.get(1)?))
+                    })
                     .map_err(|source| {
                         classified_error_with_detail(
                             ErrorKind::ConfigError,
@@ -2131,7 +2163,7 @@ where
                         )
                     ));
                 }
-                Ok(())
+                Ok(retention)
             },
         )
         .await?;
@@ -2172,13 +2204,6 @@ where
                     error,
                 )
             })?;
-        let copy_session_permits = usize::try_from(pool_size).map_err(|error| {
-            classified_error(
-                ErrorKind::ConfigError,
-                "DuckLake pool size does not fit this platform",
-                error,
-            )
-        })?;
 
         // Persist helper-table inlining options before warming COPY
         // connections. Actively copied user tables temporarily override the
@@ -2221,6 +2246,7 @@ where
             metadata_schema: Arc::clone(&metadata_schema),
             table_namespace,
             expire_snapshots_older_than: Arc::clone(&expire_snapshots_older_than),
+            expire_snapshots_retention,
             direct_pg_pool: direct_pg_pool.clone(),
             metadata_pg_pool: metadata_pg_pool.clone(),
             table_sorting,
@@ -2233,8 +2259,8 @@ where
             copy_buffer_capacity: Arc::new(Semaphore::new(copy_buffer_max_permits)),
             copy_buffer_max_permits,
             copy_buffer_peak_staged_bytes: Arc::new(AtomicU64::new(0)),
-            copy_session_slots: Arc::new(Semaphore::new(copy_session_permits)),
-            copy_buffers: Arc::new(Mutex::new(HashMap::with_capacity(copy_session_permits))),
+            copy_session_slots: Arc::new(Semaphore::new(pool_permits)),
+            copy_buffers: Arc::new(Mutex::new(HashMap::with_capacity(pool_permits))),
             failed_copy_buffers: Arc::default(),
             copy_direct_to_parquet_tables: Arc::default(),
             store,
@@ -2242,7 +2268,7 @@ where
             applied_batches_table_created,
             streaming_progress_table_created,
         };
-        gauge!(ETL_DUCKLAKE_POOL_SIZE).set(f64::from(pool_size));
+        gauge!(ETL_DUCKLAKE_POOL_SIZE).set(f64::from(pool_size.get()));
         destination.metrics_sampler = Arc::new(
             spawn_ducklake_metrics_sampler(
                 metadata_schema.to_string(),
@@ -2689,7 +2715,7 @@ where
         handle.reservations.lock().push(reservation);
         let blocking_handle = Arc::clone(&handle);
         let connection = handle.connection.clone();
-        let target_bytes = self.copy_buffer_config.target_bytes;
+        let target_bytes = self.copy_buffer_config.target_bytes.get();
         let table_write_permit = Arc::clone(&table_write_permit);
         let append_result = run_duckdb_dedicated_blocking_with_context(
             connection,
@@ -3608,6 +3634,20 @@ where
     #[cfg(feature = "test-utils")]
     pub async fn reconcile_table_layouts_for_tests(&self) -> EtlResult<()> {
         self.reconcile_applied_table_layouts().await
+    }
+
+    /// Runs one metrics pass on the spawned sampler and waits for it to
+    /// finish, instead of waiting for the next periodic tick.
+    #[cfg(feature = "test-utils")]
+    pub async fn sample_metrics_for_tests(&self) -> EtlResult<()> {
+        let sampler = self.metrics_sampler.as_ref().as_ref().ok_or_else(|| {
+            etl_error!(
+                ErrorKind::InvalidState,
+                "DuckLake metrics sampler is not running",
+                "The destination was built without a metrics sampler"
+            )
+        })?;
+        sampler.sample_now_for_tests().await
     }
 
     /// Rechecks existing managed tables without creating, resetting, or
@@ -4600,7 +4640,8 @@ where
         )
         .await?;
 
-        match expire_snapshots_retention_seconds(self.expire_snapshots_older_than.as_ref()) {
+        let now = Timestamp::now().to_zoned(TimeZone::UTC).datetime();
+        match self.expire_snapshots_retention.seconds_before(now) {
             Some(retention_seconds) => {
                 operations.expire_snapshots = catalog_metrics.snapshots_total > 1
                     && catalog_metrics.oldest_snapshot_age_seconds >= retention_seconds;
@@ -4626,8 +4667,8 @@ where
                 warn!(
                     metadata_schema = %self.metadata_schema,
                     expire_snapshots_older_than = %self.expire_snapshots_older_than,
-                    "ducklake could not parse expire_snapshots_older_than for external maintenance \
-                     trigger sampling: metadata_schema={}, expire_snapshots_older_than={}",
+                    "ducklake could not compute expire_snapshots_older_than cutoff for external \
+                     maintenance trigger sampling: metadata_schema={}, expire_snapshots_older_than={}",
                     self.metadata_schema,
                     self.expire_snapshots_older_than
                 );
@@ -4957,6 +4998,7 @@ mod tests {
         test_utils::{local_tls_config_from_env, test_database_port_from_env},
         tokio::test_utils::PgDatabase,
     };
+    use jiff::civil::date;
     use pg_escape::{quote_identifier, quote_literal};
     use tempfile::TempDir;
     use tokio_postgres::Client;
@@ -5174,11 +5216,42 @@ mod tests {
         }
     }
 
+    /// Trigger sampling must agree with DuckDB's `now() - interval` cutoff for
+    /// every interval startup validation accepts, including out-of-order,
+    /// repeated, mixed-sign, and calendar units at month ends and leap days.
     #[test]
-    fn expire_snapshots_retention_seconds_uses_humantime_duration_syntax() {
-        assert_eq!(expire_snapshots_retention_seconds("7 days"), Some(604_800));
-        assert_eq!(expire_snapshots_retention_seconds("2h 30min"), Some(9_000));
-        assert_eq!(expire_snapshots_retention_seconds("bad interval"), None);
+    fn expire_snapshots_retention_matches_duckdb_cutoff() {
+        let conn = Connection::open_in_memory().unwrap();
+
+        for now in [date(2026, 3, 31).at(12, 0, 0, 0), date(2024, 2, 29).at(0, 30, 0, 0)] {
+            for value in [
+                "7 days",
+                "12 hours 1 day",
+                "1 day 02:00:00",
+                "1 day 1 day",
+                "2 days -12 hours",
+                "1 month",
+                "1 month -2 days",
+                "1 year",
+                "1 year 2 months -3 days 04:05:06",
+            ] {
+                let retention: ExpireSnapshotsRetention = conn
+                    .query_row(&validate_expire_snapshots_older_than_sql(value), [], |row| {
+                        row.get(1)
+                    })
+                    .unwrap();
+                let expected: i64 = conn
+                    .query_row(
+                        "select cast(epoch(cast(?1 as timestamp)) - epoch(cast(?1 as timestamp) - \
+                         cast(?2 as interval)) as bigint)",
+                        [now.to_string(), value.to_owned()],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+
+                assert_eq!(retention.seconds_before(now), Some(expected), "{now} - {value}");
+            }
+        }
     }
 
     fn make_schema(table_id: u32, schema: &str, table: &str) -> TableSchema {
@@ -5288,7 +5361,7 @@ mod tests {
         let error = DuckLakeDestination::new_with_table_sorting_and_external_maintenance(
             Url::parse("postgres://localhost/ducklake").unwrap(),
             Url::parse("file:///tmp/ducklake").unwrap(),
-            1,
+            NonZeroU16::MIN,
             None,
             None,
             None,
@@ -6224,12 +6297,13 @@ mod tests {
             let replicated = ReplicatedTableSchema::all(Arc::new(schema.clone()));
             let table = table_name_to_ducklake_table_name(&schema.name).unwrap();
             store.store_table_schema(schema).await.unwrap();
-            let destination = DuckLakeDestination::builder(catalog.clone(), data.clone(), 1, store)
-                .catalog_pooler_url(Some(pooler.clone()))
-                .copy_buffer(DuckLakeCopyBufferConfig { enabled: false, ..Default::default() })
-                .build()
-                .await
-                .unwrap();
+            let destination =
+                DuckLakeDestination::builder(catalog.clone(), data.clone(), NonZeroU16::MIN, store)
+                    .catalog_pooler_url(Some(pooler.clone()))
+                    .copy_buffer(DuckLakeCopyBufferConfig { enabled: false, ..Default::default() })
+                    .build()
+                    .await
+                    .unwrap();
             assert!(
                 metrics
                     .render()
@@ -6391,10 +6465,18 @@ mod tests {
             let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
             store.store_table_schema(schema).await.expect("failed to seed schema");
-            let destination =
-                DuckLakeDestination::new(catalog, data, 1, None, None, None, None, store)
-                    .await
-                    .expect("failed to create destination");
+            let destination = DuckLakeDestination::new(
+                catalog,
+                data,
+                NonZeroU16::MIN,
+                None,
+                None,
+                None,
+                None,
+                store,
+            )
+            .await
+            .expect("failed to create destination");
             destination
                 .write_table_rows(
                     &replicated_table_schema,
@@ -6469,7 +6551,7 @@ mod tests {
             let destination = DuckLakeDestination::new(
                 catalog.clone(),
                 data.clone(),
-                1,
+                NonZeroU16::MIN,
                 None,
                 None,
                 None,
@@ -6543,7 +6625,7 @@ mod tests {
             let destination = DuckLakeDestination::new(
                 catalog.clone(),
                 data.clone(),
-                1,
+                NonZeroU16::MIN,
                 None,
                 None,
                 None,
@@ -6614,7 +6696,7 @@ mod tests {
             let destination = DuckLakeDestination::new(
                 catalog.clone(),
                 data.clone(),
-                1,
+                NonZeroU16::MIN,
                 None,
                 None,
                 None,

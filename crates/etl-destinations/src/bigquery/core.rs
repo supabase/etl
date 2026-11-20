@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt::Display,
+    num::NonZeroU16,
     str::FromStr,
     sync::Arc,
 };
@@ -10,7 +11,8 @@ use etl::{
     data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
     destination::{
         Destination, DestinationTableMetadata, DestinationWriteStatus, DropTableForCopyResult,
-        TableCopyBatchId, WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
+        TableCopyBatchId, UpdateRowRequirement, WriteEventsDurability, WriteEventsResult,
+        WriteTableRowsResult,
     },
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
@@ -19,7 +21,7 @@ use etl::{
     schema::{
         ColumnAlterationKind, ColumnPresenceChangeReason, IdentityType, ReplicatedTableSchema,
         ReplicationMask, SchemaOperation, SchemaPlan, SnapshotId, TableId, TableName,
-        is_array_type,
+        is_array_type, partial_update_remediation,
     },
     store::DestinationStore,
     task::TaskRegistry,
@@ -440,7 +442,7 @@ where
         dataset_id: BigQueryDatasetId,
         sa_key: &str,
         max_staleness_mins: Option<u16>,
-        connection_pool_size: usize,
+        connection_pool_size: NonZeroU16,
         pipeline_id: PipelineId,
         state_store: S,
     ) -> EtlResult<Self> {
@@ -473,7 +475,7 @@ where
         dataset_id: BigQueryDatasetId,
         sa_key: &str,
         max_staleness_mins: Option<u16>,
-        connection_pool_size: usize,
+        connection_pool_size: NonZeroU16,
         pipeline_id: PipelineId,
         state_store: S,
     ) -> EtlResult<Self> {
@@ -505,7 +507,7 @@ where
         project_id: String,
         dataset_id: BigQueryDatasetId,
         max_staleness_mins: Option<u16>,
-        connection_pool_size: usize,
+        connection_pool_size: NonZeroU16,
         pipeline_id: PipelineId,
         state_store: S,
     ) -> EtlResult<Self> {
@@ -540,7 +542,7 @@ where
         secret: Secret,
         persistent_file_path: Path,
         max_staleness_mins: Option<u16>,
-        connection_pool_size: usize,
+        connection_pool_size: NonZeroU16,
         pipeline_id: PipelineId,
         store: S,
     ) -> EtlResult<Self>
@@ -1674,6 +1676,12 @@ where
         etl_config::shared::DestinationKind::BigQuery.as_str()
     }
 
+    fn update_row_requirement() -> UpdateRowRequirement {
+        // CDC UPSERT replaces the whole row, so an update must carry every
+        // column.
+        UpdateRowRequirement::RequiresFullRows
+    }
+
     async fn shutdown(&self) -> EtlResult<()> {
         self.tasks.shutdown().await
     }
@@ -1851,8 +1859,9 @@ fn bigquery_update_new_row(
             "BigQuery update requires a full new row image",
             format!(
                 "Table '{}' emitted a partial update row. BigQuery CDC UPSERT does not preserve \
-                 omitted columns.",
-                replicated_table_schema.name()
+                 omitted columns. {}",
+                replicated_table_schema.name(),
+                partial_update_remediation(replicated_table_schema.name())
             )
         )),
     }
@@ -2928,6 +2937,7 @@ mod tests {
 
         assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
         assert!(error.to_string().contains("emitted a partial update row"));
+        assert!(error.to_string().contains("`alter table public.users replica identity full;`"));
     }
 
     #[test]

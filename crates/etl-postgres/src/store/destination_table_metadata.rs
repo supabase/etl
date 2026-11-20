@@ -2,7 +2,10 @@
 
 use std::collections::HashMap;
 
-use sqlx::{PgExecutor, Row, Type, postgres::types::Oid as SqlxTableId};
+use sqlx::{
+    PgExecutor, Row, Type,
+    postgres::{PgRow, types::Oid as SqlxTableId},
+};
 
 use crate::schema::{SnapshotId, TableId};
 
@@ -20,21 +23,27 @@ pub enum StoredDestinationTableSchemaStatus {
     Applied,
 }
 
-/// Parses snapshot IDs from their string representations.
-///
-/// Converts a required `snapshot_id` string and optional `previous_snapshot_id`
-/// string into their corresponding [`SnapshotId`] values.
-fn parse_snapshot_ids(
-    snapshot_id_str: &str,
-    previous_snapshot_id_str: Option<String>,
-) -> Result<(SnapshotId, Option<SnapshotId>), sqlx::Error> {
+/// Decodes destination table metadata from a database row.
+fn decode_metadata_row(row: PgRow) -> Result<StoredDestinationTableMetadataRow, sqlx::Error> {
+    let table_id: SqlxTableId = row.get("table_id");
+    let snapshot_id_str: String = row.get("snapshot_id");
+    let previous_snapshot_id_str: Option<String> = row.get("previous_snapshot_id");
     let snapshot_id =
         snapshot_id_str.parse::<SnapshotId>().map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
     let previous_snapshot_id = previous_snapshot_id_str
         .map(|s| s.parse::<SnapshotId>())
         .transpose()
         .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
-    Ok((snapshot_id, previous_snapshot_id))
+
+    Ok(StoredDestinationTableMetadataRow {
+        table_id: TableId::new(table_id.0),
+        destination_table_id: row.get("destination_table_id"),
+        snapshot_id,
+        replication_mask: row.get("replication_mask"),
+        previous_snapshot_id,
+        previous_replication_mask: row.get("previous_replication_mask"),
+        schema_status: row.get("schema_status"),
+    })
 }
 
 /// Database row representation of destination table metadata.
@@ -131,25 +140,8 @@ where
 
     let mut metadata = HashMap::new();
     for row in rows {
-        let table_id: SqlxTableId = row.get("table_id");
-        let table_id = TableId::new(table_id.0);
-        let snapshot_id_str: String = row.get("snapshot_id");
-        let previous_snapshot_id_str: Option<String> = row.get("previous_snapshot_id");
-        let (snapshot_id, previous_snapshot_id) =
-            parse_snapshot_ids(&snapshot_id_str, previous_snapshot_id_str)?;
-
-        metadata.insert(
-            table_id,
-            StoredDestinationTableMetadataRow {
-                table_id,
-                destination_table_id: row.get("destination_table_id"),
-                snapshot_id,
-                replication_mask: row.get("replication_mask"),
-                previous_snapshot_id,
-                previous_replication_mask: row.get("previous_replication_mask"),
-                schema_status: row.get("schema_status"),
-            },
-        );
+        let row = decode_metadata_row(row)?;
+        metadata.insert(row.table_id, row);
     }
 
     Ok(metadata)
@@ -177,26 +169,7 @@ where
     .fetch_optional(executor)
     .await?;
 
-    match row {
-        Some(r) => {
-            let table_id: SqlxTableId = r.get("table_id");
-            let snapshot_id_str: String = r.get("snapshot_id");
-            let previous_snapshot_id_str: Option<String> = r.get("previous_snapshot_id");
-            let (snapshot_id, previous_snapshot_id) =
-                parse_snapshot_ids(&snapshot_id_str, previous_snapshot_id_str)?;
-
-            Ok(Some(StoredDestinationTableMetadataRow {
-                table_id: TableId::new(table_id.0),
-                destination_table_id: r.get("destination_table_id"),
-                snapshot_id,
-                replication_mask: r.get("replication_mask"),
-                previous_snapshot_id,
-                previous_replication_mask: r.get("previous_replication_mask"),
-                schema_status: r.get("schema_status"),
-            }))
-        }
-        None => Ok(None),
-    }
+    row.map(decode_metadata_row).transpose()
 }
 
 /// Deletes all destination table metadata for a pipeline.

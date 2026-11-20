@@ -255,9 +255,9 @@ pooler while background reads and maintenance discovery reach it. It also
 exercises post-commit retries, replay reset, restart, checkpoints, and direct
 coordination migrations.
 
-The `catalog_metadata_without_coordination_waits_for_metrics_sampler` test covers
-the pooled-writer experiment's metadata path with coordination disabled. It
-allows the metrics sampler's first 30-second tick before asserting pooled reads.
+The `catalog_metadata_without_coordination_samples_metrics_through_pooler` test
+covers the pooled-writer experiment's metadata path with coordination disabled.
+It runs one metrics sampler pass on demand before asserting pooled reads.
 
 The ignored `transaction_pooler_catalog_roundtrip` runs the same checks against
 a real transaction pooler. Point
@@ -325,6 +325,12 @@ Parser fuzz targets live in `fuzz/`. The nightly `Fuzz` workflow fuzzes each
 target for two minutes, and every CI run replays the committed `fuzz/corpus/`
 seeds once.
 
+Property tests run generated cases until a wall-clock budget elapses: 2 seconds
+for cheap properties and 32 seconds for expensive ones. `PROPERTY_TEST_BUDGET_SECS`
+overrides the budget for every property, and `PROPERTY_TEST_SEED` replays the
+failing chunk a property reports. The nightly `Property tests` workflow runs the
+full suite with a 300-second budget; dispatch it manually to choose another.
+
 Use cargo-nextest 0.9.148 or newer; CI pins 0.9.148. The repository requires
 this version to include the [capture-pipe inheritance fix](https://github.com/nextest-rs/nextest/pull/3553)
 that prevents false `LEAK` reports during parallel test runs on macOS. The Nix
@@ -381,8 +387,16 @@ digest, and verifies the combined manifest before tagging it at
 source SHA. CI image checks and publishing share the build action but use
 separate persistent Blacksmith caches: one for CI, one for manual experimental
 publishes, and one for merged-main publishes. State written by pull-request or
-experimental builds never reaches a stable image. The Dockerfile keeps Cargo's
-registry and target directory in BuildKit cache mounts, so a lockfile change
+experimental builds never reaches a stable image. Publishing runs on pushes to
+`main` so Blacksmith can persist its cache. A single merged-PR lookup selects
+ordinary or release publishing, so both paths use the same routing decision.
+
+Publishing assumes one merged PR per push to `main`. If enabling a merge queue,
+set "Maximum pull requests to merge" to 1. Supporting larger batches requires
+updating release routing to process every merged PR in the push.
+
+The Dockerfile keeps Cargo's registry and target directory in BuildKit cache
+mounts, so a lockfile change
 rebuilds only the crates it affects; workspace crates always recompile. Pulling these images requires no private registry access. Only a merged-main PR at the current main tip can promote
 `latest`; manual builds never do. Require `CI passed` in branch protection
 after its first run, replacing old required job names including `Snowflake Gate`.
