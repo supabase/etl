@@ -195,10 +195,9 @@ const STREAMING_PROGRESS_TABLE: &str = "__etl_streaming_progress";
 const MAX_COMMIT_RETRIES: u32 = 10;
 /// Initial backoff duration before the first retry.
 const INITIAL_RETRY_DELAY_MS: u64 = 50;
-/// Upper bound on backoff duration.
-const MAX_RETRY_DELAY_MS: u64 = 2_000;
-/// Minimum retry delay for transient delete-file visibility failures.
-const TRANSIENT_DELETE_FILE_RETRY_DELAY_MS: u64 = 5_000;
+/// Upper bound on backoff duration, long enough for transient delete-file
+/// visibility failures to clear.
+const MAX_RETRY_DELAY_MS: u64 = 5_000;
 
 /// Event-level table mutations that must be applied in order.
 pub(super) enum TableMutation {
@@ -775,9 +774,7 @@ fn batch_retry_policy() -> RetryPolicy {
     RetryPolicy {
         max_retries: MAX_COMMIT_RETRIES,
         initial_delay: Duration::from_millis(INITIAL_RETRY_DELAY_MS),
-        max_delay: Duration::from_millis(
-            MAX_RETRY_DELAY_MS.max(TRANSIENT_DELETE_FILE_RETRY_DELAY_MS),
-        ),
+        max_delay: Duration::from_millis(MAX_RETRY_DELAY_MS),
     }
 }
 

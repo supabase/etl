@@ -1,11 +1,20 @@
 //! DuckLake-specific configuration helpers.
 
-use std::{io, path::PathBuf, str::FromStr};
+use std::{io, path::PathBuf, str::FromStr, time::Duration};
 
 use sqlx::postgres::{PgConnectOptions, PgSslMode};
 use thiserror::Error;
 use tokio_postgres::{Config as PgConfig, config::SslMode};
 use url::Url;
+
+/// Longest wait for a pooled DuckLake catalog connection.
+///
+/// SQLx counts connect retries, TLS, startup, and its liveness ping against
+/// this bound. Cold connections to remote Postgres take several seconds in
+/// production, which leaves little margin under a 5 s bound. This stays below
+/// SQLx's 30 s default because an unreachable pooler holds the first metadata
+/// read for this long before it falls back to the direct catalog connection.
+pub const DUCKLAKE_CATALOG_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Errors returned by [`parse_ducklake_url`].
 #[derive(Debug, Error)]

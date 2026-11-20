@@ -19,7 +19,7 @@ pub use rest_client::RestStreamClient;
 use crate::{retry::RetryPolicy, snowflake::Result};
 
 /// HTTP retry policy and backoff bounds shared with channel replay recovery.
-const SNOWPIPE_RETRY_POLICY: RetryPolicy = RetryPolicy {
+pub(super) const SNOWPIPE_RETRY_POLICY: RetryPolicy = RetryPolicy {
     max_retries: 3,
     initial_delay: Duration::from_millis(500),
     max_delay: Duration::from_secs(10),
