@@ -21,7 +21,7 @@ use super::{
     ExternalMaintenanceReplicatorStatus, ExternalMaintenanceRequestOutcome, ExternalMaintenanceRun,
     ExternalMaintenanceState, ExternalMaintenanceStore,
 };
-use crate::coordination::telemetry::MaintenanceRunnerReport;
+use crate::coordination::report::MaintenanceRunnerReport;
 
 const CR_NAME_ENV: &str = "ETL_DUCKLAKE_MAINTENANCE_CR_NAME";
 const CR_NAMESPACE_ENV: &str = "ETL_DUCKLAKE_MAINTENANCE_CR_NAMESPACE";
@@ -301,12 +301,7 @@ async fn patch_status(
 
 fn state_from_ducklake_maintenance_cr(resource: &DynamicObject) -> ExternalMaintenanceState {
     let mut state = ExternalMaintenanceState::present();
-    state.customer_metrics = resource
-        .data
-        .get("status")
-        .and_then(|status| status.get("customerMetrics"))
-        .cloned()
-        .and_then(|value| serde_json::from_value(value).ok());
+
     state.pause_request = active_pause_request(resource);
     state.active_run = active_run(resource);
     state.operation_request = operation_request(resource);
@@ -567,7 +562,7 @@ mod reporting_tests {
     use tower::service_fn;
 
     use super::*;
-    use crate::coordination::telemetry::{InlineFlushSummaries, MaintenanceResults};
+    use crate::coordination::report::{InlineFlushSummaries, MaintenanceResults};
 
     fn target() -> DynamicObject {
         serde_json::from_value(json!({

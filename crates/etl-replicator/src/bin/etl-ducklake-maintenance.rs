@@ -18,7 +18,7 @@ use etl_maintenance::{
         MergeAdjacentFilesMaintenanceConfig, RewriteDataFilesMaintenanceConfig,
         S3Config as DuckLakeS3Config, run_maintenance_once,
     },
-    telemetry::{MaintenanceResults, MaintenanceRunnerReport},
+    report::{MaintenanceResults, MaintenanceRunnerReport},
 };
 use rustls::crypto::aws_lc_rs;
 use secrecy::ExposeSecret;

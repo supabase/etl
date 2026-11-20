@@ -197,7 +197,6 @@ impl ExternalMaintenanceStore for PostgresExternalMaintenanceStore {
             .into_parts();
 
         Ok(ExternalMaintenanceState {
-            customer_metrics: None,
             exists: true,
             active_run: row
                 .try_get::<Option<Json<ExternalMaintenanceRun>>, _>("active_run")

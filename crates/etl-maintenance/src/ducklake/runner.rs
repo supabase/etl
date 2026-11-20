@@ -40,7 +40,7 @@ use tracing::{debug, info, trace, warn};
 use url::Url;
 
 use crate::{
-    coordination::telemetry::InlineFlushSummaries,
+    coordination::report::InlineFlushSummaries,
     ducklake::{
         DataFileRewriteReason, DuckLakeMetadataPool, RedactedDuckDbError,
         configure_parquet_settings_sql, duckdb_version_check_sql, namespace_version_check_sql,

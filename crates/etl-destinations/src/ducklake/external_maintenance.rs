@@ -2,6 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use chrono::{DateTime, TimeDelta, Utc};
 use etl::{error::EtlResult, pipeline::PipelineId, store::DestinationStore};
+use etl_maintenance::ducklake::DataFileRewriteReason;
 pub use etl_maintenance::{
     ExternalMaintenanceOperationHistory, ExternalMaintenanceOperationPolicy,
     ExternalMaintenanceOperationRequest, ExternalMaintenanceOperationRun,
@@ -11,7 +12,6 @@ pub use etl_maintenance::{
     ExternalMaintenanceStore, ExternalMaintenanceWatcherConfig, KubernetesExternalMaintenanceStore,
     PostgresExternalMaintenanceStore,
 };
-use etl_maintenance::{ducklake::DataFileRewriteReason, telemetry::record_maintenance_metrics};
 use metrics::{counter, gauge, histogram};
 use sqlx::PgPool;
 use tokio::time;
@@ -131,7 +131,6 @@ where
     loop {
         match time::timeout(config.store_timeout, store.load_state()).await {
             Ok(Ok(state)) => {
-                record_maintenance_metrics(state.customer_metrics.as_ref());
                 if !state.exists {
                     if let Err(error) =
                         release_missing_state_pause(&store, &destination, &mut held_pause).await
@@ -170,7 +169,6 @@ where
                 }
             }
             Ok(Err(error)) => {
-                record_maintenance_metrics(None);
                 warn!(
                     error = %error,
                     timeout_ms = config.store_timeout.as_millis() as u64,
@@ -188,7 +186,6 @@ where
                 }
             }
             Err(_) => {
-                record_maintenance_metrics(None);
                 warn!(
                     timeout_ms = config.store_timeout.as_millis() as u64,
                     "timed out reading ducklake external maintenance state"

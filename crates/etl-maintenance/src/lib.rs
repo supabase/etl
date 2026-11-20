@@ -15,7 +15,7 @@ pub use coordination::{
     ExternalMaintenanceReplicatorState, ExternalMaintenanceReplicatorStatus,
     ExternalMaintenanceRequestOutcome, ExternalMaintenanceRun, ExternalMaintenanceState,
     ExternalMaintenanceStore, ExternalMaintenanceWatcherConfig, PostgresExternalMaintenanceStore,
-    telemetry,
+    report,
 };
 pub use materialization::{
     DisabledMaintenanceMaterializer, DuckLakeMaintenanceMaterialization, DuckLakeMaintenancePolicy,

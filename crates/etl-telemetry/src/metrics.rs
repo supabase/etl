@@ -141,9 +141,6 @@ pub fn init_metrics(
 
     if let Some(destination) = destination {
         builder = builder.add_global_label("destination", destination);
-        if destination == "ducklake" {
-            builder = builder.add_global_label("customer_metrics_version", "1");
-        }
     }
 
     let handle = builder.install_recorder()?;
