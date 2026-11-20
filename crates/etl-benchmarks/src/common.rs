@@ -967,6 +967,7 @@ pub fn init_benchmark_tracing(log_target: LogTarget, name: &str) -> Result<LogFl
 fn pg_connect_options(args: &PgConnectionArgs) -> PgConnectOptions {
     let mut options = PgConnectOptions::new()
         .host(&args.host)
+        .clear_hostaddr()
         .port(args.port)
         .database(&args.database)
         .username(&args.username)

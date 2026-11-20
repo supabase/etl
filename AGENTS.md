@@ -17,7 +17,7 @@ Do this on a fresh clone before tests, examples, or local services.
 2. SQLx CLI (migrations; `cargo x init` needs it):
 
    ```bash
-   cargo install --version 0.9.0 sqlx-cli --no-default-features --features rustls,postgres --locked
+   cargo install --version 0.9.1 sqlx-cli --no-default-features --features rustls,postgres --locked
    ```
 
 3. Start the local data plane (Postgres, ClickHouse, migrations).
