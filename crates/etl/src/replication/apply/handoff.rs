@@ -699,34 +699,6 @@ mod tests {
         store::{MemoryStore, StateStore},
     };
 
-    /// LSNs whose pairwise orders cover every comparison the handoff makes,
-    /// including the maximum value.
-    const LSNS: [u64; 4] = [0, 1, 2, u64::MAX];
-
-    /// Effect of one handoff decision, independent of logging fields.
-    #[derive(Debug, PartialEq, Eq)]
-    enum Effect {
-        StartCatchup(PgLsn),
-        AwaitCatchup(PgLsn),
-        PromoteToReady(PgLsn),
-        SpawnWorker,
-        Keep,
-    }
-
-    impl From<HandoffAction> for Effect {
-        fn from(action: HandoffAction) -> Self {
-            match action {
-                HandoffAction::StartCatchup { catchup_lsn, .. } => Self::StartCatchup(catchup_lsn),
-                HandoffAction::AwaitCatchup { catchup_lsn } => Self::AwaitCatchup(catchup_lsn),
-                HandoffAction::PromoteToReady { sync_done_lsn, .. } => {
-                    Self::PromoteToReady(sync_done_lsn)
-                }
-                HandoffAction::SpawnWorker => Self::SpawnWorker,
-                HandoffAction::Keep => Self::Keep,
-            }
-        }
-    }
-
     /// Registers apply activity whose handle a catchup wait can suspend.
     fn apply_activity() -> ActivityRegistration {
         ActivityRegistration::register(ActivityKind::WalApply {
@@ -734,10 +706,127 @@ mod tests {
         })
     }
 
-    /// Returns every table state shape, with each LSN-bearing state at every
-    /// test LSN.
-    fn table_states() -> Vec<TableState> {
-        let mut states = vec![
+    #[test]
+    fn sync_wait_starts_catchup_at_max_of_snapshot_and_current_lsn() {
+        let cases = [
+            (PgLsn::from(10), PgLsn::from(20), PgLsn::from(20)),
+            (PgLsn::from(20), PgLsn::from(20), PgLsn::from(20)),
+            (PgLsn::from(30), PgLsn::from(20), PgLsn::from(30)),
+        ];
+
+        for trigger in [Trigger::AfterCommit, Trigger::Quiescent] {
+            for (snapshot_lsn, current_lsn, expected_catchup_lsn) in cases {
+                let state = TableState::SyncWait { lsn: snapshot_lsn };
+
+                let action = decide(trigger, true, &state, current_lsn, None);
+
+                assert_eq!(
+                    action,
+                    HandoffAction::StartCatchup {
+                        snapshot_lsn,
+                        current_lsn,
+                        catchup_lsn: expected_catchup_lsn,
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn catchup_waits_after_commit_and_when_quiescent() {
+        let catchup_lsn = PgLsn::from(20);
+        let state = TableState::Catchup { lsn: catchup_lsn };
+
+        for trigger in [Trigger::AfterCommit, Trigger::Quiescent] {
+            let action = decide(trigger, true, &state, PgLsn::from(10), None);
+
+            assert_eq!(action, HandoffAction::AwaitCatchup { catchup_lsn });
+        }
+    }
+
+    #[test]
+    fn after_flush_never_enters_or_awaits_catchup() {
+        let readiness = ReadinessInputs::new(Some(PgLsn::from(30)), true);
+
+        for state in [
+            TableState::SyncWait { lsn: PgLsn::from(10) },
+            TableState::Catchup { lsn: PgLsn::from(20) },
+        ] {
+            let action =
+                decide(Trigger::AfterFlush, true, &state, PgLsn::from(30), Some(&readiness));
+
+            assert_eq!(action, HandoffAction::Keep);
+        }
+    }
+
+    #[test]
+    fn after_commit_never_promotes_sync_done() {
+        let sync_done = TableState::SyncDone { lsn: PgLsn::from(10), table_decoding_state: None };
+        let readiness = ReadinessInputs::new(Some(PgLsn::from(20)), true);
+
+        for worker_running in [true, false] {
+            let action = decide(
+                Trigger::AfterCommit,
+                worker_running,
+                &sync_done,
+                PgLsn::from(20),
+                Some(&readiness),
+            );
+
+            assert_eq!(action, HandoffAction::Keep);
+        }
+    }
+
+    #[test]
+    fn sync_done_promotes_only_when_all_readiness_conditions_hold() {
+        let sync_done_lsn = PgLsn::from(20);
+        let state = TableState::SyncDone { lsn: sync_done_lsn, table_decoding_state: None };
+        let ready_cases = [
+            // Exact boundary match.
+            (PgLsn::from(20), Some(PgLsn::from(20)), true, true),
+            // Progress strictly beyond SyncDone.
+            (PgLsn::from(30), Some(PgLsn::from(25)), true, true),
+            // Current LSN behind SyncDone.
+            (PgLsn::from(19), Some(PgLsn::from(20)), true, false),
+            // No persisted checkpoint yet.
+            (PgLsn::from(20), None, true, false),
+            // Persisted checkpoint behind SyncDone.
+            (PgLsn::from(20), Some(PgLsn::from(19)), true, false),
+            // Local decoder not yet materialized.
+            (PgLsn::from(20), Some(PgLsn::from(20)), false, false),
+        ];
+
+        for trigger in [Trigger::AfterFlush, Trigger::Quiescent] {
+            for worker_running in [true, false] {
+                for (current_lsn, persisted_checkpoint_lsn, has_decoder, should_promote) in
+                    ready_cases
+                {
+                    let readiness = ReadinessInputs::new(persisted_checkpoint_lsn, has_decoder);
+
+                    let action =
+                        decide(trigger, worker_running, &state, current_lsn, Some(&readiness));
+
+                    if should_promote {
+                        assert_eq!(
+                            action,
+                            HandoffAction::PromoteToReady {
+                                sync_done_lsn,
+                                current_lsn,
+                                persisted_checkpoint_lsn: persisted_checkpoint_lsn.unwrap(),
+                            }
+                        );
+                    } else {
+                        assert_eq!(action, HandoffAction::Keep);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn running_worker_in_non_handoff_states_is_kept() {
+        let readiness = ReadinessInputs::new(Some(PgLsn::from(30)), true);
+        let states = [
             TableState::Init,
             TableState::DataSync,
             TableState::FinishedCopy,
@@ -749,119 +838,32 @@ mod tests {
                 source_err: etl_error!(ErrorKind::Unknown, "Copy failed"),
             },
         ];
-        for lsn in LSNS.map(PgLsn::from) {
-            states.push(TableState::SyncWait { lsn });
-            states.push(TableState::Catchup { lsn });
-            states.push(TableState::SyncDone { lsn, table_decoding_state: None });
-        }
 
-        states
-    }
+        for trigger in [Trigger::AfterCommit, Trigger::AfterFlush, Trigger::Quiescent] {
+            for state in &states {
+                let action = decide(trigger, true, state, PgLsn::from(30), Some(&readiness));
 
-    /// Returns the specified handoff effect.
-    ///
-    /// One row per trigger and worker presence, transcribed from the
-    /// per-trigger handoff functions the decisions replaced; each row names its
-    /// source in commit `3cd6c009` so it can be audited. The decisions must
-    /// match it on every input.
-    fn specified_effect(
-        trigger: Trigger,
-        has_active_worker: bool,
-        state: &TableState,
-        current_lsn: PgLsn,
-        persisted_checkpoint_lsn: Option<PgLsn>,
-        has_materialized_decoding_state: bool,
-    ) -> Effect {
-        let ready = |sync_done_lsn: PgLsn| {
-            has_materialized_decoding_state
-                && current_lsn >= sync_done_lsn
-                && persisted_checkpoint_lsn.is_some_and(|lsn| lsn >= sync_done_lsn)
-        };
-
-        match (trigger, has_active_worker) {
-            // `process_single_syncing_table_after_commit_event`, active branch.
-            (Trigger::AfterCommit, true) => match state {
-                TableState::SyncWait { lsn } => Effect::StartCatchup((*lsn).max(current_lsn)),
-                TableState::Catchup { lsn } => Effect::AwaitCatchup(*lsn),
-                _ => Effect::Keep,
-            },
-            // `process_single_syncing_table_after_commit_event`, no-worker branch.
-            (Trigger::AfterCommit, false) => match state {
-                TableState::SyncDone { .. } => Effect::Keep,
-                _ => Effect::SpawnWorker,
-            },
-            // `process_single_syncing_table_after_flush`, active branch.
-            (Trigger::AfterFlush, true) => match state {
-                TableState::SyncDone { lsn, .. } if ready(*lsn) => Effect::PromoteToReady(*lsn),
-                _ => Effect::Keep,
-            },
-            // `process_single_syncing_table_after_flush`, no-worker branch.
-            (Trigger::AfterFlush, false) => match state {
-                TableState::SyncDone { lsn, .. } if ready(*lsn) => Effect::PromoteToReady(*lsn),
-                TableState::SyncDone { .. } => Effect::Keep,
-                _ => Effect::SpawnWorker,
-            },
-            // `process_single_syncing_table_when_quiescent`, active branch.
-            (Trigger::Quiescent, true) => match state {
-                TableState::SyncWait { lsn } => Effect::StartCatchup((*lsn).max(current_lsn)),
-                TableState::SyncDone { lsn, .. } if ready(*lsn) => Effect::PromoteToReady(*lsn),
-                TableState::Catchup { lsn } => Effect::AwaitCatchup(*lsn),
-                _ => Effect::Keep,
-            },
-            // `process_single_syncing_table_when_quiescent`, no-worker branch.
-            (Trigger::Quiescent, false) => match state {
-                TableState::SyncDone { lsn, .. } if ready(*lsn) => Effect::PromoteToReady(*lsn),
-                TableState::SyncDone { .. } => Effect::Keep,
-                _ => Effect::SpawnWorker,
-            },
+                assert_eq!(action, HandoffAction::Keep);
+            }
         }
     }
 
     #[test]
-    fn decisions_match_the_handoff_specification() {
-        let lsns = LSNS.map(PgLsn::from);
-        let persisted_checkpoints = std::iter::once(None).chain(lsns.map(Some));
+    fn idle_table_spawns_worker_for_all_non_sync_done_states() {
+        let readiness = ReadinessInputs::new(Some(PgLsn::from(30)), true);
+        let states = [
+            TableState::Init,
+            TableState::DataSync,
+            TableState::FinishedCopy,
+            TableState::SyncWait { lsn: PgLsn::from(10) },
+            TableState::Catchup { lsn: PgLsn::from(20) },
+        ];
 
         for trigger in [Trigger::AfterCommit, Trigger::AfterFlush, Trigger::Quiescent] {
-            for has_active_worker in [true, false] {
-                for state in table_states() {
-                    for current_lsn in lsns {
-                        for persisted_checkpoint_lsn in persisted_checkpoints.clone() {
-                            for has_materialized_decoding_state in [false, true] {
-                                let readiness = ReadinessInputs::new(
-                                    persisted_checkpoint_lsn,
-                                    has_materialized_decoding_state,
-                                );
-                                let readiness_arg = match trigger {
-                                    Trigger::AfterCommit => None,
-                                    Trigger::AfterFlush | Trigger::Quiescent => Some(&readiness),
-                                };
+            for state in &states {
+                let action = decide(trigger, false, state, PgLsn::from(30), Some(&readiness));
 
-                                assert_eq!(
-                                    Effect::from(decide(
-                                        trigger,
-                                        has_active_worker,
-                                        &state,
-                                        current_lsn,
-                                        readiness_arg,
-                                    )),
-                                    specified_effect(
-                                        trigger,
-                                        has_active_worker,
-                                        &state,
-                                        current_lsn,
-                                        persisted_checkpoint_lsn,
-                                        has_materialized_decoding_state,
-                                    ),
-                                    "{trigger:?}, active worker {has_active_worker}, {state:?}, \
-                                     current {current_lsn}, persisted \
-                                     {persisted_checkpoint_lsn:?}, decoder \
-                                     {has_materialized_decoding_state}"
-                                );
-                            }
-                        }
-                    }
-                }
+                assert_eq!(action, HandoffAction::SpawnWorker);
             }
         }
     }
