@@ -2328,9 +2328,10 @@ async fn schema_change_capture_default_deparsing_matches_postgres() {
     let slot_name = test_slot_name("default_deparsing");
     let slot = replication.create_slot(&slot_name, &Default::default()).await.unwrap();
 
-    // Any captured command describes every column's current default.
+    // Any captured command describes every column's current default; this one
+    // leaves all defaults unchanged.
     client
-        .batch_execute("alter table test.default_expressions alter column arithmetic set default 5")
+        .batch_execute("alter table test.default_expressions alter column literal set not null")
         .await
         .unwrap();
 
@@ -2510,6 +2511,24 @@ async fn partition_primary_key_metadata_is_table_local() {
         let expected: &[&str] = if parent_only { &[] } else { &["id", "part"] };
         assert_eq!(primary_key, expected);
         assert!(!schema.primary_key_deferrable);
+
+        // The decoder builds row identity from this source-to-decoder payload
+        // field, so it must use the leaf's own key in leaf attribute numbers.
+        let replica_identity: JsonValue = database
+            .client
+            .as_ref()
+            .unwrap()
+            .query_one(
+                "select etl.describe_table_identity($1::text::regclass) -> \
+                 'replica_identity_attnums'",
+                &[&leaf.as_quoted_identifier()],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        let expected_identity =
+            if parent_only { serde_json::json!([]) } else { serde_json::json!([2, 1]) };
+        assert_eq!(replica_identity, expected_identity);
     }
 }
 
@@ -3356,8 +3375,9 @@ async fn schema_change_capture_can_be_skipped_disabled_or_fail_open() {
     let slot_name = test_slot_name("ddl_skip_log_slot");
     let slot = client.create_slot(&slot_name, &Default::default()).await.unwrap();
     // A session opt-out, a disabled trigger, and a failing capture each let
-    // the DDL commit without emitting a snapshot. Moving the helper schema
-    // makes capture fail while the trigger itself still runs.
+    // the DDL commit without emitting a snapshot. Renaming a helper updates
+    // its catalog row, which also invalidates any plan the trigger cached in
+    // this session, so capture fails regardless of earlier captures.
     for sql in [
         "set supabase_etl.skip_ddl_log = 'true'".to_owned(),
         format!("alter table {table} add column skipped text"),
@@ -3365,9 +3385,13 @@ async fn schema_change_capture_can_be_skipped_disabled_or_fail_open() {
         "alter event trigger supabase_etl_ddl_message_trigger disable".to_owned(),
         format!("alter table {table} add column disabled text"),
         "alter event trigger supabase_etl_ddl_message_trigger enable".to_owned(),
-        "alter schema etl rename to etl_moved".to_owned(),
+        "alter function etl.describe_table_publication_columns(oid, text) rename to \
+         describe_table_publication_columns_moved"
+            .to_owned(),
         format!("alter table {table} add column failed text"),
-        "alter schema etl_moved rename to etl".to_owned(),
+        "alter function etl.describe_table_publication_columns_moved(oid, text) rename to \
+         describe_table_publication_columns"
+            .to_owned(),
         format!("alter table {table} add column captured text"),
     ] {
         database.run_sql(&sql).await.unwrap();

@@ -1076,6 +1076,8 @@ async fn schema_change_add_column() {
 /// follow the final source default, including removal.
 #[tokio::test(flavor = "multi_thread")]
 async fn ddl_defaults_preserve_existing_rows_and_future_defaults() {
+    init_test_tracing();
+
     let mut database = spawn_source_database().await;
     let table_name = test_table_name("ordered_ddl_defaults");
     let table_id =
