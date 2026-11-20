@@ -6,7 +6,7 @@ Install the Rust toolchain pinned in `rust-toolchain.toml`, `psql`, Docker
 Compose, and SQLx CLI. Install cargo-nextest if you plan to run tests.
 
 ```bash
-cargo install --version 0.9.0 sqlx-cli --no-default-features --features rustls,postgres --locked
+cargo install --version 0.9.1 sqlx-cli --no-default-features --features rustls,postgres --locked
 ```
 
 Start the PostgreSQL 19 primary, read replica, and ClickHouse, then apply

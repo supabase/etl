@@ -2,7 +2,10 @@
 
 use std::{io, path::PathBuf, str::FromStr, time::Duration};
 
-use sqlx::postgres::{PgConnectOptions, PgSslMode};
+use sqlx::{
+    ConnectOptions,
+    postgres::{PgConnectOptions, PgSslMode},
+};
 use thiserror::Error;
 use tokio_postgres::{Config as PgConfig, config::SslMode};
 use url::Url;
@@ -93,8 +96,23 @@ pub fn ducklake_catalog_metadata_connect_options(
 ) -> Result<PgConnectOptions, DuckLakeCatalogConnectOptionsError> {
     let config = PgConfig::from_str(catalog_url.as_str())
         .map_err(DuckLakeCatalogConnectOptionsError::TokioPostgres)?;
-    let mut options = PgConnectOptions::from_str(catalog_url.as_str())
-        .map_err(DuckLakeCatalogConnectOptionsError::Sqlx)?;
+
+    let mut options = if config.get_hostaddrs().is_empty() {
+        PgConnectOptions::from_url(catalog_url)
+    } else {
+        // SQLx previously treated each hostaddr as host during URL parsing and
+        // password-file lookup. Preserve parameter order and accept
+        // libpq's comma-separated address lists.
+        let mut url = catalog_url.clone();
+        url.query_pairs_mut().clear().extend_pairs(
+            catalog_url
+                .query_pairs()
+                .map(|(key, value)| (if key == "hostaddr" { "host".into() } else { key }, value)),
+        );
+        PgConnectOptions::from_url(&url)
+    }
+    .map_err(DuckLakeCatalogConnectOptionsError::Sqlx)?
+    .clear_hostaddr();
 
     if let Some(hostaddr) = config.get_hostaddrs().first() {
         options = options.host(&hostaddr.to_string());
@@ -118,8 +136,7 @@ fn sqlx_ssl_mode(
         SslMode::Require => Ok(PgSslMode::Require),
         SslMode::VerifyCa => Ok(PgSslMode::VerifyCa),
         SslMode::VerifyFull if hostaddrs.is_empty() => Ok(PgSslMode::VerifyFull),
-        // sqlx does not expose libpq's separate hostaddr field. When dialing a numeric address,
-        // verify the CA but avoid hostname verification against the IP literal.
+        // Pinned catalog connections currently use the IP itself as the SQLx host.
         SslMode::VerifyFull => Ok(PgSslMode::VerifyCa),
         _ => Err(DuckLakeCatalogConnectOptionsError::UnsupportedSslMode),
     }
@@ -278,6 +295,23 @@ mod tests {
 
         assert_eq!(options.get_host(), "2001:db8::10");
         assert!(matches!(options.get_ssl_mode(), PgSslMode::VerifyCa));
+    }
+
+    /// Catalog metadata uses the first address for both libpq list spellings.
+    #[test]
+    fn catalog_metadata_uses_first_configured_address() {
+        for addresses in ["192.0.2.10,2001:db8::11", "192.0.2.10&hostaddr=2001:db8::11"] {
+            let url = Url::parse(&format!(
+                "postgres://catalog.example/catalog?hostaddr={addresses}&sslmode=verify-full"
+            ))
+            .unwrap();
+
+            let options = ducklake_catalog_metadata_connect_options(&url).unwrap();
+
+            assert_eq!(options.get_host(), "192.0.2.10");
+            assert!(!options.to_url_lossy().query_pairs().any(|(key, _)| key == "hostaddr"));
+            assert!(matches!(options.get_ssl_mode(), PgSslMode::VerifyCa));
+        }
     }
 
     #[test]

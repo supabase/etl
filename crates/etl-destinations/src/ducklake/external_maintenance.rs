@@ -307,9 +307,11 @@ where
         return Ok(());
     }
 
-    let mut pool_refresh_required = false;
+    if let Some(held) = held_pause.as_mut() {
+        refresh_pools_if_required(destination, held).await?;
+    }
+
     if let Some(held) = held_pause.take() {
-        pool_refresh_required = held.pool_refresh_required;
         info!(
             previous_run_id = %held.run_id,
             next_run_id = %pause.run_id,
@@ -391,7 +393,7 @@ where
         operations,
         quiesced_at,
         quiesced_reported,
-        pool_refresh_required,
+        pool_refresh_required: false,
         pause: Arc::new(external_pause),
     });
 
