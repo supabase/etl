@@ -120,7 +120,7 @@ struct Inner {
     /// Eagerly loaded checkpoints shared by every clone of this store.
     replication_checkpoints: HashMap<WorkerType, PgLsn>,
     /// All retained schema versions, kept until durable-checkpoint pruning.
-    table_schemas: Arc<TableSchemaSnapshots>,
+    table_schemas: TableSchemaSnapshots,
     /// Last successfully pruned retention boundary per table.
     ///
     /// Schema writes at or below a remembered boundary and table lifecycle
@@ -432,8 +432,8 @@ impl PostgresStore {
 
         refreshed.init_state_counts(&table_states);
         refreshed.table_states = Arc::new(table_states);
-        refreshed.destination_tables_metadata = Arc::new(metadata);
-        Arc::make_mut(&mut refreshed.table_schemas).replace_all(table_schemas);
+        refreshed.destination_tables_metadata = metadata;
+        refreshed.table_schemas.replace_all(table_schemas);
 
         Ok(refreshed)
     }
@@ -692,7 +692,7 @@ impl StateStore for PostgresStore {
         })
         .await?;
 
-        Arc::make_mut(&mut inner.destination_tables_metadata).insert(table_id, metadata);
+        inner.destination_tables_metadata.insert(table_id, metadata);
         inner.usable = true;
 
         Ok(())
@@ -758,7 +758,7 @@ impl SchemaStore for PostgresStore {
             inner.schema_prune_boundaries.remove(&table_schema.id);
         }
 
-        let schema = Arc::make_mut(&mut inner.table_schemas).insert(table_schema);
+        let schema = inner.table_schemas.insert(table_schema);
         inner.usable = true;
 
         Ok(schema)
@@ -803,7 +803,7 @@ impl SchemaStore for PostgresStore {
             })
             .await?;
 
-        let cached_count = Arc::make_mut(&mut inner.table_schemas).prune(&retention_snapshot_ids);
+        let cached_count = inner.table_schemas.prune(&retention_snapshot_ids);
 
         if deleted_count > 0 || cached_count > 0 {
             debug!(
@@ -881,8 +881,8 @@ impl TableStateLifecycleStore for PostgresStore {
                 inner.schema_prune_boundaries.remove(&table_id);
                 inner.replication_checkpoints.remove(&worker_type);
 
-                Arc::make_mut(&mut inner.table_schemas).remove_table(table_id);
-                Arc::make_mut(&mut inner.destination_tables_metadata).remove(&table_id);
+                inner.table_schemas.remove_table(table_id);
+                inner.destination_tables_metadata.remove(&table_id);
                 inner.usable = true;
 
                 Ok(())
@@ -995,8 +995,8 @@ impl TableStateLifecycleStore for PostgresStore {
 
                 inner.remove_table_state(table_id);
                 emit_table_metrics(&inner.state_counts);
-                Arc::make_mut(&mut inner.table_schemas).remove_table(table_id);
-                Arc::make_mut(&mut inner.destination_tables_metadata).remove(&table_id);
+                inner.table_schemas.remove_table(table_id);
+                inner.destination_tables_metadata.remove(&table_id);
                 inner.usable = true;
 
                 Ok(())

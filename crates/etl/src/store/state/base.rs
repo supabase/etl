@@ -10,8 +10,8 @@ use crate::{
 /// Arc-wrapped dictionary of table states.
 pub type TableStates = Arc<BTreeMap<TableId, TableState>>;
 
-/// Arc-wrapped dictionary of destination table metadata.
-pub(crate) type DestinationTablesMetadata = Arc<BTreeMap<TableId, DestinationTableMetadata>>;
+/// Destination table metadata indexed by source table ID.
+pub(crate) type DestinationTablesMetadata = BTreeMap<TableId, DestinationTableMetadata>;
 
 /// Stores table states, replication checkpoints, and destination metadata.
 ///
