@@ -318,20 +318,23 @@ pub trait IntoConnectOptions<Output> {
 impl IntoConnectOptions<SqlxConnectOptions> for PgConnectionConfig {
     /// Creates sqlx connection options without database name.
     fn without_db(&self, options: Option<&PgConnectionOptions>) -> SqlxConnectOptions {
-        let host = self.hostaddr.map_or_else(|| self.host.clone(), |hostaddr| hostaddr.to_string());
-        let ssl_mode = match (self.tls.enabled, self.hostaddr) {
-            // Pinned connections currently use the IP itself as the SQLx host.
-            (true, Some(_)) => SqlxSslMode::VerifyCa,
-            (true, None) => SqlxSslMode::VerifyFull,
-            (false, _) => SqlxSslMode::Prefer,
-        };
+        let ssl_mode = if self.tls.enabled { SqlxSslMode::VerifyFull } else { SqlxSslMode::Prefer };
         let mut connect_options = SqlxConnectOptions::new_without_pgpass()
-            .host(&host)
+            .host(&self.host)
             .clear_hostaddr()
             .username(&self.username)
             .port(self.port)
             .ssl_mode(ssl_mode)
             .ssl_root_cert_from_pem(self.tls.trusted_root_certs.clone().into_bytes());
+
+        if let Some(hostaddr) = self.hostaddr {
+            connect_options = connect_options.hostaddr(hostaddr);
+
+            // Address-only TCP configurations have no DNS identity to verify.
+            if self.host.is_empty() || self.host.starts_with('/') {
+                connect_options = connect_options.host(&hostaddr.to_string());
+            }
+        }
 
         // Always override SQLx's inherited PGPASSWORD, including when no
         // password is configured.
@@ -532,13 +535,52 @@ mod tests {
 
     #[test]
     fn sqlx_options_use_hostaddr_as_network_target() {
-        let hostaddr = "2a05:d014:1c06:5f0c:d7a9:8616:bee2:30df".parse().unwrap();
-        let config = pg_connection_config(Some(hostaddr));
+        for address in ["192.0.2.10", "2001:db8::10"] {
+            let config = pg_connection_config(Some(address.parse().unwrap()));
 
-        let options: SqlxConnectOptions = config.with_db(None);
+            let options: SqlxConnectOptions = config.with_db(None);
 
-        assert_eq!(options.get_host(), hostaddr.to_string());
-        assert!(matches!(options.get_ssl_mode(), SqlxSslMode::VerifyCa));
+            assert_eq!(options.get_host(), config.host);
+            assert!(
+                options
+                    .to_url_lossy()
+                    .query_pairs()
+                    .any(|(key, value)| { key == "hostaddr" && value == address })
+            );
+            assert!(matches!(options.get_ssl_mode(), SqlxSslMode::VerifyFull));
+        }
+    }
+
+    /// The TLS flag controls verification regardless of address selection.
+    #[test]
+    fn sqlx_options_preserve_tls_policy() {
+        for hostaddr in [None, Some("192.0.2.10".parse().unwrap())] {
+            let mut config = pg_connection_config(hostaddr);
+            let options: SqlxConnectOptions = config.with_db(None);
+
+            assert_eq!(options.get_host(), config.host);
+            assert!(matches!(options.get_ssl_mode(), SqlxSslMode::VerifyFull));
+
+            config.tls.enabled = false;
+            let options: SqlxConnectOptions = config.with_db(None);
+
+            assert!(matches!(options.get_ssl_mode(), SqlxSslMode::Prefer));
+        }
+    }
+
+    /// An address-only pin verifies the IP rather than an ambient hostname.
+    #[test]
+    fn sqlx_address_only_pin_uses_ip_identity() {
+        for host in ["", "/tmp"] {
+            let mut config = pg_connection_config(Some("192.0.2.10".parse().unwrap()));
+            config.host = host.to_owned();
+
+            let options: SqlxConnectOptions = config.with_db(None);
+
+            assert_eq!(options.get_host(), "192.0.2.10");
+            assert!(options.get_socket().is_none());
+            assert!(matches!(options.get_ssl_mode(), SqlxSslMode::VerifyFull));
+        }
     }
 
     #[test]
