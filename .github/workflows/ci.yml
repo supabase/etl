@@ -238,6 +238,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - name: PostgreSQL 19
+            version: '19'
+            image: postgres:19
           - name: PostgreSQL 17
             version: '17'
             image: postgres:17

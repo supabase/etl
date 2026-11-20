@@ -7,33 +7,18 @@ icon: Rocket
 Build a pipeline that performs an initial sync of a Postgres table, then
 replicates row changes through a small custom `Destination`.
 
-<Callout className="etl-callout" type="info" title="Want a real destination immediately?">
-  For a built-in destination, start with local ClickHouse. After cloning this
-  repository and completing the toolchain prerequisites in
-  [DEVELOPMENT.md](https://github.com/supabase/etl/blob/main/DEVELOPMENT.md),
-  run these commands from the repository root:
-
-  ```bash
-  cargo x init
-  cargo x setup replicator
-  cargo x seed
-  cargo x run replicator
-  ```
-
-  No cloud account is required. See
-  [Standalone Replicator](/guides/standalone-replicator/) for that path. This
-  tutorial embeds the `etl` crate with a tiny custom destination instead.
-</Callout>
+To try a built-in destination with local ClickHouse, see
+[Standalone Replicator](/guides/standalone-replicator/#fastest-local-start).
 
 <Callout className="etl-callout" type="info" title="Active development">
-  Supabase ETL is under active development. APIs and setup steps may change
-  before the first stable release.
+  Supabase ETL is under active development. We are holding the first versioned
+  release while breaking changes to APIs and setup are still frequent.
 </Callout>
 
 ## Prerequisites
 
 - Rust toolchain 1.95.0, matching `rust-toolchain.toml`
-- PostgreSQL 14 through 18 with `wal_level = logical`
+- PostgreSQL 14 through 19 with `wal_level = logical`
 - A Postgres user with `LOGIN` and `REPLICATION`. A local superuser such as
   `postgres` is enough for this tutorial.
 - Basic familiarity with Rust and SQL

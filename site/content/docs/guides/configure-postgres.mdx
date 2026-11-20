@@ -4,32 +4,33 @@ description: Set up Postgres with the permissions and settings required by Supab
 icon: Database
 ---
 
-Configure the Postgres settings, slots, publications, and retention needed by
-the open-source replication engine.
-
-Using the managed product in the Supabase Dashboard? Follow the canonical
-[Supabase Pipelines documentation](https://supabase.com/docs/guides/database/replication/pipelines)
-instead. This guide covers PostgreSQL configuration for developers who run or
-embed Supabase ETL themselves.
+Use this guide to configure a Postgres source for self-hosted or embedded ETL.
+For the managed service, see the
+[Supabase Pipelines documentation](https://supabase.com/docs/guides/database/replication/pipelines).
 
 ## Prerequisites
 
-- **PostgreSQL 14 through 18.** PostgreSQL 15 adds publication filtering;
-  PostgreSQL 16 adds logical decoding on physical read replicas.
-- Ability to restart Postgres (required for `wal_level` changes)
-- Superuser access to enable logical WAL and, by default, to install ETL source
-  migrations
+- PostgreSQL 14 through 19. See [version compatibility](#version-compatibility).
+- Permission to configure logical WAL and restart Postgres if needed.
+- An administrator who can install the ETL source migrations.
 
 ## Enable Logical WAL
 
-Set `wal_level = logical` to enable Postgres to record **logical change data**
-in the WAL, which external tools can then decode and replicate.
+Set `wal_level = logical` so Postgres records the information ETL needs to
+decode row changes.
 
 ```ini title="postgresql.conf"
 wal_level = logical
 ```
 
-**Restart Postgres** after changing this setting. Confirm with `SHOW wal_level;`.
+Restart Postgres after changing this setting. Confirm with `SHOW wal_level;`.
+
+On a PostgreSQL 19 primary with `wal_level = replica`, creating the first
+logical slot enables logical decoding without a restart. Check
+`SHOW effective_wal_level;` after ETL creates its slot. Keep
+`wal_level = logical` on the primary for [read replica sources](#read-replicas),
+since losing the last logical slot on the primary can invalidate standby
+logical slots. [PostgreSQL logical decoding](https://www.postgresql.org/docs/19/logicaldecoding-explanation.html#LOGICALDECODING-EXPLANATION-LOG-DEC)
 
 ## Replication User
 
@@ -166,9 +167,10 @@ wal_keep_size = 1GB
 
 ## WAL Buildup and Disk Usage
 
-Replication slots retain WAL from their `restart_lsn`, which can lag behind
-acknowledged progress. Long copies, slow consumers, and errors can therefore
-cause **significant disk usage**. See PostgreSQL's [slot fields](https://www.postgresql.org/docs/18/view-pg-replication-slots.html).
+Postgres WAL is the durable backlog for changes ETL still needs to replay.
+A replication slot retains WAL from its `restart_lsn`, which can lag behind
+acknowledged progress. Long copies, slow consumers, and errors can increase
+disk usage on the source. [PostgreSQL slot fields](https://www.postgresql.org/docs/19/view-pg-replication-slots.html)
 
 ### Common Causes of WAL Buildup
 
@@ -190,12 +192,12 @@ additional headroom. This is an illustrative calculation, not a workload
 estimate. Multiple slots can retain overlapping WAL; do not add their lag
 values together to estimate physical disk usage.
 
-<Callout className="etl-callout" type="warn" title="Warning">
-  `max_slot_wal_keep_size` limits slot-based WAL retention at checkpoint time.
-  If required WAL is removed, the slot becomes unusable and replication needs
-  recovery. Checkpoint timing, archiving, and other WAL retention requirements
-  can keep disk usage above this setting. Monitor free disk space separately
-  from slot lag.
+<Callout className="etl-callout" type="warn" title="Postgres can invalidate a slot during initial sync">
+  A long copy on a busy server can exceed `max_slot_wal_keep_size` before
+  catch-up starts. At a checkpoint, Postgres can remove required WAL and
+  invalidate that slot. Checkpoint timing, archiving, and other retention
+  requirements can keep disk usage above the setting, so monitor free disk
+  space separately from slot lag. [PostgreSQL WAL retention](https://www.postgresql.org/docs/19/runtime-config-replication.html#GUC-MAX-SLOT-WAL-KEEP-SIZE)
 </Callout>
 
 ```ini title="postgresql.conf"
@@ -211,11 +213,14 @@ manually retryable table error; restarting the pipeline alone does not reset
 that error. A new copy replaces the partial destination table and uses a fresh
 snapshot and slot, so it needs enough retention to complete again.
 
-If the main replication slot is invalidated, ETL fails pipeline startup by
-default and requires operator intervention. Set `invalidated_slot_behavior` to
+An invalidated apply slot interrupts ongoing replication. By default, ETL
+fails startup until an operator intervenes. Set `invalidated_slot_behavior` to
 `recreate` to have ETL delete and recreate the slot, reset table states, and
 resynchronize eligible tables from scratch. Automatic recreation can repeat a
 large initial copy, so choose it deliberately and monitor destination capacity.
+
+We are evaluating ways to reduce WAL retention during large initial copies.
+Size the current retention budget for the copy and catch-up together.
 
 Permanent slots persist across disconnections and pipeline stops. Stopping ETL
 releases copy transactions and their locks after teardown, but does not release
@@ -379,7 +384,8 @@ available:
 
 ## Read Replicas
 
-ETL can read logical replication from a physical read replica when the replica runs **PostgreSQL 16 or newer**. PostgreSQL 14 and 15 can still be used with ETL, but logical decoding must run on the primary. See the PostgreSQL documentation on [logical slots on hot standby](https://www.postgresql.org/docs/16/logicaldecoding-explanation.html#LOGICALDECODING-REPLICATION-SLOTS).
+ETL can use a physical read replica as a source on PostgreSQL 16 or newer.
+See [logical slots on hot standby](https://www.postgresql.org/docs/19/logicaldecoding-explanation.html#LOGICALDECODING-REPLICATION-SLOTS).
 
 When using a read replica:
 
@@ -391,8 +397,8 @@ When using a read replica:
 Publication, table, and ETL source-migration changes are ordinary WAL records. When you create them on the primary, the read replica can only see them after replay reaches that WAL position. Do not wait a fixed number of seconds; wait for a concrete replay LSN:
 
 ```sql
--- Run on the primary after creating tables, source migrations, and publications.
-SELECT pg_current_wal_flush_lsn();
+-- Run on the primary after the setup transaction has committed.
+SELECT pg_current_wal_insert_lsn();
 ```
 
 Then wait on the read replica until replay reaches that LSN. If you just created a new database on the primary, connect to an existing maintenance database such as `postgres` for this check; the new database might not exist on the replica until replay catches up.
@@ -400,6 +406,14 @@ Then wait on the read replica until replay reaches that LSN. If you just created
 ```sql
 -- Run on the read replica before starting ETL.
 SELECT pg_last_wal_replay_lsn() >= '0/16B6C50'::pg_lsn AS ready;
+```
+
+On PostgreSQL 19, you can wait for that LSN from the standby in a single
+command. Run it before opening a transaction for setup queries.
+[PostgreSQL `WAIT`](https://www.postgresql.org/docs/19/sql-wait.html)
+
+```sql
+WAIT FOR LSN '0/16B6C50' WITH (TIMEOUT '15s');
 ```
 
 For extra confidence, also check that the expected publication is visible on the replica:
@@ -636,17 +650,20 @@ DROP PUBLICATION my_publication;
 
 ## Version Compatibility
 
-ETL supports PostgreSQL 14 through 18. PostgreSQL 14 is limited to table-level
-publication filtering; use the newer versions for the features below.
+ETL supports PostgreSQL 14 through 19.
 
-| Feature | PostgreSQL 14 | PostgreSQL 15 | PostgreSQL 16+ |
-|---------|---------------|---------------|----------------|
-| Table-level publication | Yes | Yes | Yes |
-| Column-level filtering | No | Yes | Yes |
-| Row-level filtering | No | Yes | Yes |
-| `FOR TABLES IN SCHEMA` | No | Yes | Yes |
-| Partitioned table support | Yes | Yes | Yes |
-| Logical decoding on physical read replicas | No | No | Yes |
+| Feature | Minimum PostgreSQL version |
+| --- | --- |
+| Table and partition publications | 14 |
+| Column lists, row filters, and `FOR TABLES IN SCHEMA` | 15 |
+| Logical decoding on physical read replicas | 16 |
+| Failover logical slots | 17 |
+| `FOR ALL TABLES EXCEPT` | 19 |
+
+ETL copies and streams the tables selected by the publication. This includes
+values stored in identity and serial columns. PostgreSQL 19's separate
+sequence synchronization uses native PostgreSQL subscriptions.
+[PostgreSQL sequence synchronization](https://www.postgresql.org/docs/19/logical-replication-sequences.html)
 
 ## Complete Configuration Example
 
