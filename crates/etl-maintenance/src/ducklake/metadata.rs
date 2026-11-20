@@ -21,11 +21,13 @@ use tokio::time::timeout;
 use tracing::warn;
 use url::Url;
 
+use crate::ducklake::metrics::record_metadata_read_error;
+
 /// Caps the time a metadata attempt can occupy a checked-out connection.
-const METADATA_READ_TIMEOUT: Duration = Duration::from_secs(5);
+const METADATA_READ_TIMEOUT: Duration = Duration::from_secs(7);
 /// Stops server work after client cancellation; keep below the read deadline
 /// to leave time for the response and connection cleanup.
-const METADATA_STATEMENT_TIMEOUT: Duration = Duration::from_secs(4);
+const METADATA_STATEMENT_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// A metadata query future borrowing the connection and its inputs.
 type MetadataQueryFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, Error>> + Send + 'a>>;
@@ -144,8 +146,8 @@ impl DuckLakeMetadataPool {
     /// Runs a read-only query in a pinned transaction, retrying once on the
     /// direct pool after a pooled failure.
     ///
-    /// Each attempt has five seconds after checkout to run the transaction and
-    /// release the connection. A transaction-local four-second statement
+    /// Each attempt has seven seconds after checkout to run the transaction and
+    /// release the connection. A transaction-local six-second statement
     /// timeout also stops server work after a client disconnect. The query
     /// must be read-only and disable statement persistence for transaction
     /// poolers. Keep borrowed query inputs in `args` so the callback can borrow
@@ -174,6 +176,8 @@ impl DuckLakeMetadataPool {
             match read_metadata(pooler, read_timeout, &args, &query).await {
                 Ok(result) => return Ok(result),
                 Err(error) => {
+                    record_metadata_read_error("pooler", &error);
+
                     if !self.fallback.swap(true, Ordering::Relaxed) {
                         self.fallback_counter.increment(1);
                         // Provider messages can echo credentials or row values.
@@ -188,7 +192,9 @@ impl DuckLakeMetadataPool {
                 }
             }
         }
-        read_metadata(&self.direct, read_timeout, &args, &query).await
+        read_metadata(&self.direct, read_timeout, &args, &query)
+            .await
+            .inspect_err(|error| record_metadata_read_error("direct", error))
     }
 }
 
@@ -203,6 +209,7 @@ mod tests {
         time::Duration,
     };
 
+    use etl_telemetry::metrics::init_metrics_handle;
     use metrics::{Counter, atomics::AtomicU64};
     use sqlx::{
         Connection, Error, PgConnection, PgPool,
@@ -220,6 +227,7 @@ mod tests {
     use crate::ducklake::{
         DuckLakeMetadataPool,
         metadata::{METADATA_STATEMENT_TIMEOUT, MetadataQueryFuture},
+        metrics::ETL_DUCKLAKE_CATALOG_METADATA_READ_ERRORS_TOTAL,
     };
 
     /// Deadline for exercising stalled reads without using the production
@@ -389,9 +397,32 @@ mod tests {
         })
     }
 
+    /// Checks every exported metadata error series, regardless of label order.
+    fn assert_read_errors(rendered: &str, expected: &[(&str, &str, u64)]) {
+        let samples: Vec<_> = rendered
+            .lines()
+            .filter(|line| line.starts_with(ETL_DUCKLAKE_CATALOG_METADATA_READ_ERRORS_TOTAL))
+            .collect();
+
+        assert_eq!(samples.len(), expected.len());
+
+        for (route, reason, count) in expected {
+            let sample = samples
+                .iter()
+                .find(|line| {
+                    line.contains(&format!("route=\"{route}\""))
+                        && line.contains(&format!("reason=\"{reason}\""))
+                })
+                .unwrap();
+
+            assert_eq!(sample.split_whitespace().last().unwrap(), count.to_string());
+        }
+    }
+
     /// Healthy reads reuse the pooler connection and keep its own options.
     #[tokio::test]
     async fn healthy_pooler_remains_preferred() {
+        let metrics = init_metrics_handle().unwrap();
         let backend = TestBackend::start([BackendResponse::Healthy]).await;
         let direct = PgPoolOptions::new()
             .max_connections(1)
@@ -417,6 +448,8 @@ mod tests {
         assert!(!direct.is_closed());
         assert_eq!(direct.options().get_max_connections(), 1);
         assert_eq!(fallbacks.load(Ordering::Relaxed), 0);
+        assert_read_errors(&metrics.render(), &[]);
+
         let invalid = Url::parse("file:///tmp/catalog").unwrap();
         assert!(DuckLakeMetadataPool::new(direct, Some(&invalid)).is_err());
     }
@@ -424,6 +457,7 @@ mod tests {
     /// Direct errors are returned to the caller without a retry.
     #[tokio::test]
     async fn direct_only_errors_are_returned_without_retry() {
+        let metrics = init_metrics_handle().unwrap();
         let backend = TestBackend::start([BackendResponse::Healthy]).await;
         let reader = DuckLakeMetadataPool::new(backend.pool(), None).unwrap();
         let calls = AtomicUsize::new(0);
@@ -438,12 +472,14 @@ mod tests {
 
         assert!(matches!(error, Error::RowNotFound));
         assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_read_errors(&metrics.render(), &[("direct", "other", 1)]);
     }
 
     /// Replays the pooler's wire error and checks fallback, shared routing, and
     /// safe logs.
     #[tokio::test]
     async fn checkout_failure_falls_back_and_logs_without_provider_secrets() {
+        let metrics = init_metrics_handle().unwrap();
         let (listener, url) = listen().await;
         let server = AbortOnDropHandle::new(tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
@@ -478,12 +514,14 @@ mod tests {
         assert!(!logs.contains("placeholder-token"));
         assert!(!logs.contains("postgres://"));
         assert_eq!(fallbacks.load(Ordering::Relaxed), 1);
+        assert_read_errors(&metrics.render(), &[("pooler", "other", 1)]);
     }
 
     /// A returned query error switches routing and preserves a direct retry
     /// error.
     #[tokio::test]
     async fn later_pooler_failure_preserves_direct_error() {
+        let metrics = init_metrics_handle().unwrap();
         let backend = TestBackend::start([BackendResponse::FailSecondQuery]).await;
         let direct = backend.pool();
         direct.close().await;
@@ -498,37 +536,80 @@ mod tests {
         assert!(matches!(error, Error::PoolClosed));
         assert_eq!(reader.pooler.as_ref().unwrap().size(), 0);
         assert_eq!(fallbacks.load(Ordering::Relaxed), 1);
+        assert_read_errors(&metrics.render(), &[("pooler", "other", 1), ("direct", "other", 1)]);
     }
 
-    /// A pooler that accepts a query and stops responding triggers direct
-    /// fallback.
+    /// A checkout timeout is counted separately and does not prevent recovery.
+    #[tokio::test]
+    async fn checkout_timeout_is_counted() {
+        let metrics = init_metrics_handle().unwrap();
+        let backend = TestBackend::start([BackendResponse::Healthy]).await;
+        let direct = backend.pool();
+        let reader = DuckLakeMetadataPool::new(direct.clone(), None).unwrap();
+        let checked_out = direct.acquire().await.unwrap();
+
+        let error = reader.read("list_tables", (), select).await.unwrap_err();
+
+        assert!(matches!(error, Error::PoolTimedOut));
+        assert_read_errors(&metrics.render(), &[("direct", "checkout_timeout", 1)]);
+
+        drop(checked_out);
+
+        assert_eq!(reader.read("list_tables", (), select).await.unwrap(), 1);
+        assert_read_errors(&metrics.render(), &[("direct", "checkout_timeout", 1)]);
+    }
+
+    /// A stalled pooler triggers fallback once, while repeated direct timeouts
+    /// remain observable across clones.
     #[tokio::test]
     async fn stalled_pooler_read_falls_back_once() {
+        let metrics = init_metrics_handle().unwrap();
         let pooler = TestBackend::start([BackendResponse::StallQuery]).await;
-        let direct = TestBackend::start([BackendResponse::Healthy]).await;
+        let direct = TestBackend::start([
+            BackendResponse::StallQuery,
+            BackendResponse::StallQuery,
+            BackendResponse::Healthy,
+        ])
+        .await;
         let fallbacks = Arc::new(AtomicU64::new(0));
         let reader = DuckLakeMetadataPool::new(direct.pool(), Some(&pooler.url))
             .unwrap()
             .with_fallback_counter(Counter::from_arc(Arc::clone(&fallbacks)));
 
-        let result = timeout(
-            TEST_STALL_LIMIT,
-            reader.read_with_timeout("list_tables", TEST_READ_TIMEOUT, (), select),
-        )
-        .await
-        .unwrap();
+        for direct_timeouts in 1..=2 {
+            let error = timeout(
+                TEST_STALL_LIMIT,
+                reader.clone().read_with_timeout("list_tables", TEST_READ_TIMEOUT, (), select),
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
 
-        assert_eq!(result.unwrap(), 1);
+            assert!(matches!(error, Error::Io(error) if error.kind() == io::ErrorKind::TimedOut));
+            assert_eq!(fallbacks.load(Ordering::Relaxed), 1);
+            assert_read_errors(
+                &metrics.render(),
+                &[("pooler", "client_timeout", 1), ("direct", "client_timeout", direct_timeouts)],
+            );
+        }
+
         timeout(TEST_READ_TIMEOUT, pooler.stalled.notified()).await.unwrap();
         assert_eq!(reader.pooler.as_ref().unwrap().size(), 0);
         assert_eq!(reader.clone().read("inline_size", (), select).await.unwrap(), 1);
         assert_eq!(fallbacks.load(Ordering::Relaxed), 1);
+        assert_read_errors(
+            &metrics.render(),
+            &[("pooler", "client_timeout", 1), ("direct", "client_timeout", 2)],
+        );
     }
 
     /// Timeouts and cancellation release the direct slot during query
     /// execution and pool return.
     #[tokio::test]
     async fn interrupted_direct_reads_release_capacity() {
+        let metrics = init_metrics_handle().unwrap();
+        let mut timeouts = 0;
+
         for cancel_read in [false, true] {
             for stall in [BackendResponse::StallQuery, BackendResponse::StallReturn] {
                 let backend = TestBackend::start([stall, BackendResponse::Healthy]).await;
@@ -556,8 +637,10 @@ mod tests {
                         matches!(error, Error::Io(error) if error.kind() == io::ErrorKind::TimedOut)
                     );
                     timeout(TEST_READ_TIMEOUT, backend.stalled.notified()).await.unwrap();
+                    timeouts += 1;
                 }
 
+                assert_read_errors(&metrics.render(), &[("direct", "client_timeout", timeouts)]);
                 assert_eq!(direct.size(), 0);
                 direct.acquire().await.unwrap().ping().await.unwrap();
             }

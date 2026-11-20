@@ -1645,6 +1645,7 @@ dependencies = [
  "duckdb",
  "etl",
  "etl-config",
+ "etl-telemetry",
  "k8s-openapi",
  "kube",
  "metrics",

@@ -211,15 +211,15 @@ statements inside explicit transactions. SQLx prepares and executes in separate
 protocol exchanges; the transaction pins both to the same backend. Disabling
 statement persistence alone does not prevent backend reassignment. Pooler
 connections omit the `extra_float_digits` startup parameter for PgBouncer
-compatibility. Each attempt has five seconds after checkout to run the read
+compatibility. Each attempt has seven seconds after checkout to run the read
 transaction and release its connection, in addition to the pool's 15-second
-checkout limit. Inside that transaction, `statement_timeout` is set to four
-seconds so PostgreSQL also stops work after a client disconnect. The remaining
-second gives the cancellation response and connection cleanup time to finish;
-the setting does not change subsequent foreground operations. Interrupted
-connections are discarded instead of returned to the pool. Legitimate metadata
-statements exceeding four seconds will fail under this policy. The read and
-statement limits are centralized in `METADATA_READ_TIMEOUT` and
+checkout limit. Inside that transaction, `statement_timeout` is set to six
+seconds so PostgreSQL also stops work after a client disconnect. The lower
+server limit leaves nominal headroom for the cancellation response and
+connection cleanup; the setting does not change subsequent foreground
+operations. Interrupted connections are discarded instead of returned to the
+pool. Legitimate metadata statements exceeding six seconds will fail under
+this policy. The read and statement limits are centralized in `METADATA_READ_TIMEOUT` and
 `METADATA_STATEMENT_TIMEOUT` in
 [`metadata.rs`](crates/etl-maintenance/src/ducklake/metadata.rs).
 
@@ -227,8 +227,20 @@ If a pooled metadata read fails or times out, the reader logs a warning with
 its operation, error category, and any SQLSTATE, then retries the entire read
 through `catalog_url`. Provider error text and connection strings are omitted
 from this warning. The reader and its clones use the direct pool until the
-destination is recreated or a new maintenance run begins. Only read-only catalog operations use this fallback.
-If the direct retry fails, its error is returned to the caller.
+destination is recreated or a new maintenance run begins. Only read-only
+catalog operations use this fallback. If the direct retry fails, its error is
+returned to the caller.
+
+Each failed metadata attempt increments
+`etl_ducklake_catalog_metadata_read_errors_total`, labeled by `route` (`pooler`
+or `direct`) and `reason` (`client_timeout`, `checkout_timeout`,
+`query_canceled`, or `other`). Client timeouts include the read deadline and
+client I/O timeouts. PostgreSQL reports statement timeouts and other query
+cancellations with SQLSTATE `57014`, so `query_canceled` includes both. A failed
+pooled attempt is counted even if its direct retry succeeds; a failed retry
+adds a separate direct error. Repeated direct failures remain visible after
+fallback. Successful attempts and task cancellation do not increment this
+counter. Series appear when their first failure occurs.
 
 The replicator increments `etl_ducklake_catalog_pooler_fallbacks_total` once
 when a destination switches to direct reads, even if the direct retry also

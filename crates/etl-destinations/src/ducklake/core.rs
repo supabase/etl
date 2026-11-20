@@ -6285,7 +6285,10 @@ mod tests {
             /// milliseconds.
             const SESSION_SETTINGS_QUERY: &str = "select pg_backend_pid(), setting::bigint
                 from pg_settings where name = 'statement_timeout'";
+            /// Exported counter contract for shared metadata readers.
+            const METADATA_READ_ERRORS: &str = "etl_ducklake_catalog_metadata_read_errors_total";
 
+            let metrics = init_metrics_handle().unwrap();
             let (database, catalog) = create_catalog_database().await;
             let observer = database.client.as_ref().unwrap();
             let direct = build_ducklake_catalog_pg_pool(&catalog).unwrap();
@@ -6317,7 +6320,7 @@ mod tests {
             let query_delay = Duration::from_millis(u64::try_from(during.1).unwrap()) * 2;
             let read_limit = DUCKLAKE_CATALOG_ACQUIRE_TIMEOUT + query_delay;
 
-            for _ in 0..2 {
+            for canceled_queries in 1..=2 {
                 let error = timeout(
                     read_limit,
                     reader.read("slow_metadata", query_delay, |connection, delay| {
@@ -6338,6 +6341,18 @@ mod tests {
                     Some("57014")
                 );
                 assert_eq!(direct.size(), 0);
+
+                let rendered = metrics.render();
+                let sample = rendered
+                    .lines()
+                    .find(|line| {
+                        line.starts_with(METADATA_READ_ERRORS)
+                            && line.contains("route=\"direct\"")
+                            && line.contains("reason=\"query_canceled\"")
+                    })
+                    .unwrap();
+
+                assert_eq!(sample.split_whitespace().last().unwrap(), canceled_queries.to_string());
 
                 let active: i64 = observer
                     .query_one(
