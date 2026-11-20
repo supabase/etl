@@ -40,12 +40,11 @@ use crate::{
         client::{BigQueryClient, BigQueryOperationType},
         encoding::BigQueryTableRow,
         metrics::{ETL_BQ_APPEND_BATCHES_BATCH_SIZE, register_metrics},
-        schema::{column_default_sql, column_schemas_to_table_descriptor},
+        schema::{
+            column_default_sql, column_schemas_to_table_descriptor, postgres_to_bigquery_type,
+        },
     },
-    recovery::{
-        ensure_destination_schema_matches_metadata, ensure_relation_schema_transition,
-        warn_unsupported_column_type_change,
-    },
+    recovery::{ensure_destination_schema_matches_metadata, ensure_relation_schema_transition},
     table_name::try_stringify_table_name,
 };
 
@@ -1052,9 +1051,10 @@ where
     /// Translates a validated schema plan into BigQuery DDL.
     ///
     /// Operations execute in the supplied order. Shared planning already owns
-    /// name-equivalence validation; this layer only applies BigQuery behavior
-    /// for structural, nullability, and default operations and warns when
-    /// skipping an unsupported type alteration.
+    /// name-equivalence validation, and [`validate_bigquery_schema_plan`]
+    /// already rejected type changes BigQuery cannot apply; this layer only
+    /// applies BigQuery behavior for structural, nullability, and default
+    /// operations.
     async fn apply_schema_plan(
         &self,
         table_id: &TableId,
@@ -1130,11 +1130,9 @@ where
                                 .await?;
                         }
                         ColumnAlterationKind::Type => {
-                            warn_unsupported_column_type_change(
-                                "bigquery",
-                                versioned_table_id,
-                                alteration,
-                            );
+                            // Validation rejected every change of the mapped
+                            // BigQuery type, so the column already has the
+                            // target type.
                         }
                         ColumnAlterationKind::Nullability => {
                             // Unsupported metadata changes can leave BigQuery
@@ -1603,30 +1601,62 @@ fn validate_bigquery_table_shape(replicated_table_schema: &ReplicatedTableSchema
 /// `NULL`. BigQuery initializes existing rows to an empty array when such a
 /// field is added. That would turn an unknown value from publication filtering
 /// into invented data, so this transition requires a table resynchronization.
+///
+/// ETL does not alter BigQuery column types. Postgres rewrites existing rows
+/// with its own cast or `USING` expression and emits no row events for that
+/// rewrite, and BigQuery allows only a few in-place widenings. Writing new
+/// rows into the old column would instead make BigQuery reject every append
+/// or store different values, such as epoch microseconds read as a packed
+/// civil time after `timestamp` becomes `timestamptz`. Changes that keep the
+/// mapped type, such as `int4` to `int8` or `varchar(50)` to `text`, need no
+/// DDL and are accepted.
 fn validate_bigquery_schema_plan(
     new_schema: &ReplicatedTableSchema,
     plan: &SchemaPlan,
 ) -> EtlResult<()> {
     for operation in plan.ordered_operations() {
-        let SchemaOperation::AddColumn { after_column_schema, reason } = operation else {
-            continue;
-        };
-
-        if *reason == ColumnPresenceChangeReason::ReplicationMask
-            && is_array_type(&after_column_schema.typ)
-        {
-            bail!(
-                ErrorKind::SourceSchemaError,
-                "BigQuery cannot add a source array through publication filtering",
-                format!(
-                    "Table '{}' column '{}' is an array newly included by the publication. \
-                     BigQuery repeated fields cannot be NULL and initialize existing rows to an \
-                     empty array, so ETL cannot preserve unknown historical values. Resynchronize \
-                     the table to replicate this column.",
-                    new_schema.name(),
-                    after_column_schema.name
-                )
-            );
+        match operation {
+            SchemaOperation::AddColumn { after_column_schema, reason }
+                if *reason == ColumnPresenceChangeReason::ReplicationMask
+                    && is_array_type(&after_column_schema.typ) =>
+            {
+                bail!(
+                    ErrorKind::SourceSchemaError,
+                    "BigQuery cannot add a source array through publication filtering",
+                    format!(
+                        "Table '{}' column '{}' is an array newly included by the publication. \
+                         BigQuery repeated fields cannot be NULL and initialize existing rows to \
+                         an empty array, so ETL cannot preserve unknown historical values. \
+                         Resynchronize the table to replicate this column.",
+                        new_schema.name(),
+                        after_column_schema.name
+                    )
+                );
+            }
+            SchemaOperation::AlterColumn { alteration }
+                if alteration.kind() == ColumnAlterationKind::Type =>
+            {
+                let before = alteration.before_column_schema();
+                let after = alteration.after_column_schema();
+                let before_type = postgres_to_bigquery_type(&before.typ);
+                let after_type = postgres_to_bigquery_type(&after.typ);
+                if before_type != after_type {
+                    bail!(
+                        ErrorKind::SourceSchemaError,
+                        "BigQuery cannot apply a source column type change",
+                        format!(
+                            "Table '{}' changes column '{}' from {} to {}, which changes its \
+                             BigQuery type from '{before_type}' to '{after_type}'. ETL does not \
+                             convert existing BigQuery rows. Resynchronize the table.",
+                            new_schema.name(),
+                            after.name,
+                            before.typ.name(),
+                            after.typ.name(),
+                        )
+                    );
+                }
+            }
+            _ => {}
         }
     }
 
@@ -3934,10 +3964,10 @@ mod tests {
 
     /// Type changes that BigQuery keeps must not change what new values mean.
     ///
-    /// ETL logs and skips source type changes, so the BigQuery column keeps the
-    /// type created for the old source type while later rows are written with
-    /// the new type's writer descriptor. The compatibility oracle follows the
-    /// BigQuery Storage Write API protobuf conversion table
+    /// ETL does not alter BigQuery column types. An accepted type change keeps
+    /// the column created for the old source type while later rows are written
+    /// with the new type's writer descriptor. The compatibility oracle follows
+    /// the BigQuery Storage Write API protobuf conversion table
     /// (<https://cloud.google.com/bigquery/docs/supported-data-types>).
     mod type_change_tables {
         use gcp_bigquery_client::storage::{ColumnMode, ColumnType};
@@ -4210,11 +4240,10 @@ mod tests {
             }
         }
 
-        /// `timestamp -> timestamptz` keeps the BigQuery DATETIME column but
-        /// sends epoch microseconds as `int64`, which BigQuery decodes as a
-        /// packed civil time instead of an instant.
-        #[ignore = "known defect: BigQuery accepts timestamp -> timestamptz and writes epoch \
-                    micros into a DATETIME column"]
+        /// Keeping the BigQuery DATETIME column after `timestamp ->
+        /// timestamptz` would send epoch microseconds as `int64`, which
+        /// BigQuery decodes as a packed civil time instead of an
+        /// instant.
         #[test]
         fn timestamp_to_timestamptz_change_is_rejected_before_ddl() {
             assert_eq!(
@@ -4226,8 +4255,6 @@ mod tests {
 
         /// No accepted type change may make BigQuery store a different value
         /// without an error.
-        #[ignore = "known defect: BigQuery accepts type changes whose new wire values the kept \
-                    column reinterprets"]
         #[test]
         fn type_changes_bigquery_would_reinterpret_are_rejected_before_ddl() {
             let changes = accepted_changes_read_as(Reading::Reinterpreted);
@@ -4235,8 +4262,6 @@ mod tests {
         }
 
         /// No accepted type change may make every later append fail.
-        #[ignore = "known defect: BigQuery accepts type changes whose new wire values the kept \
-                    column rejects"]
         #[test]
         fn type_changes_bigquery_cannot_read_are_rejected_before_ddl() {
             let changes = accepted_changes_read_as(Reading::Rejected);

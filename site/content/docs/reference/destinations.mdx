@@ -268,12 +268,13 @@ or table resynchronization; deploying a new replicator alone does not rewrite it
 - Supported schema changes are applied automatically, but PostgreSQL default
   expressions and backfill behavior are only supported where they map safely
   to BigQuery. See [Schema Changes](/explanation/schema-changes/).
-- Source type changes log a warning and skip destination type DDL. Subsequent
-  writes use the new source schema, so BigQuery may reject them or interpret
-  their values differently if the destination column is incompatible.
-  PostgreSQL data rewrites from casts or `USING` expressions are not replicated.
-  Resynchronize when a type change needs a different destination column type
-  or transforms existing values.
+- A source type change that changes the mapped BigQuery type, such as
+  `timestamp` to `timestamptz` or `integer` to `numeric`, fails the schema
+  change before ETL alters anything. Replication stops until you resynchronize
+  the table. Changes that keep the BigQuery type, such as `integer` to
+  `bigint` or `varchar(50)` to `text`, continue without DDL. PostgreSQL data
+  rewrites from casts or `USING` expressions are not replicated, so
+  resynchronize after a kept-type change that transforms existing values.
 - BigQuery column renames are subject to BigQuery's row-access-policy and
   metadata limitations. Review [BigQuery schema change
   behavior](https://cloud.google.com/bigquery/docs/managing-table-schemas)
