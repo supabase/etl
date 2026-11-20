@@ -5,6 +5,8 @@ use chrono::{DateTime, Utc};
 use etl::error::EtlResult;
 use serde::{Deserialize, Serialize};
 
+pub mod telemetry;
+
 const DEFAULT_POLL_SECONDS: u64 = 5;
 const DEFAULT_INLINE_FLUSH_MIN_INLINED_BYTES: u64 = 10_000_000;
 const DEFAULT_REWRITE_DATA_FILES_MIN_ACTIVE_DATA_FILES: i64 = 40;
@@ -16,6 +18,9 @@ const DEFAULT_MAX_PAUSE_SECONDS: u64 = 2700;
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExternalMaintenanceState {
+    /// Durable observations published by the Kubernetes maintenance controller.
+    #[serde(default)]
+    pub customer_metrics: Option<telemetry::MaintenanceMetrics>,
     /// Whether the coordination backend has state for this pipeline.
     pub exists: bool,
     /// Currently active maintenance run, if any.

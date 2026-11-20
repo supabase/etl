@@ -10,7 +10,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant as StdInstant},
 };
 
 use etl::{
@@ -39,10 +39,13 @@ use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, trace, warn};
 use url::Url;
 
-use crate::ducklake::{
-    DataFileRewriteReason, DuckLakeMetadataPool, RedactedDuckDbError,
-    configure_parquet_settings_sql, duckdb_version_check_sql, namespace_version_check_sql,
-    namespaced_tables_query, table_namespace_filter,
+use crate::{
+    coordination::telemetry::InlineFlushSummaries,
+    ducklake::{
+        DataFileRewriteReason, DuckLakeMetadataPool, RedactedDuckDbError,
+        configure_parquet_settings_sql, duckdb_version_check_sql, namespace_version_check_sql,
+        namespaced_tables_query, table_namespace_filter,
+    },
 };
 
 const LAKE_CATALOG: &str = "lake";
@@ -1546,6 +1549,8 @@ pub struct CleanupOldFilesMaintenanceConfig {
 /// Structured outcome for one external maintenance run.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DuckLakeMaintenanceOutcome {
+    /// Bounded successful inline-flush observations for durable job reporting.
+    pub inline_flush_summaries: InlineFlushSummaries,
     /// Obsolete rows deleted from ETL replay helper tables.
     pub replay_helper_rows_deleted: u64,
     /// Files created while compacting ETL replay helper tables.
@@ -2048,15 +2053,25 @@ async fn run_inline_flush(
             "ducklake inline flush executing"
         );
         let table_name_for_query = table_name.clone();
-        let rows = duckdb
+        let (rows, duration_seconds) = duckdb
             .run(move |conn| {
-                flush_table_inlined_data(
+                let started = StdInstant::now();
+                let rows = flush_table_inlined_data(
                     conn,
                     &table_name_for_query.schema_path(),
                     table_name_for_query.table(),
-                )
+                )?;
+                Ok((rows, started.elapsed().as_secs_f64()))
             })
             .await?;
+        let summary = if rows > 0 {
+            &mut outcome.inline_flush_summaries.flushed
+        } else {
+            &mut outcome.inline_flush_summaries.noop
+        };
+        summary.count = summary.count.saturating_add(1);
+        summary.rows = summary.rows.saturating_add(rows);
+        summary.duration_seconds += duration_seconds;
         outcome.inline_flush_tables = outcome.inline_flush_tables.saturating_add(1);
         outcome.inline_flush_rows = outcome.inline_flush_rows.saturating_add(rows);
         info!(
@@ -2460,7 +2475,7 @@ pub fn flush_table_inlined_data(
     schema_name: &str,
     table_name: &str,
 ) -> EtlResult<u64> {
-    let flush_started = std::time::Instant::now();
+    let flush_started = StdInstant::now();
     let sql = format!(
         r#"SELECT COALESCE(SUM(rows_flushed), 0)
          FROM ducklake_flush_inlined_data({}, schema_name => {}, table_name => {});"#,
