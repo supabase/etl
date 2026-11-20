@@ -367,8 +367,8 @@ mod tests {
         bigquery::{
             client::bq_error_to_etl_error,
             query::{
-                QUERY_MAX_RETRY_DELAY, QUERY_TIMEOUT, QUERY_WAIT_TIMEOUT_MS, complete_query,
-                execute_query, execute_query_attempt, query_retry_delay,
+                QUERY_MAX_RETRY_DELAY, QUERY_POLL_INTERVAL, QUERY_TIMEOUT, QUERY_WAIT_TIMEOUT_MS,
+                complete_query, execute_query, execute_query_attempt, query_retry_delay,
                 query_retry_requires_new_request_id, retry_query_jobs,
             },
         },
@@ -589,7 +589,7 @@ mod tests {
     /// Accepted DDL must not become durable until the same job completes.
     #[tokio::test(start_paused = true)]
     async fn incomplete_query_waits_for_the_original_job() {
-        let mut polls = 0;
+        let mut poll_times = Vec::new();
         let response = QueryResponse {
             job_complete: Some(false),
             job_reference: Some(JobReference {
@@ -599,17 +599,21 @@ mod tests {
             }),
             ..Default::default()
         };
+        let started = Instant::now();
+
         let completed =
             complete_query(
                 response,
-                Instant::now() + QUERY_TIMEOUT,
+                started + QUERY_TIMEOUT,
                 "test-request",
                 |reference, page_token| {
                     assert!(page_token.is_none());
                     assert_eq!(reference.job_id.as_deref(), Some("pending_job"));
                     assert_eq!(reference.location.as_deref(), Some("europe-west1"));
-                    polls += 1;
-                    let complete = polls == 2;
+
+                    poll_times.push(started.elapsed());
+                    let complete = poll_times.len() == 2;
+
                     async move {
                         Ok(QueryResponse { job_complete: Some(complete), ..Default::default() })
                     }
@@ -617,7 +621,8 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(polls, 2);
+
+        assert_eq!(poll_times, [Duration::ZERO, QUERY_POLL_INTERVAL]);
         assert_eq!(completed.job_complete, Some(true));
         let reference = completed.job_reference.unwrap();
         assert_eq!(reference.job_id.as_deref(), Some("pending_job"));

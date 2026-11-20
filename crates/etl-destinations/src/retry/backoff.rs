@@ -120,6 +120,8 @@ mod tests {
         mpsc,
     };
 
+    use tokio::time::Instant;
+
     use super::*;
 
     /// Error returned by test operations.
@@ -198,44 +200,41 @@ mod tests {
     /// Caps exponential delay growth at the configured maximum.
     #[tokio::test(start_paused = true)]
     async fn retry_with_backoff_caps_delay_growth() {
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let (base_delays_tx, base_delays) = mpsc::channel();
+        let mut attempt_times = Vec::new();
+        let mut base_delays = Vec::new();
+        let started = Instant::now();
 
-        let attempts_for_task = Arc::clone(&attempts);
-        let handle = tokio::spawn(async move {
-            retry_with_backoff(
-                RetryPolicy {
-                    max_retries: 3,
-                    initial_delay: Duration::from_millis(5),
-                    max_delay: Duration::from_millis(8),
-                },
-                |_| false,
-                |delay| delay,
-                move |attempt: RetryAttempt<'_, TestError>| {
-                    base_delays_tx.send(attempt.base_delay).unwrap();
-                },
-                move || {
-                    attempts_for_task.fetch_add(1, Ordering::SeqCst);
-                    async { Err::<(), _>(retryable(0)) }
-                },
-            )
-            .await
-        });
+        let failure = retry_with_backoff(
+            RetryPolicy {
+                max_retries: 3,
+                initial_delay: Duration::from_millis(5),
+                max_delay: Duration::from_millis(8),
+            },
+            |_| false,
+            |delay| delay,
+            |attempt: RetryAttempt<'_, TestError>| base_delays.push(attempt.base_delay),
+            || {
+                attempt_times.push(started.elapsed());
 
-        tokio::task::yield_now().await;
-        tokio::time::advance(Duration::from_millis(5)).await;
-        tokio::task::yield_now().await;
-        tokio::time::advance(Duration::from_millis(8)).await;
-        tokio::task::yield_now().await;
-        tokio::time::advance(Duration::from_millis(8)).await;
-        tokio::task::yield_now().await;
+                async { Err::<(), _>(retryable(0)) }
+            },
+        )
+        .await
+        .unwrap_err();
 
-        let failure = handle.await.unwrap().unwrap_err();
-        assert_eq!(attempts.load(Ordering::SeqCst), 4);
         assert_eq!(failure, retryable(0));
         assert_eq!(
-            base_delays.try_iter().collect::<Vec<_>>(),
-            vec![Duration::from_millis(5), Duration::from_millis(8), Duration::from_millis(8),]
+            base_delays,
+            [Duration::from_millis(5), Duration::from_millis(8), Duration::from_millis(8)]
+        );
+        assert_eq!(
+            attempt_times,
+            [
+                Duration::ZERO,
+                Duration::from_millis(5),
+                Duration::from_millis(13),
+                Duration::from_millis(21),
+            ]
         );
     }
 
@@ -297,42 +296,32 @@ mod tests {
     /// Applies caller-provided delay shaping before sleeping.
     #[tokio::test(start_paused = true)]
     async fn retry_with_backoff_applies_transformed_delay() {
-        let (seen_sleep_delays_tx, seen_sleep_delays) = mpsc::channel();
-        let handle = tokio::spawn(async move {
-            retry_with_backoff(
-                RetryPolicy {
-                    max_retries: 1,
-                    initial_delay: Duration::from_millis(5),
-                    max_delay: Duration::from_millis(20),
-                },
-                |_| false,
-                |delay| delay + Duration::from_millis(3),
-                move |attempt: RetryAttempt<'_, TestError>| {
-                    seen_sleep_delays_tx.send(attempt.sleep_delay).unwrap();
-                },
-                {
-                    let attempts = Arc::new(AtomicUsize::new(0));
-                    move || {
-                        let attempts = Arc::clone(&attempts);
-                        async move {
-                            let current = attempts.fetch_add(1, Ordering::SeqCst);
-                            if current == 0 { Err(retryable(current)) } else { Ok("done") }
-                        }
-                    }
-                },
-            )
-            .await
-        });
+        let mut attempts = 0;
+        let mut sleep_delays = Vec::new();
+        let started = Instant::now();
 
-        tokio::task::yield_now().await;
-        tokio::time::advance(Duration::from_millis(8)).await;
-        tokio::task::yield_now().await;
+        let result = retry_with_backoff(
+            RetryPolicy {
+                max_retries: 1,
+                initial_delay: Duration::from_millis(5),
+                max_delay: Duration::from_millis(20),
+            },
+            |_| false,
+            |delay| delay + Duration::from_millis(3),
+            |attempt: RetryAttempt<'_, TestError>| sleep_delays.push(attempt.sleep_delay),
+            || {
+                let current = attempts;
+                attempts += 1;
 
-        assert_eq!(handle.await.unwrap().unwrap(), "done");
-        assert_eq!(
-            seen_sleep_delays.try_iter().collect::<Vec<_>>(),
-            vec![Duration::from_millis(8)]
-        );
+                async move { if current == 0 { Err(retryable(current)) } else { Ok("done") } }
+            },
+        )
+        .await;
+
+        assert_eq!(result.unwrap(), "done");
+        assert_eq!(attempts, 2);
+        assert_eq!(sleep_delays, [Duration::from_millis(8)]);
+        assert_eq!(started.elapsed(), Duration::from_millis(8));
     }
 
     /// Returns the last error after exhausting retries.
