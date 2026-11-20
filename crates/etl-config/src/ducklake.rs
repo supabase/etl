@@ -117,12 +117,19 @@ pub fn ducklake_catalog_metadata_connect_options(
     };
 
     let ports = config.get_ports();
-    let first_port = if config.get_hosts().len() > 1 || host.contains(',') {
+    let has_query_host = catalog_url.query_pairs().any(|(key, _)| key == "host");
+    // PgConfig contributes one port per authority host, even when implicit.
+    // If all hosts are in the authority, query ports replace those ports.
+    let preferred_port = if catalog_url.has_host() && !has_query_host {
+        ports.get(config.get_hosts().len())
+    } else {
         ports.first()
+    };
+
+    let first_port = if config.get_hosts().len() > 1 || host.contains(',') {
+        preferred_port.or_else(|| ports.first())
     } else if config.get_hostaddrs().len() > 1 {
-        // With one host, query ports override the authority port. PgConfig adds
-        // one port for an authority even when its port defaults to 5432.
-        ports.get(usize::from(catalog_url.has_host()))
+        preferred_port
     } else {
         None
     };
@@ -517,6 +524,11 @@ mod tests {
             ("postgres://first.example:6432/db?hostaddr=192.0.2.10,192.0.2.11", 6432),
             ("postgres://first.example/db?hostaddr=192.0.2.10,192.0.2.11&port=6543,6544", 6543),
             ("postgres:///db?hostaddr=192.0.2.10,192.0.2.11&port=5433,5434", 5433),
+            ("postgres://a.example,b.example/db?hostaddr=192.0.2.10,192.0.2.11&port=6543", 6543),
+            ("postgres://a.example,b.example/db?port=6543,6544", 6543),
+            ("postgres://a.example,b.example/db?port=6543&port=6544", 6543),
+            ("postgres:///db?host=a.example,b.example&port=6543", 6543),
+            ("postgres://a.example,b.example:6544/db", 5432),
         ];
         for (url, port) in urls {
             let url = Url::parse(url).unwrap();
