@@ -53,81 +53,34 @@ use crate::{
     },
     runtime::{TableSyncWorker, TableSyncWorkerPool},
     schema::TableId,
-    store::{PipelineStore, StateStore},
+    store::PipelineStore,
 };
 
 mod active_table;
 mod decision;
 
-/// One table's handoff evaluation, as its debug line reports it.
-struct Evaluation {
-    /// Trigger that caused the evaluation.
+/// Logs one handoff decision with the inputs it was made from.
+fn log_handoff_decision(
     trigger: Trigger,
-    /// Table being evaluated.
     table_id: TableId,
-    /// LSN this connection has reached.
+    table_state: &TableState,
+    worker_running: bool,
     current_lsn: PgLsn,
-    /// Readiness inputs; `None` after a COMMIT, whose decisions take none.
     readiness: Option<ReadinessInputs>,
-}
-
-impl Evaluation {
-    /// Logs the decision for a table whose sync worker is running.
-    fn log_active(&self, table_state: &TableState, action: &HandoffAction) {
-        self.log(table_state, true, action);
-    }
-
-    /// Logs the decision for a table without a running sync worker.
-    fn log_idle(&self, table_state: &TableState, action: &HandoffAction) {
-        self.log(table_state, false, action);
-    }
-
-    /// Logs one decision with the inputs it was made from.
-    fn log(&self, table_state: &TableState, worker_running: bool, action: &HandoffAction) {
-        debug!(
-            worker_type = %WorkerType::Apply,
-            table_id = self.table_id.0,
-            table_state_type = %table_state.as_type(),
-            %table_state,
-            worker_running,
-            trigger = self.trigger.as_str(),
-            current_lsn = %self.current_lsn,
-            readiness = ?self.readiness,
-            ?action,
-            "evaluated table sync handoff",
-        );
-    }
-}
-
-/// Returns syncing tables with the persisted apply checkpoint.
-///
-/// The checkpoint is not read when no table is syncing. This apply loop
-/// serializes checkpoint persistence, so no apply checkpoint write can race
-/// this read before the caller finishes its evaluation and persists its next
-/// candidate.
-async fn syncing_tables_with_checkpoint<S: StateStore>(
-    store: &S,
-) -> EtlResult<(Vec<(TableId, TableState)>, Option<PgLsn>)> {
-    let syncing_tables = get_syncing_tables(store).await?;
-    if syncing_tables.is_empty() {
-        return Ok((syncing_tables, None));
-    }
-
-    let persisted_checkpoint_lsn = store.get_replication_checkpoint(WorkerType::Apply).await?;
-
-    Ok((syncing_tables, persisted_checkpoint_lsn))
-}
-
-/// Returns the readiness inputs for one table.
-fn readiness_inputs(
-    table_id: TableId,
-    persisted_checkpoint_lsn: Option<PgLsn>,
-    table_decoding_states: &HashMap<TableId, TableDecodingState>,
-) -> ReadinessInputs {
-    let has_materialized_decoding_state =
-        matches!(table_decoding_states.get(&table_id), Some(TableDecodingState::WithSchema(_)));
-
-    ReadinessInputs::new(persisted_checkpoint_lsn, has_materialized_decoding_state)
+    action: &HandoffAction,
+) {
+    debug!(
+        worker_type = %WorkerType::Apply,
+        table_id = table_id.0,
+        table_state_type = %table_state.as_type(),
+        %table_state,
+        worker_running,
+        trigger = trigger.as_str(),
+        %current_lsn,
+        ?readiness,
+        ?action,
+        "evaluated table sync handoff",
+    );
 }
 
 /// Logs a `SyncDone -> Ready` transition.
@@ -265,14 +218,11 @@ where
     }
 }
 
-/// Processes syncing tables after a COMMIT.
-///
-/// Moves `SyncWait` workers to `Catchup`, waits for workers in catchup, and
-/// spawns workers for tables without one. The COMMIT decisions take no
-/// readiness inputs, so this path never stores `Ready`.
-pub(super) async fn process_syncing_tables_after_commit_event<S, D>(
+/// Evaluates every syncing table for `trigger` and executes its handoff action.
+async fn process_syncing_tables<S, D>(
     ctx: &ApplyWorkerContext<S, D>,
-    activity_handle: &ActivityHandle,
+    trigger: Trigger,
+    activity_handle: Option<&ActivityHandle>,
     current_lsn: PgLsn,
     table_decoding_states: &mut HashMap<TableId, TableDecodingState>,
 ) -> EtlResult<Option<ExitIntent>>
@@ -280,16 +230,49 @@ where
     S: PipelineStore,
     D: PipelineDestination,
 {
-    for (table_id, stored_state) in get_syncing_tables(&ctx.store).await? {
-        let evaluation =
-            Evaluation { trigger: Trigger::AfterCommit, table_id, current_lsn, readiness: None };
+    let syncing_tables = get_syncing_tables(&ctx.store).await?;
+    if syncing_tables.is_empty() {
+        return Ok(None);
+    }
+
+    // Read the persisted apply checkpoint only for triggers that can promote
+    // `SyncDone -> Ready`. This apply loop serializes checkpoint persistence,
+    // so no write can race this read before the caller persists its next
+    // candidate.
+    let persisted_checkpoint_lsn = match trigger {
+        Trigger::AfterCommit => None,
+        Trigger::AfterFlush | Trigger::Quiescent => {
+            ctx.store.get_replication_checkpoint(WorkerType::Apply).await?
+        }
+    };
+
+    for (table_id, stored_state) in syncing_tables {
+        let readiness = match trigger {
+            Trigger::AfterCommit => None,
+            Trigger::AfterFlush | Trigger::Quiescent => Some(ReadinessInputs::new(
+                persisted_checkpoint_lsn,
+                matches!(
+                    table_decoding_states.get(&table_id),
+                    Some(TableDecodingState::WithSchema(_))
+                ),
+            )),
+        };
 
         let exit_intent =
             if let Some(worker_state) = ctx.pool.get_active_worker_state(table_id).await {
                 let guard = worker_state.lock().await;
                 let table_state = guard.table_state();
-                let action = decide(Trigger::AfterCommit, true, &table_state, current_lsn, None);
-                evaluation.log_active(&table_state, &action);
+                let action = decide(trigger, true, &table_state, current_lsn, readiness.as_ref());
+
+                log_handoff_decision(
+                    trigger,
+                    table_id,
+                    &table_state,
+                    true,
+                    current_lsn,
+                    readiness,
+                    &action,
+                );
 
                 execute_active_action(
                     table_id,
@@ -297,12 +280,22 @@ where
                     action,
                     &ctx.store,
                     &ctx.shutdown_token,
-                    Some(activity_handle),
+                    activity_handle,
                 )
                 .await?
             } else {
-                let action = decide(Trigger::AfterCommit, false, &stored_state, current_lsn, None);
-                evaluation.log_idle(&stored_state, &action);
+                let action = decide(trigger, false, &stored_state, current_lsn, readiness.as_ref());
+
+                log_handoff_decision(
+                    trigger,
+                    table_id,
+                    &stored_state,
+                    false,
+                    current_lsn,
+                    readiness,
+                    &action,
+                );
+
                 execute_idle_action(ctx, table_id, action, table_decoding_states).await?;
 
                 None
@@ -316,12 +309,35 @@ where
     Ok(None)
 }
 
+/// Processes syncing tables after a COMMIT.
+///
+/// Moves `SyncWait` workers to `Catchup`, waits for workers in catchup, and
+/// spawns workers for tables without one. Never stores `Ready`.
+pub(super) async fn process_syncing_tables_after_commit_event<S, D>(
+    ctx: &ApplyWorkerContext<S, D>,
+    activity_handle: &ActivityHandle,
+    current_lsn: PgLsn,
+    table_decoding_states: &mut HashMap<TableId, TableDecodingState>,
+) -> EtlResult<Option<ExitIntent>>
+where
+    S: PipelineStore,
+    D: PipelineDestination,
+{
+    process_syncing_tables(
+        ctx,
+        Trigger::AfterCommit,
+        Some(activity_handle),
+        current_lsn,
+        table_decoding_states,
+    )
+    .await
+}
+
 /// Processes syncing tables after a batch flush.
 ///
 /// Handles `SyncDone → Ready` transitions only after the persisted apply
 /// checkpoint reaches `SyncDone.lsn` and this connection has materialized the
-/// table decoder, and spawns new workers. It never enters or waits for
-/// catchup.
+/// table decoder, and spawns new workers. Never enters or waits for catchup.
 ///
 /// The caller invokes this before persisting `current_lsn`, so
 /// `persisted_checkpoint_lsn` is the restart frontier from an earlier
@@ -341,33 +357,8 @@ where
     S: PipelineStore,
     D: PipelineDestination,
 {
-    let (syncing_tables, persisted_checkpoint_lsn) =
-        syncing_tables_with_checkpoint(&ctx.store).await?;
-    for (table_id, stored_state) in syncing_tables {
-        let readiness = readiness_inputs(table_id, persisted_checkpoint_lsn, table_decoding_states);
-        let evaluation = Evaluation {
-            trigger: Trigger::AfterFlush,
-            table_id,
-            current_lsn,
-            readiness: Some(readiness),
-        };
-
-        if let Some(worker_state) = ctx.pool.get_active_worker_state(table_id).await {
-            let guard = worker_state.lock().await;
-            let table_state = guard.table_state();
-            let action =
-                decide(Trigger::AfterFlush, true, &table_state, current_lsn, Some(&readiness));
-            evaluation.log_active(&table_state, &action);
-
-            execute_active_action(table_id, guard, action, &ctx.store, &ctx.shutdown_token, None)
-                .await?;
-        } else {
-            let action =
-                decide(Trigger::AfterFlush, false, &stored_state, current_lsn, Some(&readiness));
-            evaluation.log_idle(&stored_state, &action);
-            execute_idle_action(ctx, table_id, action, table_decoding_states).await?;
-        }
-    }
+    process_syncing_tables(ctx, Trigger::AfterFlush, None, current_lsn, table_decoding_states)
+        .await?;
 
     Ok(())
 }
@@ -390,47 +381,12 @@ where
     S: PipelineStore,
     D: PipelineDestination,
 {
-    let (syncing_tables, persisted_checkpoint_lsn) =
-        syncing_tables_with_checkpoint(&ctx.store).await?;
-    for (table_id, stored_state) in syncing_tables {
-        let readiness = readiness_inputs(table_id, persisted_checkpoint_lsn, table_decoding_states);
-        let evaluation = Evaluation {
-            trigger: Trigger::Quiescent,
-            table_id,
-            current_lsn,
-            readiness: Some(readiness),
-        };
-
-        let exit_intent =
-            if let Some(worker_state) = ctx.pool.get_active_worker_state(table_id).await {
-                let guard = worker_state.lock().await;
-                let table_state = guard.table_state();
-                let action =
-                    decide(Trigger::Quiescent, true, &table_state, current_lsn, Some(&readiness));
-                evaluation.log_active(&table_state, &action);
-
-                execute_active_action(
-                    table_id,
-                    guard,
-                    action,
-                    &ctx.store,
-                    &ctx.shutdown_token,
-                    Some(activity_handle),
-                )
-                .await?
-            } else {
-                let action =
-                    decide(Trigger::Quiescent, false, &stored_state, current_lsn, Some(&readiness));
-                evaluation.log_idle(&stored_state, &action);
-                execute_idle_action(ctx, table_id, action, table_decoding_states).await?;
-
-                None
-            };
-
-        if exit_intent.is_some() {
-            return Ok(exit_intent);
-        }
-    }
-
-    Ok(None)
+    process_syncing_tables(
+        ctx,
+        Trigger::Quiescent,
+        Some(activity_handle),
+        current_lsn,
+        table_decoding_states,
+    )
+    .await
 }
