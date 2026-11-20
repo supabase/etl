@@ -28,7 +28,7 @@ use etl::{
     task::{TaskGroup, TaskRegistry, abort_and_join},
 };
 use etl_config::{
-    ducklake_catalog_metadata_connect_options,
+    DUCKLAKE_CATALOG_ACQUIRE_TIMEOUT, ducklake_catalog_metadata_connect_options,
     shared::{
         DuckLakeCopyBufferConfig, DuckLakePartitionColumn, DuckLakeSortBy, DuckLakeSortColumn,
         DuckLakeSortDirection, DuckLakeSortNulls, DuckLakeTablePartitioningConfig,
@@ -218,7 +218,7 @@ fn build_ducklake_catalog_pg_pool(catalog_url: &Url) -> EtlResult<PgPool> {
     Ok(PgPoolOptions::new()
         .max_connections(DUCKLAKE_CATALOG_PG_POOL_SIZE)
         .min_connections(0)
-        .acquire_timeout(std::time::Duration::from_secs(5))
+        .acquire_timeout(DUCKLAKE_CATALOG_ACQUIRE_TIMEOUT)
         .idle_timeout(Some(std::time::Duration::from_secs(30)))
         .connect_lazy_with(options))
 }

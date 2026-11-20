@@ -34,6 +34,13 @@ const TCP_KEEPALIVE: Duration = Duration::from_secs(60);
 /// Maximum time an idle ClickHouse connection remains pooled.
 const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Lowest `keep_alive_timeout` default among supported ClickHouse servers.
+///
+/// Pooled connections must expire first, or a request can reuse a socket the
+/// server is already closing.
+const MIN_SERVER_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(3);
+const _: () = assert!(POOL_IDLE_TIMEOUT.as_millis() < MIN_SERVER_KEEP_ALIVE_TIMEOUT.as_millis());
+
 /// TLS configuration fails the same way until the configuration changes.
 impl ClassifiedError for rustls::Error {
     fn retryability(&self) -> Retryability {

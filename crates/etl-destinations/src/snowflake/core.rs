@@ -31,13 +31,17 @@ use crate::{
         Client, SNOWFLAKE_COLUMN_NAME_MAPPING,
         auth::{AuthManager, HttpExchanger, TokenProvider},
         client::TableChannel,
+        config::HTTP_REQUEST_TIMEOUT,
         encoding::{
             CdcMeta, CdcOperation, key_only_missing_columns, normalize_delete_row,
             normalize_update_row,
         },
         metrics::register_metrics,
         schema,
-        streaming::{Completed, OffsetToken, RestStreamClient, RowBatchBuilder, StreamClient},
+        streaming::{
+            Completed, DEFAULT_COMMIT_WAIT_TIMEOUT, OffsetToken, RestStreamClient, RowBatchBuilder,
+            SNOWPIPE_RETRY_POLICY, StreamClient,
+        },
     },
     table_name::try_stringify_table_name,
 };
@@ -82,7 +86,18 @@ type EventIter = std::iter::Peekable<std::vec::IntoIter<Event>>;
 
 /// Maximum time allowed to drain Snowflake event tasks and retire local table
 /// state before a reset.
-const RESET_PREPARATION_TIMEOUT: Duration = Duration::from_secs(180);
+///
+/// Draining waits for event tasks that may be inside a durability wait, which
+/// stops starting channel calls after [`DEFAULT_COMMIT_WAIT_TIMEOUT`] but lets
+/// one in-flight call finish its retries. This bound must outlast both, or a
+/// reset fails while the drain would still complete.
+const RESET_PREPARATION_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const _: () = assert!(
+    RESET_PREPARATION_TIMEOUT.as_secs()
+        > DEFAULT_COMMIT_WAIT_TIMEOUT.as_secs()
+            + (SNOWPIPE_RETRY_POLICY.max_retries as u64 + 1) * HTTP_REQUEST_TIMEOUT.as_secs()
+            + SNOWPIPE_RETRY_POLICY.max_retries as u64 * SNOWPIPE_RETRY_POLICY.max_delay.as_secs()
+);
 
 /// Groups consecutive row events in first-seen table order without crossing a
 /// relation or truncate barrier. Moving events preserves each table's source

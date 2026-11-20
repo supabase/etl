@@ -38,6 +38,10 @@ use crate::{
 /// See <https://cloud.google.com/bigquery/docs/reference/rest/v2/jobs/query>.
 const QUERY_TIMEOUT: Duration = Duration::from_secs(600);
 
+/// BigQuery's request-ID deduplication window for `jobs.query`.
+const QUERY_REQUEST_ID_DEDUP_WINDOW: Duration = Duration::from_secs(15 * 60);
+const _: () = assert!(QUERY_TIMEOUT.as_secs() < QUERY_REQUEST_ID_DEDUP_WINDOW.as_secs());
+
 /// Requested server-side wait, matching BigQuery's default.
 ///
 /// HTTP latency can exceed this hint. [`QUERY_TIMEOUT`] bounds local waiting
