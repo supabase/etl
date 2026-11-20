@@ -541,20 +541,15 @@ pub(super) async fn query_table_storage_metrics(
         active_delete_bytes,
         deleted_rows,
     ): (i64, i64, i64, i64, i64, i64, i64) = metadata_pg_pool
-        .read("table_storage_metrics", |pool| {
-            let sql = &sql;
-            async move {
-                let mut transaction = pool.begin().await?;
-                let result = sqlx::query_as(AssertSqlSafe(sql.as_str()))
+        .read("table_storage_metrics", (sql, table_name), |connection, (sql, table_name)| {
+            Box::pin(
+                sqlx::query_as(AssertSqlSafe(sql.as_str()))
                     .persistent(false)
                     .bind(table_name.schema())
                     .bind(table_name.table())
                     .bind(table_name.namespace())
-                    .fetch_one(&mut *transaction)
-                    .await?;
-                transaction.commit().await?;
-                Ok::<_, sqlx::Error>(result)
-            }
+                    .fetch_one(connection),
+            )
         })
         .await
         .map_err(|source| {
@@ -593,17 +588,10 @@ pub(super) async fn query_catalog_maintenance_metrics(
         files_scheduled_for_deletion_bytes,
         oldest_scheduled_deletion_epoch_ms,
     ): (i64, i64, Option<i64>, i64, i64, Option<i64>) = metadata_pg_pool
-        .read("catalog_maintenance_metrics", |pool| {
-            let sql = &sql;
-            async move {
-                let mut transaction = pool.begin().await?;
-                let result = sqlx::query_as(AssertSqlSafe(sql.as_str()))
-                    .persistent(false)
-                    .fetch_one(&mut *transaction)
-                    .await?;
-                transaction.commit().await?;
-                Ok::<_, sqlx::Error>(result)
-            }
+        .read("catalog_maintenance_metrics", sql, |connection, sql| {
+            Box::pin(
+                sqlx::query_as(AssertSqlSafe(sql.as_str())).persistent(false).fetch_one(connection),
+            )
         })
         .await
         .map_err(|source| {
