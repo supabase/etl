@@ -3,7 +3,10 @@
 use std::{collections::HashMap, num::NonZeroI32};
 
 use etl_config::shared::{IntoConnectOptions, PgConnectionConfig, PgConnectionOptions};
-use sqlx::{PgExecutor, PgPool, Row, postgres::PgPoolOptions};
+use sqlx::{
+    PgExecutor, PgPool, Row,
+    postgres::{PgPoolOptions, types::Oid as SqlxTableId},
+};
 use thiserror::Error;
 
 use crate::schema::{TableId, TableName};
@@ -61,23 +64,22 @@ where
         return Ok(HashMap::new());
     }
 
-    let query = "select c.oid::int as oid, n.nspname as schema_name, c.relname as table_name
+    let query = "select c.oid, n.nspname as schema_name, c.relname as table_name
     from pg_class c
     join pg_namespace n on c.relnamespace = n.oid
     where c.oid = any($1::oid[])
     ";
 
-    let oids: Vec<i32> = table_ids.iter().map(|id| id.into_inner() as i32).collect();
+    let oids: Vec<SqlxTableId> = table_ids.iter().map(|id| SqlxTableId(id.into_inner())).collect();
     let rows = sqlx::query(query).bind(&oids).fetch_all(executor).await?;
 
     let mut result = HashMap::with_capacity(rows.len());
     for row in rows {
-        let oid: i32 = row.try_get("oid")?;
+        let oid: SqlxTableId = row.try_get("oid")?;
         let schema_name: String = row.try_get("schema_name")?;
         let table_name: String = row.try_get("table_name")?;
 
-        result
-            .insert(TableId::new(oid as u32), TableName { schema: schema_name, name: table_name });
+        result.insert(TableId::new(oid.0), TableName { schema: schema_name, name: table_name });
     }
 
     Ok(result)

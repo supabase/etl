@@ -100,6 +100,11 @@ ETL is installed from Git while we prepare for a crates.io release:
 [dependencies]
 etl = { git = "https://github.com/supabase/etl" }
 tokio = { version = "1", features = ["full"] }
+
+# Cargo applies driver patches from the application workspace root.
+[patch.crates-io]
+sqlx-core = { git = "https://github.com/supabase/sqlx", rev = "ce568ad9091114be909747a2d906d93dfee2f098" }
+sqlx-postgres = { git = "https://github.com/supabase/sqlx", rev = "ce568ad9091114be909747a2d906d93dfee2f098" }
 ```
 
 ## Why Supabase ETL?

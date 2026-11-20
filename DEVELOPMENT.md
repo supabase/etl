@@ -35,7 +35,7 @@ uses `kubectl` and an OrbStack Kubernetes cluster for optional local deployment.
 Install SQLx CLI:
 
 ```bash
-cargo install --version 0.9.0 sqlx-cli --no-default-features --features rustls,postgres --locked
+cargo install --version 0.9.1 sqlx-cli --no-default-features --features rustls,postgres --locked
 ```
 
 ## Source migrations without replication
