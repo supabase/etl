@@ -71,6 +71,10 @@ impl KubernetesExternalMaintenanceStore {
         Ok(Some(Self { api, name, timeout }))
     }
 
+    fn kube_error(error: kube::Error, message: &'static str) -> etl::error::EtlError {
+        etl_error!(ErrorKind::SourceQueryFailed, message, source: error)
+    }
+
     async fn load_resource(&self) -> EtlResult<Option<DynamicObject>> {
         time::timeout(self.timeout, self.api.get_opt(&self.name))
             .await
@@ -82,10 +86,26 @@ impl KubernetesExternalMaintenanceStore {
             })?
             .map_err(|error| Self::kube_error(error, "Failed to load DuckLake maintenance CR"))
     }
+}
 
-    fn kube_error(error: kube::Error, message: &'static str) -> etl::error::EtlError {
-        etl_error!(ErrorKind::SourceQueryFailed, message, source: error)
+/// Merges newly requested operations without changing thresholds for pending
+/// work.
+fn operation_request_patch(
+    version: &str,
+    pending: ExternalMaintenanceOperations,
+    request: &ExternalMaintenanceOperationRequest,
+) -> Value {
+    let mut operations = json!(pending.merge(request.operations));
+    operations["requestedAt"] = json!(request.requested_at);
+    if request.operations.inline_flush && !pending.inline_flush {
+        operations["inlineFlushMinInlinedBytes"] = json!(request.inline_flush_min_inlined_bytes);
     }
+    if request.operations.rewrite_data_files && !pending.rewrite_data_files {
+        operations["rewriteDataFilesMinActiveDataFiles"] =
+            json!(request.rewrite_data_files_min_active_data_files);
+    }
+
+    json!({"metadata": {"resourceVersion": version}, "status": {"operationRequests": operations}})
 }
 
 #[async_trait::async_trait]
@@ -173,26 +193,6 @@ impl ExternalMaintenanceStore for KubernetesExternalMaintenanceStore {
         });
         patch_status(&self.api, &self.name, &patch, self.timeout).await
     }
-}
-
-/// Merges newly requested operations without changing thresholds for pending
-/// work.
-fn operation_request_patch(
-    version: &str,
-    pending: ExternalMaintenanceOperations,
-    request: &ExternalMaintenanceOperationRequest,
-) -> Value {
-    let mut operations = json!(pending.merge(request.operations));
-    operations["requestedAt"] = json!(request.requested_at);
-    if request.operations.inline_flush && !pending.inline_flush {
-        operations["inlineFlushMinInlinedBytes"] = json!(request.inline_flush_min_inlined_bytes);
-    }
-    if request.operations.rewrite_data_files && !pending.rewrite_data_files {
-        operations["rewriteDataFilesMinActiveDataFiles"] =
-            json!(request.rewrite_data_files_min_active_data_files);
-    }
-
-    json!({"metadata": {"resourceVersion": version}, "status": {"operationRequests": operations}})
 }
 
 async fn patch_status(
