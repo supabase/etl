@@ -320,14 +320,14 @@ impl IntoConnectOptions<SqlxConnectOptions> for PgConnectionConfig {
     fn without_db(&self, options: Option<&PgConnectionOptions>) -> SqlxConnectOptions {
         let host = self.hostaddr.map_or_else(|| self.host.clone(), |hostaddr| hostaddr.to_string());
         let ssl_mode = match (self.tls.enabled, self.hostaddr) {
-            // sqlx 0.8.6 does not expose libpq's separate hostaddr field. When dialing a numeric
-            // address, verify the CA but avoid hostname verification against the IP literal.
+            // Pinned connections currently use the IP itself as the SQLx host.
             (true, Some(_)) => SqlxSslMode::VerifyCa,
             (true, None) => SqlxSslMode::VerifyFull,
             (false, _) => SqlxSslMode::Prefer,
         };
         let mut connect_options = SqlxConnectOptions::new_without_pgpass()
             .host(&host)
+            .clear_hostaddr()
             .username(&self.username)
             .port(self.port)
             .ssl_mode(ssl_mode)
@@ -338,16 +338,8 @@ impl IntoConnectOptions<SqlxConnectOptions> for PgConnectionConfig {
         connect_options = connect_options
             .password(self.password.as_ref().map_or("", |password| password.expose_secret()));
 
-        // TODO: Enable TCP keepalive once available in sqlx. The
-        // tcp_keepalive_time() method was added in PR #3559 but may not be
-        // available in the current sqlx version (0.8.6). When upgrading sqlx,
-        // uncomment the following to enable keepalive for metadata
-        // connections:
-        //
-        // ```
-        // connect_options =
-        //     connect_options.tcp_keepalive_time(Duration::from_secs(self.keepalive.idle_secs));
-        // ```
+        // TODO: Apply the configured TCP keepalive settings when SQLx supports
+        // them for Postgres.
 
         // Apply options if provided
         if let Some(opts) = options {
@@ -501,18 +493,20 @@ mod tests {
         assert_eq!(options.application_name, "custom_workload");
     }
 
-    /// Verifies that configured passwords override the ambient password.
+    /// Verifies that explicit options override the ambient password and
+    /// address.
     #[test]
-    fn sqlx_options_use_only_configured_password() {
-        if std::env::var_os("ETL_CONFIG_TEST_PASSWORD_CHILD").is_none() {
-            // Set PGPASSWORD before starting the child to avoid mutating the
+    fn sqlx_options_ignore_ambient_password_and_address() {
+        if std::env::var_os("ETL_CONFIG_TEST_OPTIONS_CHILD").is_none() {
+            // Set the variables before starting the child to avoid mutating the
             // environment while other tests or libraries may read it.
             let output = Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
-                    "shared::connection::tests::sqlx_options_use_only_configured_password",
+                    "shared::connection::tests::sqlx_options_ignore_ambient_password_and_address",
                 ])
-                .env("ETL_CONFIG_TEST_PASSWORD_CHILD", "1")
+                .env("ETL_CONFIG_TEST_OPTIONS_CHILD", "1")
+                .env("PGHOSTADDR", "192.0.2.99")
                 .env("PGPASSWORD", "placeholderambientpassword")
                 .output()
                 .unwrap();
@@ -529,11 +523,10 @@ mod tests {
             config.password = password.map(SecretString::from);
             let options: SqlxConnectOptions = config.with_db(None);
 
+            let url = options.to_url_lossy();
+            assert!(!url.query_pairs().any(|(key, _)| key == "hostaddr"));
             // URL serialization normalizes an empty password to absence.
-            assert_eq!(
-                options.to_url_lossy().password(),
-                password.filter(|password| !password.is_empty())
-            );
+            assert_eq!(url.password(), password.filter(|password| !password.is_empty()));
         }
     }
 

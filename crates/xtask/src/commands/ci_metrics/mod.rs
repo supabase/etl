@@ -12,14 +12,14 @@ mod plan;
 mod store;
 mod sync;
 
-use std::{env, net::IpAddr, str::FromStr};
+use std::{env, net::IpAddr};
 
 use anyhow::{Context, Result, bail};
 use chrono::{Days, NaiveDate, Utc};
 use clap::{Args, Subcommand};
 use secrecy::{ExposeSecret, SecretString};
 use sqlx::{
-    Connection, PgConnection,
+    ConnectOptions, Connection, PgConnection,
     postgres::{PgConnectOptions, PgSslMode},
 };
 
@@ -122,6 +122,27 @@ impl CiMetricsArgs {
     }
 }
 
+/// Parses the metrics URL and retains the TCP address for TLS policy and log
+/// redaction.
+fn database_options(value: &str) -> Result<(PgConnectOptions, String)> {
+    let url = value.parse()?;
+    let mut options = PgConnectOptions::from_url(&url)?;
+    let pin = url.query_pairs().filter(|(key, _)| key == "hostaddr").last();
+    let address = if let Some((_, value)) = pin {
+        Some(value.parse()?)
+    } else if url.host().is_some() || url.query_pairs().any(|(key, _)| key == "host") {
+        // An explicit URL host took precedence over PGHOSTADDR before SQLx
+        // 0.9.1.
+        options = options.clear_hostaddr();
+        None
+    } else {
+        env::var("PGHOSTADDR").ok().and_then(|value| value.parse().ok())
+    };
+
+    let target = address.map_or_else(|| options.get_host().to_owned(), |ip: IpAddr| ip.to_string());
+    Ok((options, target))
+}
+
 /// Fails unless the connection verifies the server's certificate and host
 /// name. Loopback hosts and Unix sockets are exempt for local development.
 fn require_verified_tls(host: &str, mode: PgSslMode) -> Result<()> {
@@ -151,12 +172,15 @@ fn require_session_connection(port: u16) -> Result<()> {
 /// `role.project_ref`, the user and the project ref. Postgres never echoes
 /// passwords, so they are not listed.
 fn connection_identifiers() -> Vec<String> {
-    let Some(options) =
-        env::var(DATABASE_URL_ENV).ok().and_then(|url| PgConnectOptions::from_str(&url).ok())
+    let Some((options, target)) =
+        env::var(DATABASE_URL_ENV).ok().and_then(|url| database_options(&url).ok())
     else {
         return Vec::new();
     };
     let mut identifiers = vec![options.get_host().to_owned()];
+    if target != options.get_host() {
+        identifiers.push(target);
+    }
     let user = options.get_username();
     if let Some((_, project_ref)) = user.split_once('.') {
         identifiers.extend([user.to_owned(), project_ref.to_owned()]);
@@ -181,13 +205,13 @@ async fn connect() -> Result<PgConnection> {
     let url = SecretString::from(
         env::var(DATABASE_URL_ENV).with_context(|| format!("{DATABASE_URL_ENV} is not set"))?,
     );
-    let mut options = PgConnectOptions::from_str(url.expose_secret())
-        .with_context(|| format!("{DATABASE_URL_ENV} is not a valid Postgres URL"))?
-        .application_name(APPLICATION_NAME);
+    let (options, target) = database_options(url.expose_secret())
+        .with_context(|| format!("{DATABASE_URL_ENV} is not a valid Postgres URL"))?;
+    let mut options = options.application_name(APPLICATION_NAME);
     if let Ok(path) = env::var(SSL_ROOT_CERT_ENV) {
         options = options.ssl_root_cert(path);
     }
-    require_verified_tls(options.get_host(), options.get_ssl_mode())?;
+    require_verified_tls(&target, options.get_ssl_mode())?;
     require_session_connection(options.get_port())?;
     PgConnection::connect_with(&options)
         .await
@@ -221,6 +245,19 @@ mod tests {
         // A name that merely starts like a loopback host is remote.
         assert!(require_verified_tls("localhost.example.com", PgSslMode::Require).is_err());
         assert!(require_verified_tls("127.0.0.1.example.com", PgSslMode::Require).is_err());
+    }
+
+    /// The loopback exemption follows the dial address when the URL supplies a
+    /// pin.
+    #[test]
+    fn tls_policy_checks_the_pinned_address() {
+        for (pin, local) in [("127.0.0.1", true), ("192.0.2.10", false), ("2001:db8::10", false)] {
+            let url = format!("postgres://localhost/db?hostaddr={pin}&sslmode=disable");
+            let (options, target) = database_options(&url).unwrap();
+
+            assert_eq!(target, pin);
+            assert_eq!(require_verified_tls(&target, options.get_ssl_mode()).is_ok(), local);
+        }
     }
 
     #[test]
