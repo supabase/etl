@@ -5,7 +5,7 @@
 //!   2. Sign a short-lived JWT (1 h) identifying the account and user
 //!   3. Exchange the JWT at `POST {account_url}/oauth/token` for a bearer token
 //!      (~10 min TTL)
-//!   4. Cache the bearer token; refresh proactively when < 60 s remain
+//!   4. Cache the bearer token; refresh proactively when < 2 min remain
 //!
 //! The `scope` parameter is intentionally omitted from the token exchange so
 //! the resulting token is accepted by both the SQL REST API and the Snowpipe
@@ -35,8 +35,10 @@ use crate::snowflake::{
 const TOKEN_LIFETIME_SECS: u64 = 3600;
 
 /// Refresh the scoped token this far before it expires to avoid mid-request
-/// expiry.
-const TOKEN_REFRESH_BUFFER: Duration = Duration::from_secs(60);
+/// expiry. One request can run for [`HTTP_REQUEST_TIMEOUT`], so the buffer
+/// must cover it.
+const TOKEN_REFRESH_BUFFER: Duration = Duration::from_secs(120);
+const _: () = assert!(TOKEN_REFRESH_BUFFER.as_secs() > HTTP_REQUEST_TIMEOUT.as_secs());
 
 /// Token produced by Snowflake's `/oauth/token` endpoint.
 ///
@@ -495,7 +497,10 @@ P23pIjtEtEPNpGkXj0aB1RDq
     #[tokio::test]
     async fn token_cache_hit() {
         let manager = make_test_manager();
-        manager.inject_token_for_test("cached-token-123".to_owned(), Duration::from_secs(120));
+        manager.inject_token_for_test(
+            "cached-token-123".to_owned(),
+            TOKEN_REFRESH_BUFFER + Duration::from_secs(60),
+        );
 
         // A non-expired token should be returned directly from cache.
         let token = manager.get_token().await.expect("get_token");
@@ -506,8 +511,11 @@ P23pIjtEtEPNpGkXj0aB1RDq
     async fn token_cache_expired_triggers_refresh() {
         let manager = make_test_manager();
 
-        // Inject a token with 30s TTL, which is below the 60s refresh buffer.
-        manager.inject_token_for_test("stale-token".to_owned(), Duration::from_secs(30));
+        // Inject a token whose TTL is inside the refresh buffer.
+        manager.inject_token_for_test(
+            "stale-token".to_owned(),
+            TOKEN_REFRESH_BUFFER - Duration::from_secs(30),
+        );
 
         // get_token should detect the stale cache and call the exchanger.
         let token = manager.get_token().await.expect("get_token");

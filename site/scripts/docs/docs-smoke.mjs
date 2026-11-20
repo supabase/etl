@@ -18,7 +18,7 @@ const canonicalOrigin = process.env.SITE_ORIGIN ?? 'https://supabase.github.io';
 const canonicalBasePath = process.env.SITE_BASE_PATH ?? '/etl';
 const canonicalBaseUrl = `${canonicalOrigin}${canonicalBasePath}`;
 const projectStatus =
-  'Supabase ETL is under active development. APIs and setup steps may change before the first stable release.';
+  'Supabase ETL is under active development. We are holding the first versioned release while breaking changes to APIs and setup are still frequent.';
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);

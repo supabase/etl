@@ -66,25 +66,35 @@ completion. See [Planning long initial copies](/guides/configure-postgres/#plann
 for operating costs and [Initial-copy schema protection](/explanation/schema-changes/#initial-copy-schema-protection)
 for partition scope, timeouts, and retry limits.
 
-<Callout className="etl-callout" type="info" title="Note">
+<Callout className="etl-callout" type="info" title="Transaction boundaries during catch-up">
   During catch-up, `Begin` and `Commit` events may be delivered multiple times
   because workers consume slots in parallel. This is expected: destinations
   should rely on **per-table event ordering** and **idempotent writes** rather
   than treating transaction markers as a complete global transaction boundary.
 </Callout>
 
-Copy and change data capture (CDC) are replication paths, not customer-visible
-phases. Initial sync uses the copy path followed by CDC catch-up; ongoing
-replication uses the CDC path after the table is ready.
-
 ### Phase 2: Ongoing Replication
 
-Once a table is ready, the **Apply Worker** handles ongoing replication from
-the Postgres WAL. It:
+After a table catches up, the **Apply Worker** streams its changes from the
+Postgres WAL.
 
 1. Receives change events (inserts, updates, deletes, truncates, and schema changes)
 2. Batches events for efficiency
 3. Sends batches to the destination via `write_events()`
+
+### Buffering and replay
+
+ETL sends batches directly to the destination from one Rust process. It
+buffers pending changes in memory and slows or pauses reads from Postgres
+when those buffers are under pressure. This keeps deployment simple because
+ETL needs no disk spool. Postgres WAL supplies the durable replay history,
+and a durable state store lets ETL resume from saved checkpoints and schemas.
+
+If a destination falls behind or goes offline, ETL can take longer to
+acknowledge progress. Replication slots can then retain more WAL on the
+source, where it uses disk space until the pipeline catches up or Postgres
+enforces a configured retention limit. Long initial copies can also increase
+[WAL retention on the source](/guides/configure-postgres/#wal-buildup-and-disk-usage).
 
 ### Schema Changes
 

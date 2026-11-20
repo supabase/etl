@@ -20,7 +20,7 @@ use tokio_util::task::AbortOnDropHandle;
 use tracing::warn;
 
 use crate::{
-    config::PgConnectionConfig,
+    config::{PgConnectionConfig, PipelineConfig},
     error::{ErrorKind, EtlResult},
     etl_error,
     observability::{
@@ -36,7 +36,14 @@ use crate::{
 };
 
 /// Upper bound on a best-effort metrics query, including pool acquisition.
+///
+/// Stays below the default refresh interval so a slow sample does not skip
+/// the next tick.
 const SAMPLE_TIMEOUT: Duration = Duration::from_secs(5);
+const _: () = assert!(
+    SAMPLE_TIMEOUT.as_millis()
+        < PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS.get() as u128
+);
 /// Worker paths refreshed even when their last registration has stopped.
 const WORKER_PATHS: [(&str, &str); 3] = [
     ("apply", CDC_REPLICATION_PATH),

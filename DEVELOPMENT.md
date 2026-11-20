@@ -1,23 +1,22 @@
 # Development Guide
 
-How to work in this repository. Coding agents should follow
-[AGENTS.md](AGENTS.md) (first-time setup and implementation rules).
-
-The open-source project is the replication engine: the `etl` library, the
-`etl-replicator` binary, and the built-in destinations. Product docs live at
-[supabase.github.io/etl](https://supabase.github.io/etl/).
-
 ## Start here
+
+Install the Rust toolchain pinned in `rust-toolchain.toml`, `psql`, Docker
+Compose, and SQLx CLI. Install cargo-nextest if you plan to run tests.
+
+```bash
+cargo install --version 0.9.1 sqlx-cli --no-default-features --features rustls,postgres --locked
+```
+
+Start the PostgreSQL 19 primary, read replica, and ClickHouse, then apply
+migrations:
 
 ```bash
 cargo x init
 ```
 
-That starts local Postgres and ClickHouse, and runs
-migrations. It does not write service configuration or apply Kubernetes
-resources.
-
-Then configure the replicator:
+To run a pipeline, generate config, seed a publication, and start the replicator:
 
 ```bash
 cargo x setup replicator
@@ -28,15 +27,8 @@ cargo x run replicator
 Generated files in `crates/etl-replicator/configuration/` are gitignored.
 Re-run setup with `--force` to replace them. Do not commit generated configuration.
 
-Need: Rust from `rust-toolchain.toml`, `psql`, SQLx CLI, and Docker Compose.
-The standalone replicator does not require Kubernetes. `cargo x deploy-local`
-uses `kubectl` and an OrbStack Kubernetes cluster for optional local deployment.
-
-Install SQLx CLI:
-
-```bash
-cargo install --version 0.9.0 sqlx-cli --no-default-features --features rustls,postgres --locked
-```
+`cargo x deploy-local` uses `kubectl` and OrbStack for optional deployment to
+local Kubernetes.
 
 ## Source migrations without replication
 
@@ -142,12 +134,28 @@ cargo xtask nextest run  # full sharded test suite (needs Postgres)
 | Postgres replica | `localhost:6430` |
 | ClickHouse | `http://localhost:8123` (`etl` / `etl`) |
 
-Override with `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`,
-`POSTGRES_PASSWORD`, `POSTGRES_DB`, `CLICKHOUSE_*`, or `SKIP_DOCKER=1` when
-Postgres is already running. Persistent volume paths: `POSTGRES_DATA_VOLUME`,
-`POSTGRES_REPLICA_DATA_VOLUME`, `CLICKHOUSE_DATA_VOLUME`.
+Set `POSTGRES_VERSION` to run a different major version or `POSTGRES_IMAGE`
+to use a custom image. Compose uses separate projects and named volumes for
+each major version. To free the default ports while keeping the old data,
+stop the old project before starting the new one. For example, from the
+repository root:
 
-`cargo xtask postgres start` starts only the test Postgres clusters.
+```bash
+POSTGRES_VERSION=18 docker compose -f scripts/docker/docker-compose.yaml stop
+cargo x init
+```
+
+To run stacks side by side, set distinct `POSTGRES_PORT`,
+`POSTGRES_REPLICA_PORT`, `CLICKHOUSE_HTTP_PORT`, and
+`CLICKHOUSE_NATIVE_PORT` values. Keep custom `POSTGRES_DATA_VOLUME` and
+`POSTGRES_REPLICA_DATA_VOLUME` paths separate across major versions.
+
+To use an existing Postgres server, set `SKIP_DOCKER=1` and the matching
+`POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, and
+`POSTGRES_DB`.
+
+`cargo xtask postgres start` starts sharded test services. Pass
+`--source-only` to skip ClickHouse.
 `cargo xtask multigres --help` covers the optional Multigres cluster.
 
 ### DuckDB version
@@ -302,16 +310,17 @@ published Compose defaults. Cloud destination secrets are fake placeholders.
 
 ## Tests
 
-After `cargo x init`:
+Start the test clusters, then run the sharded suite:
 
 ```bash
-cargo xtask nextest run
+cargo --locked xtask postgres start
+cargo --locked xtask nextest run
 ```
 
 Unit tests that do not need Postgres:
 
 ```bash
-cargo nextest run --workspace --all-features --lib
+cargo nextest run --locked --workspace --all-features --lib
 ```
 
 Integration tests need `TESTS_DATABASE_HOST`, `TESTS_DATABASE_PORT`, and

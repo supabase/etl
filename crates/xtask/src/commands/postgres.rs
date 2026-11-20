@@ -28,7 +28,7 @@ fn docker_compose_command() -> (&'static str, &'static [&'static str]) {
         ("docker-compose", &[])
     }
 }
-const DEFAULT_PG_VERSION: &str = "18";
+const DEFAULT_PG_VERSION: &str = "19";
 const DEFAULT_PG_USER: &str = "postgres";
 const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 const POSTGRES_READY_TIMEOUT: Duration = Duration::from_secs(180);

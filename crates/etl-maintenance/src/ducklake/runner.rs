@@ -18,7 +18,7 @@ use etl::{
     etl_error,
 };
 use etl_config::{
-    ducklake_catalog_metadata_connect_options, libpq_tcp_host,
+    DUCKLAKE_CATALOG_ACQUIRE_TIMEOUT, ducklake_catalog_metadata_connect_options, libpq_tcp_host,
     shared::{
         DuckLakeTableName as DuckLakeMaintenanceTableName, DuckLakeWriterConfig,
         validate_ducklake_table_namespace,
@@ -1648,7 +1648,7 @@ pub async fn run_maintenance_once(
         })?;
     let direct_pg_pool = PgPoolOptions::new()
         .max_connections(1)
-        .acquire_timeout(Duration::from_secs(5))
+        .acquire_timeout(DUCKLAKE_CATALOG_ACQUIRE_TIMEOUT)
         .connect_lazy_with(metadata_options);
     let metadata_pg_pool =
         DuckLakeMetadataPool::new(direct_pg_pool, config.catalog_pooler_url.as_ref()).map_err(
