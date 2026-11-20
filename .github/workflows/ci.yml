@@ -238,9 +238,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: PostgreSQL 19
-            version: '19'
-            image: postgres:19
+          - name: PostgreSQL 18
+            version: '18'
+            image: postgres:18
           - name: PostgreSQL 17
             version: '17'
             image: postgres:17
@@ -265,7 +265,7 @@ jobs:
       TESTS_BIGQUERY_SA_KEY_JSON: ${{ secrets.TESTS_BIGQUERY_SA_KEY_JSON }}
 
   coverage:
-    name: Tests (PostgreSQL 18, coverage)
+    name: Tests (PostgreSQL 19, coverage)
     uses: ./.github/workflows/reusable-tests.yml
     with:
       coverage: true
