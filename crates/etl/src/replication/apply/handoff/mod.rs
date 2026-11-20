@@ -13,41 +13,25 @@
 //! |---|---|---|---|---|
 //! | running | `SyncWait(s)` | store `Catchup(max(s, current))`, wait | keep | as COMMIT |
 //! | running | `Catchup(c)` | wait | keep | as COMMIT |
-//! | running | `SyncDone(d)` | keep | store `Ready` if proven | as flush |
+//! | running | `SyncDone(d)` | keep | store `Ready` if ready | as flush |
 //! | running | any other | keep | keep | keep |
-//! | none | `SyncDone(d)` | keep | store `Ready` if proven | as flush |
+//! | none | `SyncDone(d)` | keep | store `Ready` if ready | as flush |
 //! | none | any other | spawn worker | spawn worker | spawn worker |
 //!
 //! `current` is the LSN this connection has reached. "Wait" blocks the apply
 //! loop until the worker stores `SyncDone` or `Errored`, or until shutdown.
-//! "If proven" means [`ReadinessInputs::ready_proof`] returned a
-//! [`ReadyProof`] for `d`.
+//! "If ready" means [`ReadinessInputs::ready_checkpoint`] returned a persisted
+//! checkpoint covering `d`.
 //!
 //! # Layout
 //!
-//! - [`decision`] maps one observation to an action. Its functions are pure.
-//!   Each covers one trigger column, for the rows with a running worker or for
-//!   the rows without one.
+//! - [`decision`] maps one observation to a [`HandoffAction`]. [`decide`] is
+//!   pure and mirrors the transition table above.
 //! - [`active_table`] carries out the action for a running worker, under the
 //!   worker's state lock.
 //! - This module runs each trigger: observe, decide, log, execute.
-//!
-//! # What the types rule out
-//!
-//! - Storing `Ready` takes a [`ReadyProof`], which only
-//!   [`ReadinessInputs::ready_proof`] constructs. The COMMIT path builds no
-//!   readiness inputs, so it cannot promote.
-//! - Entering `Catchup` and waiting are one operation,
-//!   [`ActiveTable::execute`], which takes an [`ActivityHandle`]. The flush
-//!   path receives none, so it can neither enter catchup nor block.
-//! - [`ActiveTable::execute`] releases the worker's state lock before it waits.
-//! - Only [`IdleAction`] has a spawn variant, so a table with a running worker
-//!   cannot get a second one.
-//!
-//! Starting a worker always clears the apply decoder first. One spawn function
-//! does both, but the compiler does not enforce it.
 
-use std::{collections::HashMap, fmt, future::Future, pin::Pin, sync::Arc};
+use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, error, info};
@@ -62,10 +46,7 @@ use crate::{
             ApplyWorkerContext, ExitIntent, get_syncing_tables,
             handoff::{
                 active_table::ActiveTable,
-                decision::{
-                    IdleAction, ReadinessInputs, ReadyProof, active_after_commit,
-                    active_after_flush, active_when_quiescent, idle_after_commit, idle_after_flush,
-                },
+                decision::{HandoffAction, ReadinessInputs, Trigger, decide},
             },
         },
         state::TableState,
@@ -77,28 +58,6 @@ use crate::{
 
 mod active_table;
 mod decision;
-
-/// Point at which the apply worker evaluates syncing tables.
-#[derive(Debug, Clone, Copy)]
-enum Trigger {
-    /// A COMMIT was processed.
-    AfterCommit,
-    /// A destination flush became durable.
-    AfterFlush,
-    /// The apply loop is quiescent.
-    Quiescent,
-}
-
-impl Trigger {
-    /// Returns the trigger's log label.
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::AfterCommit => "after_commit",
-            Self::AfterFlush => "after_flush",
-            Self::Quiescent => "quiescent",
-        }
-    }
-}
 
 /// One table's handoff evaluation, as its debug line reports it.
 struct Evaluation {
@@ -114,17 +73,17 @@ struct Evaluation {
 
 impl Evaluation {
     /// Logs the decision for a table whose sync worker is running.
-    fn log_active(&self, table_state: &TableState, action: &impl fmt::Debug) {
+    fn log_active(&self, table_state: &TableState, action: &HandoffAction) {
         self.log(table_state, true, action);
     }
 
     /// Logs the decision for a table without a running sync worker.
-    fn log_idle(&self, table_state: &TableState, action: &IdleAction) {
+    fn log_idle(&self, table_state: &TableState, action: &HandoffAction) {
         self.log(table_state, false, action);
     }
 
     /// Logs one decision with the inputs it was made from.
-    fn log(&self, table_state: &TableState, worker_running: bool, action: &impl fmt::Debug) {
+    fn log(&self, table_state: &TableState, worker_running: bool, action: &HandoffAction) {
         debug!(
             worker_type = %WorkerType::Apply,
             table_id = self.table_id.0,
@@ -162,24 +121,28 @@ async fn syncing_tables_with_checkpoint<S: StateStore>(
 /// Returns the readiness inputs for one table.
 fn readiness_inputs(
     table_id: TableId,
-    current_lsn: PgLsn,
     persisted_checkpoint_lsn: Option<PgLsn>,
     table_decoding_states: &HashMap<TableId, TableDecodingState>,
 ) -> ReadinessInputs {
     let has_materialized_decoding_state =
         matches!(table_decoding_states.get(&table_id), Some(TableDecodingState::WithSchema(_)));
 
-    ReadinessInputs::new(current_lsn, persisted_checkpoint_lsn, has_materialized_decoding_state)
+    ReadinessInputs::new(persisted_checkpoint_lsn, has_materialized_decoding_state)
 }
 
 /// Logs a `SyncDone -> Ready` transition.
-fn log_ready_transition(table_id: TableId, proof: &ReadyProof) {
+fn log_ready_transition(
+    table_id: TableId,
+    sync_done_lsn: PgLsn,
+    current_lsn: PgLsn,
+    persisted_checkpoint_lsn: PgLsn,
+) {
     info!(
         worker_type = %WorkerType::Apply,
         table_id = table_id.0,
-        sync_done_lsn = %proof.sync_done_lsn(),
-        current_lsn = %proof.current_lsn(),
-        persisted_checkpoint_lsn = %proof.persisted_checkpoint_lsn(),
+        %sync_done_lsn,
+        %current_lsn,
+        %persisted_checkpoint_lsn,
         "transitioning sync_done -> ready",
     );
 }
@@ -277,7 +240,7 @@ async fn spawn_table_sync_worker<S, D>(
 async fn execute_idle_action<S, D>(
     ctx: &ApplyWorkerContext<S, D>,
     table_id: TableId,
-    action: IdleAction,
+    action: HandoffAction,
     table_decoding_states: &mut HashMap<TableId, TableDecodingState>,
 ) -> EtlResult<()>
 where
@@ -285,17 +248,20 @@ where
     D: PipelineDestination,
 {
     match action {
-        IdleAction::PromoteToReady(proof) => {
-            log_ready_transition(table_id, &proof);
+        HandoffAction::PromoteToReady { sync_done_lsn, current_lsn, persisted_checkpoint_lsn } => {
+            log_ready_transition(table_id, sync_done_lsn, current_lsn, persisted_checkpoint_lsn);
 
             ctx.store.update_table_state(table_id, TableState::Ready).await
         }
-        IdleAction::SpawnWorker => {
+        HandoffAction::SpawnWorker => {
             spawn_table_sync_worker(ctx, table_id, table_decoding_states).await;
 
             Ok(())
         }
-        IdleAction::Keep => Ok(()),
+        HandoffAction::Keep => Ok(()),
+        HandoffAction::StartCatchup { .. } | HandoffAction::AwaitCatchup { .. } => {
+            unreachable!("idle table never enters or awaits catchup")
+        }
     }
 }
 
@@ -322,12 +288,12 @@ where
             if let Some(worker_state) = ctx.pool.get_active_worker_state(table_id).await {
                 let table = ActiveTable::lock(table_id, &worker_state).await;
                 let table_state = table.table_state();
-                let action = active_after_commit(&table_state, current_lsn);
+                let action = decide(Trigger::AfterCommit, true, &table_state, current_lsn, None);
                 evaluation.log_active(&table_state, &action);
 
                 table.execute(action, &ctx.store, &ctx.shutdown_token, activity_handle).await?
             } else {
-                let action = idle_after_commit(&stored_state);
+                let action = decide(Trigger::AfterCommit, false, &stored_state, current_lsn, None);
                 evaluation.log_idle(&stored_state, &action);
                 execute_idle_action(ctx, table_id, action, table_decoding_states).await?;
 
@@ -370,12 +336,7 @@ where
     let (syncing_tables, persisted_checkpoint_lsn) =
         syncing_tables_with_checkpoint(&ctx.store).await?;
     for (table_id, stored_state) in syncing_tables {
-        let readiness = readiness_inputs(
-            table_id,
-            current_lsn,
-            persisted_checkpoint_lsn,
-            table_decoding_states,
-        );
+        let readiness = readiness_inputs(table_id, persisted_checkpoint_lsn, table_decoding_states);
         let evaluation = Evaluation {
             trigger: Trigger::AfterFlush,
             table_id,
@@ -386,14 +347,28 @@ where
         if let Some(worker_state) = ctx.pool.get_active_worker_state(table_id).await {
             let table = ActiveTable::lock(table_id, &worker_state).await;
             let table_state = table.table_state();
-            let ready_proof = active_after_flush(&table_state, &readiness);
-            evaluation.log_active(&table_state, &ready_proof);
+            let action =
+                decide(Trigger::AfterFlush, true, &table_state, current_lsn, Some(&readiness));
+            evaluation.log_active(&table_state, &action);
 
-            if let Some(proof) = ready_proof {
-                table.promote_to_ready(proof, &ctx.store).await?;
+            if let HandoffAction::PromoteToReady {
+                sync_done_lsn,
+                current_lsn,
+                persisted_checkpoint_lsn,
+            } = action
+            {
+                table
+                    .promote_to_ready(
+                        sync_done_lsn,
+                        current_lsn,
+                        persisted_checkpoint_lsn,
+                        &ctx.store,
+                    )
+                    .await?;
             }
         } else {
-            let action = idle_after_flush(&stored_state, &readiness);
+            let action =
+                decide(Trigger::AfterFlush, false, &stored_state, current_lsn, Some(&readiness));
             evaluation.log_idle(&stored_state, &action);
             execute_idle_action(ctx, table_id, action, table_decoding_states).await?;
         }
@@ -423,12 +398,7 @@ where
     let (syncing_tables, persisted_checkpoint_lsn) =
         syncing_tables_with_checkpoint(&ctx.store).await?;
     for (table_id, stored_state) in syncing_tables {
-        let readiness = readiness_inputs(
-            table_id,
-            current_lsn,
-            persisted_checkpoint_lsn,
-            table_decoding_states,
-        );
+        let readiness = readiness_inputs(table_id, persisted_checkpoint_lsn, table_decoding_states);
         let evaluation = Evaluation {
             trigger: Trigger::Quiescent,
             table_id,
@@ -440,12 +410,14 @@ where
             if let Some(worker_state) = ctx.pool.get_active_worker_state(table_id).await {
                 let table = ActiveTable::lock(table_id, &worker_state).await;
                 let table_state = table.table_state();
-                let action = active_when_quiescent(&table_state, &readiness);
+                let action =
+                    decide(Trigger::Quiescent, true, &table_state, current_lsn, Some(&readiness));
                 evaluation.log_active(&table_state, &action);
 
                 table.execute(action, &ctx.store, &ctx.shutdown_token, activity_handle).await?
             } else {
-                let action = idle_after_flush(&stored_state, &readiness);
+                let action =
+                    decide(Trigger::Quiescent, false, &stored_state, current_lsn, Some(&readiness));
                 evaluation.log_idle(&stored_state, &action);
                 execute_idle_action(ctx, table_id, action, table_decoding_states).await?;
 

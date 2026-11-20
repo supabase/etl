@@ -23,10 +23,7 @@ use crate::{
         WorkerType,
         apply::{
             ExitIntent,
-            handoff::{
-                decision::{ActiveAction, ReadyProof},
-                log_ready_transition,
-            },
+            handoff::{decision::HandoffAction, log_ready_transition},
         },
         state::{TableState, TableStateType},
     },
@@ -164,13 +161,13 @@ impl<'a> ActiveTable<'a> {
     /// worker. Returns an exit intent when shutdown interrupts that wait.
     pub(super) async fn execute<S: StateStore>(
         mut self,
-        action: ActiveAction,
+        action: HandoffAction,
         store: &S,
         shutdown_token: &CancellationToken,
         activity_handle: &ActivityHandle,
     ) -> EtlResult<Option<ExitIntent>> {
         let catchup_wait = match action {
-            ActiveAction::StartCatchup { snapshot_lsn, current_lsn, catchup_lsn } => {
+            HandoffAction::StartCatchup { snapshot_lsn, current_lsn, catchup_lsn } => {
                 info!(
                     worker_type = %WorkerType::Apply,
                     table_id = self.table_id.0,
@@ -184,15 +181,23 @@ impl<'a> ActiveTable<'a> {
 
                 self.into_catchup_wait(catchup_lsn, CatchupWaitReason::EnteredCatchup)
             }
-            ActiveAction::AwaitCatchup { catchup_lsn } => {
+            HandoffAction::AwaitCatchup { catchup_lsn } => {
                 self.into_catchup_wait(catchup_lsn, CatchupWaitReason::AlreadyInCatchup)
             }
-            ActiveAction::PromoteToReady(proof) => {
-                self.promote_to_ready(proof, store).await?;
+            HandoffAction::PromoteToReady {
+                sync_done_lsn,
+                current_lsn,
+                persisted_checkpoint_lsn,
+            } => {
+                self.promote_to_ready(sync_done_lsn, current_lsn, persisted_checkpoint_lsn, store)
+                    .await?;
 
                 return Ok(None);
             }
-            ActiveAction::Keep => return Ok(None),
+            HandoffAction::Keep => return Ok(None),
+            HandoffAction::SpawnWorker => {
+                unreachable!("active table never spawns a duplicate sync worker")
+            }
         };
 
         Ok(catchup_wait.wait(shutdown_token, activity_handle).await)
@@ -201,10 +206,12 @@ impl<'a> ActiveTable<'a> {
     /// Stores `Ready` under the lock.
     pub(super) async fn promote_to_ready<S: StateStore>(
         mut self,
-        proof: ReadyProof,
+        sync_done_lsn: PgLsn,
+        current_lsn: PgLsn,
+        persisted_checkpoint_lsn: PgLsn,
         store: &S,
     ) -> EtlResult<()> {
-        log_ready_transition(self.table_id, &proof);
+        log_ready_transition(self.table_id, sync_done_lsn, current_lsn, persisted_checkpoint_lsn);
 
         self.guard.set_and_store(TableState::Ready, store).await
     }
@@ -232,10 +239,7 @@ mod tests {
         replication::{
             apply::{
                 ExitIntent,
-                handoff::{
-                    active_table::ActiveTable,
-                    decision::{ActiveAction, ReadinessInputs},
-                },
+                handoff::{active_table::ActiveTable, decision::HandoffAction},
             },
             state::{TableRetryPolicy, TableState},
         },
@@ -276,7 +280,7 @@ mod tests {
             );
             let table = ActiveTable::lock(table_id, &worker_state).await;
             let mut handoff = pin!(table.execute(
-                ActiveAction::StartCatchup {
+                HandoffAction::StartCatchup {
                     snapshot_lsn: PgLsn::from(10),
                     current_lsn: catchup_lsn,
                     catchup_lsn,
@@ -312,7 +316,7 @@ mod tests {
             TableSyncWorkerState::new_for_test(table_id, TableState::Catchup { lsn: catchup_lsn });
         let table = ActiveTable::lock(table_id, &worker_state).await;
         let mut handoff = pin!(table.execute(
-            ActiveAction::AwaitCatchup { catchup_lsn },
+            HandoffAction::AwaitCatchup { catchup_lsn },
             &store,
             &shutdown_token,
             &activity_handle,
@@ -336,14 +340,15 @@ mod tests {
             table_id,
             TableState::SyncDone { lsn: sync_done_lsn, table_decoding_state: None },
         );
-        let proof = ReadinessInputs::new(sync_done_lsn, Some(sync_done_lsn), true)
-            .ready_proof(sync_done_lsn)
-            .unwrap();
         let table = ActiveTable::lock(table_id, &worker_state).await;
 
         let exit_intent = table
             .execute(
-                ActiveAction::PromoteToReady(proof),
+                HandoffAction::PromoteToReady {
+                    sync_done_lsn,
+                    current_lsn: sync_done_lsn,
+                    persisted_checkpoint_lsn: sync_done_lsn,
+                },
                 &store,
                 &shutdown_token,
                 &activity.handle(),
