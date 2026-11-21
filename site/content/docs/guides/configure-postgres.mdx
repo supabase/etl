@@ -58,7 +58,8 @@ the helpers for a different replication role, grant that role access to them:
 ```sql
 GRANT USAGE ON SCHEMA etl TO etl_user;
 GRANT EXECUTE ON FUNCTION etl.describe_table_schema(oid),
-  etl.describe_table_columns(oid), etl.describe_table_identity(oid),
+  etl.describe_base_type(oid, int4), etl.describe_table_columns(oid),
+  etl.describe_table_identity(oid),
   etl.describe_table_publication_columns(oid, text) TO etl_user;
 ```
 
