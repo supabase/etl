@@ -267,7 +267,7 @@ fn fuzz_schema_change_message(input: &mut FuzzBytes<'_>) -> SchemaChangeMessage 
     let mut columns = Vec::with_capacity(column_count);
     let mut primary_key_attnums = Vec::new();
     let mut replica_identity_index_attnums = Vec::new();
-    for _ in 0..column_count {
+    for column_index in 0..column_count {
         // Postgres column names are unique, so a taken name moves on to the
         // next free one.
         let name_selector = usize::from(input.byte());
@@ -277,10 +277,12 @@ fn fuzz_schema_change_message(input: &mut FuzzBytes<'_>) -> SchemaChangeMessage 
             .expect("a stored schema has at most as many columns as names");
         used_names[name_index] = true;
         let type_oid = relation_fuzz_type_oid(input.byte());
-        // A zero step repeats the previous attnum, which Postgres never
-        // sends but the parser must survive.
+        // A zero step on subsequent columns repeats the previous attnum, which
+        // Postgres never sends but the parser must survive; the first column
+        // always starts at a positive attnum so identity keys remain valid.
         let attnum_step = input.byte();
-        attnum += if attnum_step == 0 { 0 } else { i32::from(attnum_step % 3) + 1 };
+        attnum +=
+            if column_index > 0 && attnum_step == 0 { 0 } else { i32::from(attnum_step % 3) + 1 };
         let typmod = i32::from(input.byte()) - 1;
         let flags = input.byte();
         if flags & 2 != 0 {
@@ -674,5 +676,10 @@ mod tests {
         // typmod=5 (stored=4 != relation=-1), flags=0; relreplident=0 ("d");
         // relation: replident=0, count=1, name=0 ("a"), type=0 (INT4), flags=0.
         check_pgoutput_relation_materialization(&[0, 0, 0, 1, 5, 0, 0, 0, 1, 0, 0, 0]);
+    }
+
+    #[test]
+    fn relation_fuzz_generator_keeps_first_column_attnum_positive() {
+        check_pgoutput_relation_materialization(&[0, 0, 0, 0, 0, 4, 2]);
     }
 }
