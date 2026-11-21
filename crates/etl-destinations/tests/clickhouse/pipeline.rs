@@ -56,6 +56,13 @@ struct IdValueRow {
     value: String,
 }
 
+/// A current-state row with `id` + `amount` for the type-change resync test.
+#[derive(clickhouse::Row, serde::Deserialize, Debug)]
+struct IdAmountRow {
+    id: i64,
+    amount: i64,
+}
+
 /// Projection + table name + ORDER BY that drive `current_state_query` for each
 /// streaming test.
 const ID_VALUE_PROJECTION: &str = "id, value";
@@ -66,6 +73,7 @@ const RESET_COPY_TABLE: &str = "test_reset__copy";
 const TRUNCATE_FLOW_TABLE: &str = "test_truncate__flow";
 const DEFERRABLE_KEY_TABLE: &str = "test_deferrable__key";
 const DEFERRABLE_CHANGE_TABLE: &str = "test_deferrable__change";
+const TYPE_CHANGE_RESYNC_TABLE: &str = "test_type__change__resync";
 
 /// Description of the ClickHouse rejection of a deferrable primary key.
 const DEFERRABLE_KEY_REJECTION: &str = "ClickHouse requires a non-deferrable primary key";
@@ -684,6 +692,121 @@ async fn primary_key_made_deferrable_is_rejected_merge_tree() {
 #[tokio::test(flavor = "multi_thread")]
 async fn primary_key_made_deferrable_is_rejected_replacing_merge_tree() {
     primary_key_made_deferrable_is_rejected_inner(ClickHouseEngine::ReplacingMergeTree).await;
+}
+
+/// A type change that ClickHouse rejects stops the pipeline until the table
+/// is resynchronized. The resync copies the table under the new type without
+/// replaying the rejected schema change, and later rows keep replicating.
+///
+/// The resync is the per-table reset an operator requests: only this table's
+/// state returns to `Init`, while the apply checkpoint, stored schemas, and
+/// destination metadata stay. The pipeline-wide reset also deletes the apply
+/// checkpoint and starts a new slot, so it never replays the rejected change.
+async fn rejected_type_change_recovers_after_resync_inner(engine: ClickHouseEngine) {
+    // GIVEN: a copied table with an `integer` column and one row.
+    init_test_tracing();
+    install_crypto_provider();
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("type_change_resync");
+    let quoted_table_name = table_name.as_quoted_identifier();
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("amount", "integer not null")])
+        .await
+        .unwrap();
+    let publication_name = "test_pub_type_change_resync";
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
+    database
+        .run_sql(&format!("insert into {quoted_table_name} (amount) values (1)"))
+        .await
+        .unwrap();
+
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let pipeline_id = random_pipeline_id();
+    let destination = clickhouse_db.build_destination_with_engine(store.clone(), engine).await;
+    let copied = store.notify_on_table_sync_complete(table_id).await;
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id.as_str(),
+        publication_name.to_owned(),
+        store.clone(),
+        destination,
+    );
+
+    pipeline.start().await.unwrap();
+
+    copied.notified().await;
+
+    // WHEN: the column becomes `bigint`, which changes its ClickHouse type,
+    // and a later row carries the new schema.
+    database
+        .run_sql(&format!("alter table {quoted_table_name} alter column amount type bigint"))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!("insert into {quoted_table_name} (amount) values (5000000000)"))
+        .await
+        .unwrap();
+
+    // THEN: the pipeline stops on the type-change check.
+    let error = wait_for_pipeline_error(&pipeline).await;
+    assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
+    assert_eq!(error.description(), Some("ClickHouse cannot apply a source column type change"));
+
+    // WHEN: the table is resynchronized and the source inserts another row
+    // after the copy.
+    store.reset_table_state(table_id).await.unwrap();
+    let destination = TestDestinationWrapper::wrap(
+        clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
+    );
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id.as_str(),
+        publication_name.to_owned(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    pipeline.start().await.unwrap();
+
+    wait_for_table_sync_complete(&store, table_id, TABLE_STATE_TIMEOUT).await.unwrap();
+
+    let inserted = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
+        .await;
+
+    database
+        .run_sql(&format!("insert into {quoted_table_name} (amount) values (6000000000)"))
+        .await
+        .unwrap();
+
+    inserted.wait_for(TABLE_STATE_TIMEOUT).notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // THEN: the recopied column has the new ClickHouse type, and ClickHouse
+    // holds every source row.
+    assert!(destination.was_table_dropped_for_copy(table_id).await);
+    let amount_type = clickhouse_db
+        .column_types(TYPE_CHANGE_RESYNC_TABLE)
+        .await
+        .into_iter()
+        .find_map(|(name, typ)| (name == "amount").then_some(typ));
+    assert_eq!(amount_type.as_deref(), Some("Int64"));
+    let query = current_state_query(engine, TYPE_CHANGE_RESYNC_TABLE, "id, amount", &["id"], "id");
+    let rows: Vec<IdAmountRow> = clickhouse_db.query(&query).await;
+    let rows: Vec<_> = rows.into_iter().map(|row| (row.id, row.amount)).collect();
+    assert_eq!(rows, vec![(1, 1), (2, 5_000_000_000), (3, 6_000_000_000)]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rejected_type_change_recovers_after_resync_merge_tree() {
+    rejected_type_change_recovers_after_resync_inner(ClickHouseEngine::MergeTree).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rejected_type_change_recovers_after_resync_replacing_merge_tree() {
+    rejected_type_change_recovers_after_resync_inner(ClickHouseEngine::ReplacingMergeTree).await;
 }
 
 /// FULL identity forces comparison of NaN-bearing old keys even when only a

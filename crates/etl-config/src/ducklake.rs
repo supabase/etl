@@ -1,11 +1,26 @@
 //! DuckLake-specific configuration helpers.
 
-use std::{io, path::PathBuf, str::FromStr};
+use std::{io, path::PathBuf, str::FromStr, time::Duration};
 
-use sqlx::postgres::{PgConnectOptions, PgSslMode};
+use sqlx::{
+    ConnectOptions,
+    postgres::{PgConnectOptions, PgSslMode},
+};
 use thiserror::Error;
-use tokio_postgres::{Config as PgConfig, config::SslMode};
+use tokio_postgres::{
+    Config as PgConfig,
+    config::{Host, SslMode},
+};
 use url::Url;
+
+/// Longest wait for a pooled DuckLake catalog connection.
+///
+/// SQLx counts connect retries, TLS, startup, and its liveness ping against
+/// this bound. Cold connections to remote Postgres take several seconds in
+/// production, which leaves little margin under a 5 s bound. This stays below
+/// SQLx's 30 s default because an unreachable pooler holds the first metadata
+/// read for this long before it falls back to the direct catalog connection.
+pub const DUCKLAKE_CATALOG_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Errors returned by [`parse_ducklake_url`].
 #[derive(Debug, Error)]
@@ -37,6 +52,10 @@ pub enum DuckLakeCatalogConnectOptionsError {
     /// The catalog URL could not be parsed as a sqlx Postgres connection.
     #[error("Invalid DuckLake PostgreSQL catalog URL")]
     Sqlx(#[source] sqlx::Error),
+
+    /// The catalog socket path cannot be represented in a URL query value.
+    #[error("DuckLake PostgreSQL catalog socket path is not valid UTF-8")]
+    InvalidSocketPath,
 
     /// The catalog URL uses an SSL mode that cannot be represented for sqlx.
     #[error("DuckLake PostgreSQL catalog URL uses an unsupported sslmode")]
@@ -79,39 +98,87 @@ pub fn libpq_tcp_host(host: &str) -> &str {
 }
 
 /// Builds sqlx connection options for DuckLake metadata catalog queries.
+///
+/// Uses the first host, address and port in DuckDB's libpq order. The TCP host
+/// remains the TLS identity and password-file lookup key.
 pub fn ducklake_catalog_metadata_connect_options(
     catalog_url: &Url,
 ) -> Result<PgConnectOptions, DuckLakeCatalogConnectOptionsError> {
     let config = PgConfig::from_str(catalog_url.as_str())
         .map_err(DuckLakeCatalogConnectOptionsError::TokioPostgres)?;
-    let mut options = PgConnectOptions::from_str(catalog_url.as_str())
-        .map_err(DuckLakeCatalogConnectOptionsError::Sqlx)?;
 
-    if let Some(hostaddr) = config.get_hostaddrs().first() {
-        options = options.host(&hostaddr.to_string());
-    } else if let Some(host) = catalog_url.host_str() {
-        options = options.host(libpq_tcp_host(host));
+    let host = match config.get_hosts().first() {
+        Some(Host::Tcp(host)) => host.as_str(),
+        #[cfg(unix)]
+        Some(Host::Unix(path)) => {
+            path.to_str().ok_or(DuckLakeCatalogConnectOptionsError::InvalidSocketPath)?
+        }
+        None => "",
+    };
+
+    let ports = config.get_ports();
+    let has_query_host = catalog_url.query_pairs().any(|(key, _)| key == "host");
+    // PgConfig contributes one port per authority host, even when implicit.
+    // If all hosts are in the authority, query ports replace those ports.
+    let preferred_port = if catalog_url.has_host() && !has_query_host {
+        ports.get(config.get_hosts().len())
+    } else {
+        ports.first()
+    };
+
+    let first_port = if config.get_hosts().len() > 1 || host.contains(',') {
+        preferred_port.or_else(|| ports.first())
+    } else if config.get_hostaddrs().len() > 1 {
+        preferred_port
+    } else {
+        None
+    };
+
+    // Select the first endpoint before SQLx reads the password file.
+    let mut url = catalog_url.clone();
+    url.query_pairs_mut().clear().extend_pairs(catalog_url.query_pairs().filter(|(key, _)| {
+        match key.as_ref() {
+            "host" | "hostaddr" => false,
+            "port" => first_port.is_none(),
+            _ => true,
+        }
+    }));
+
+    let host = host.split(',').next().unwrap_or_default();
+    let hostaddr = config.get_hostaddrs().first();
+    if host.is_empty()
+        && let Some(addr) = hostaddr
+    {
+        url.query_pairs_mut().append_pair("host", &addr.to_string());
+    } else if !config.get_hosts().is_empty() {
+        url.query_pairs_mut().append_pair("host", libpq_tcp_host(host));
     }
 
-    options = options.ssl_mode(sqlx_ssl_mode(config.get_ssl_mode(), config.get_hostaddrs())?);
+    if let Some(port) = first_port {
+        url.query_pairs_mut().append_pair("port", &port.to_string());
+    }
+
+    let mut options = PgConnectOptions::from_url(&url)
+        .map_err(DuckLakeCatalogConnectOptionsError::Sqlx)?
+        .clear_hostaddr();
+
+    if let Some(hostaddr) = hostaddr {
+        options = options.hostaddr(*hostaddr);
+    }
+
+    options = options.ssl_mode(sqlx_ssl_mode(config.get_ssl_mode())?);
 
     Ok(options)
 }
 
 /// Maps libpq-style SSL modes onto sqlx's Postgres SSL modes.
-fn sqlx_ssl_mode(
-    ssl_mode: SslMode,
-    hostaddrs: &[std::net::IpAddr],
-) -> Result<PgSslMode, DuckLakeCatalogConnectOptionsError> {
+fn sqlx_ssl_mode(ssl_mode: SslMode) -> Result<PgSslMode, DuckLakeCatalogConnectOptionsError> {
     match ssl_mode {
         SslMode::Disable => Ok(PgSslMode::Disable),
         SslMode::Prefer => Ok(PgSslMode::Prefer),
         SslMode::Require => Ok(PgSslMode::Require),
         SslMode::VerifyCa => Ok(PgSslMode::VerifyCa),
-        SslMode::VerifyFull if hostaddrs.is_empty() => Ok(PgSslMode::VerifyFull),
-        // sqlx does not expose libpq's separate hostaddr field. When dialing a numeric address,
-        // verify the CA but avoid hostname verification against the IP literal.
-        SslMode::VerifyFull => Ok(PgSslMode::VerifyCa),
+        SslMode::VerifyFull => Ok(PgSslMode::VerifyFull),
         _ => Err(DuckLakeCatalogConnectOptionsError::UnsupportedSslMode),
     }
 }
@@ -139,10 +206,14 @@ pub const fn default_ducklake_s3_use_ssl() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Mutex, OnceLock};
+    use std::{
+        fs::write,
+        process::Command,
+        sync::{Mutex, OnceLock},
+    };
 
     use sqlx::postgres::PgSslMode;
-    use tempfile::TempDir;
+    use tempfile::{NamedTempFile, TempDir};
 
     use super::*;
 
@@ -253,8 +324,14 @@ mod tests {
 
         let options = ducklake_catalog_metadata_connect_options(&catalog_url).unwrap();
 
-        assert_eq!(options.get_host(), "192.0.2.10");
-        assert!(matches!(options.get_ssl_mode(), PgSslMode::VerifyCa));
+        assert_eq!(options.get_host(), "catalog.example.test");
+        assert!(
+            options
+                .to_url_lossy()
+                .query_pairs()
+                .any(|(key, value)| { key == "hostaddr" && value == "192.0.2.10" })
+        );
+        assert!(matches!(options.get_ssl_mode(), PgSslMode::VerifyFull));
     }
 
     #[test]
@@ -267,8 +344,198 @@ mod tests {
 
         let options = ducklake_catalog_metadata_connect_options(&catalog_url).unwrap();
 
-        assert_eq!(options.get_host(), "2001:db8::10");
-        assert!(matches!(options.get_ssl_mode(), PgSslMode::VerifyCa));
+        assert_eq!(options.get_host(), "catalog.example.test");
+        assert!(
+            options
+                .to_url_lossy()
+                .query_pairs()
+                .any(|(key, value)| { key == "hostaddr" && value == "2001:db8::10" })
+        );
+        assert!(matches!(options.get_ssl_mode(), PgSslMode::VerifyFull));
+    }
+
+    /// Catalog metadata uses the first address for both libpq list spellings.
+    #[test]
+    fn catalog_metadata_uses_first_configured_address() {
+        for addresses in ["192.0.2.10,2001:db8::11", "192.0.2.10&hostaddr=2001:db8::11"] {
+            let url = Url::parse(&format!(
+                "postgres://catalog.example/catalog?hostaddr={addresses}&sslmode=verify-full"
+            ))
+            .unwrap();
+
+            let options = ducklake_catalog_metadata_connect_options(&url).unwrap();
+
+            assert_eq!(options.get_host(), "catalog.example");
+            assert!(
+                options
+                    .to_url_lossy()
+                    .query_pairs()
+                    .any(|(key, value)| { key == "hostaddr" && value == "192.0.2.10" })
+            );
+            assert!(matches!(options.get_ssl_mode(), PgSslMode::VerifyFull));
+        }
+    }
+
+    /// The selected address keeps the first host in the DuckDB catalog list.
+    #[test]
+    fn catalog_metadata_selects_canonical_host() {
+        for (url, host) in [
+            (
+                "postgres://first.example,second.example/db?hostaddr=192.0.2.10,192.0.2.11",
+                "first.example",
+            ),
+            (
+                "postgres://authority.example/db?host=first.example,second.example&hostaddr=192.0.\
+                 2.10",
+                "authority.example",
+            ),
+            (
+                "postgres://authority.example/db?hostaddr=192.0.2.10&host=query.example",
+                "authority.example",
+            ),
+            (
+                "postgres://authority.example/db?host=query.example&hostaddr=192.0.2.10",
+                "authority.example",
+            ),
+            (
+                "postgres://authority.example/db?host=first.example&host=query.example&\
+                 hostaddr=192.0.2.10",
+                "authority.example",
+            ),
+            ("postgres:///db?hostaddr=192.0.2.10,192.0.2.11", "192.0.2.10"),
+            ("postgres:///db?hostaddr=2001:db8::10", "2001:db8::10"),
+            ("postgres:///db?host=,second.example&hostaddr=192.0.2.10,192.0.2.11", "192.0.2.10"),
+            ("postgres://authority.example/db?host=query.example", "authority.example"),
+            ("postgres:///db?host=first.example&host=second.example", "first.example"),
+        ] {
+            let url = Url::parse(url).unwrap();
+
+            let options = ducklake_catalog_metadata_connect_options(&url).unwrap();
+
+            assert_eq!(options.get_host(), host);
+        }
+    }
+
+    /// Password-file lookup uses the final identity, never the ambient pin.
+    #[test]
+    fn catalog_metadata_uses_canonical_password_file_entry() {
+        if std::env::var_os("ETL_CONFIG_TEST_CATALOG_CHILD").is_none() {
+            let file = NamedTempFile::new().unwrap();
+            write(
+                file.path(),
+                "192.0.2.10:5432:db:user:addresspassword\ncatalog.example:5432:db:user:\
+                 hostnamepassword\n",
+            )
+            .unwrap();
+
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "ducklake::tests::catalog_metadata_uses_canonical_password_file_entry",
+                ])
+                .env("ETL_CONFIG_TEST_CATALOG_CHILD", "1")
+                .env("PGPASSFILE", file.path())
+                .env("PGHOSTADDR", "192.0.2.99")
+                .env_remove("PGPASSWORD")
+                .output()
+                .unwrap();
+
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            assert!(output.status.success(), "{stdout}\n{stderr}");
+            assert!(stdout.contains("1 passed;"), "{stdout}");
+            return;
+        }
+
+        for url in [
+            "postgres://user@catalog.example:5432/db?hostaddr=192.0.2.10,192.0.2.11",
+            "postgres://user@catalog.example,second.example:5432/db?hostaddr=192.0.2.10",
+            "postgres://user@catalog.example:5432/db?hostaddr=192.0.2.10&host=query.example",
+            "postgres://user@catalog.example:5432/db?host=query.example&hostaddr=192.0.2.10",
+        ] {
+            let url = Url::parse(url).unwrap();
+
+            let options = ducklake_catalog_metadata_connect_options(&url).unwrap();
+            let parsed = options.to_url_lossy();
+
+            assert_eq!(parsed.password(), Some("hostnamepassword"));
+            assert!(
+                parsed.query_pairs().any(|(key, value)| key == "hostaddr" && value == "192.0.2.10")
+            );
+        }
+
+        let url = Url::parse("postgres:///db?user=user&port=5432&hostaddr=192.0.2.10").unwrap();
+        let options = ducklake_catalog_metadata_connect_options(&url).unwrap();
+
+        assert_eq!(options.to_url_lossy().password(), Some("addresspassword"));
+
+        let url = Url::parse("postgres://user@catalog.example:5432/db").unwrap();
+        let options = ducklake_catalog_metadata_connect_options(&url).unwrap();
+
+        assert!(!options.to_url_lossy().query_pairs().any(|(key, _)| key == "hostaddr"));
+    }
+
+    /// Removing the downgrade does not change explicitly requested TLS modes.
+    #[test]
+    fn catalog_metadata_preserves_explicit_ssl_modes() {
+        for mode in ["disable", "prefer", "require", "verify-ca", "verify-full"] {
+            let url = Url::parse(&format!(
+                "postgres://catalog.example/db?hostaddr=192.0.2.10&sslmode={mode}"
+            ))
+            .unwrap();
+
+            let options = ducklake_catalog_metadata_connect_options(&url).unwrap();
+
+            assert!(
+                options
+                    .to_url_lossy()
+                    .query_pairs()
+                    .any(|(key, value)| { key == "sslmode" && value == mode })
+            );
+        }
+    }
+
+    /// Unix sockets retain SQLx's precedence over a TCP address pin.
+    #[test]
+    fn catalog_metadata_preserves_unix_socket() {
+        for host in ["postgres://%2Ftmp/db?", "postgres:///db?host=/tmp&"] {
+            let url = Url::parse(&format!("{host}hostaddr=192.0.2.10")).unwrap();
+
+            let options = ducklake_catalog_metadata_connect_options(&url).unwrap();
+
+            assert_eq!(options.get_socket().unwrap(), &PathBuf::from("/tmp"));
+        }
+    }
+
+    /// Later entries cannot switch the first endpoint's transport or port.
+    #[test]
+    fn catalog_metadata_uses_first_endpoint() {
+        let url = Url::parse("postgres://first.example:5433/db?host=/tmp&port=5434").unwrap();
+
+        let options = ducklake_catalog_metadata_connect_options(&url).unwrap();
+
+        assert_eq!(options.get_host(), "first.example");
+        assert_eq!(options.get_port(), 5433);
+        assert!(options.get_socket().is_none());
+
+        let urls = [
+            ("postgres://first.example/db?port=6432", 6432),
+            ("postgres://first.example/db?hostaddr=192.0.2.10,192.0.2.11&port=6543", 6543),
+            ("postgres://first.example:6432/db?hostaddr=192.0.2.10,192.0.2.11", 6432),
+            ("postgres://first.example/db?hostaddr=192.0.2.10,192.0.2.11&port=6543,6544", 6543),
+            ("postgres:///db?hostaddr=192.0.2.10,192.0.2.11&port=5433,5434", 5433),
+            ("postgres://a.example,b.example/db?hostaddr=192.0.2.10,192.0.2.11&port=6543", 6543),
+            ("postgres://a.example,b.example/db?port=6543,6544", 6543),
+            ("postgres://a.example,b.example/db?port=6543&port=6544", 6543),
+            ("postgres:///db?host=a.example,b.example&port=6543", 6543),
+            ("postgres://a.example,b.example:6544/db", 5432),
+        ];
+        for (url, port) in urls {
+            let url = Url::parse(url).unwrap();
+            let options = ducklake_catalog_metadata_connect_options(&url).unwrap();
+
+            assert_eq!(options.get_port(), port);
+        }
     }
 
     #[test]

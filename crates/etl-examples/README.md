@@ -1,11 +1,9 @@
 # `etl-examples`
 
 Runnable binaries that replicate a Postgres publication to a built-in
-destination using [Supabase ETL](https://supabase.github.io/etl/). ClickHouse is
-the fastest local path: `cargo x init` starts it, and no cloud account is
-required. See the
-[Destinations reference](https://supabase.github.io/etl/reference/destinations/)
-for release status and limitations, and the
+destination using [Supabase ETL](https://supabase.github.io/etl/).
+See the [Destinations reference](https://supabase.github.io/etl/reference/destinations/)
+for requirements, or the
 [First Pipeline](https://supabase.github.io/etl/guides/first-pipeline/) tutorial
 if you want to embed the `etl` crate instead.
 
@@ -64,21 +62,14 @@ cargo build -p etl-examples --all-features
 
 ## Prerequisites
 
-All examples require PostgreSQL 14 through 18 with logical replication enabled
-and a user that has the `REPLICATION` role. See
+The examples use PostgreSQL 14 through 19 with logical WAL enabled and a user
+with the `REPLICATION` privilege. See
 [Configure Postgres](https://supabase.github.io/etl/guides/configure-postgres/)
 for production settings. Do not publish ETL-owned tables in the `etl` schema.
 
-```sql
--- postgresql.conf (or ALTER SYSTEM)
-wal_level = logical
-
-ALTER USER my_user REPLICATION;
-```
-
 ### Quick Database Setup
 
-The fastest way to get a seeded database with a publication is:
+Start PostgreSQL 19 and seed a database:
 
 ```bash
 # Start the dev Postgres primary (port 5430) and read replica (port 6430)

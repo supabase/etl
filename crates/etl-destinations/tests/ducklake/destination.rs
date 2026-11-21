@@ -20,17 +20,21 @@
 //! "
 //! ```
 
-#[cfg(feature = "test-utils")]
-use std::sync::{
-    LazyLock,
-    atomic::{AtomicBool, Ordering},
-};
 use std::{
     f64::consts::PI,
     num::{NonZeroU16, NonZeroU32, NonZeroU64},
     path::Path,
     sync::Arc,
     time::Duration,
+};
+#[cfg(feature = "test-utils")]
+use std::{
+    future::poll_fn,
+    sync::{
+        LazyLock,
+        atomic::{AtomicBool, Ordering},
+    },
+    task::Poll,
 };
 
 use chrono::NaiveDate;
@@ -96,7 +100,7 @@ use pg_escape::{quote_identifier, quote_literal};
 #[cfg(feature = "test-utils")]
 use sqlx::{postgres::PgPoolOptions, types::Json};
 #[cfg(feature = "test-utils")]
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use url::Url;
 
 use crate::support::ducklake::{
@@ -170,7 +174,8 @@ impl ExternalMaintenanceStore for LoadBlockingExternalMaintenanceStore {
     }
 }
 
-/// Serves a fixed maintenance snapshot and records every status without I/O.
+/// Serves controlled maintenance snapshots and records every status without
+/// I/O.
 ///
 /// Watcher timer tests use this store while Tokio time is paused so database
 /// latency and polling cannot hide intermediate status transitions.
@@ -178,7 +183,7 @@ impl ExternalMaintenanceStore for LoadBlockingExternalMaintenanceStore {
 #[derive(Clone)]
 struct RecordingExternalMaintenanceStore {
     /// The active maintenance run and its pause request.
-    state: ExternalMaintenanceState,
+    state: watch::Receiver<ExternalMaintenanceState>,
     /// Captures reports in order, including transient states.
     reports: mpsc::UnboundedSender<ExternalMaintenanceReplicatorStatus>,
 }
@@ -187,14 +192,14 @@ struct RecordingExternalMaintenanceStore {
 #[async_trait::async_trait]
 impl ExternalMaintenanceStore for RecordingExternalMaintenanceStore {
     async fn load_state(&self) -> EtlResult<ExternalMaintenanceState> {
-        Ok(self.state.clone())
+        Ok(self.state.borrow().clone())
     }
 
     async fn request_operations(
         &self,
         _request: ExternalMaintenanceOperationRequest,
     ) -> EtlResult<ExternalMaintenanceRequestOutcome> {
-        unreachable!("The fixed active run prevents operation requests")
+        unreachable!("The active run prevents operation requests")
     }
 
     async fn report_replicator_status(
@@ -206,7 +211,7 @@ impl ExternalMaintenanceStore for RecordingExternalMaintenanceStore {
     }
 
     async fn clear_replicator_status(&self) -> EtlResult<()> {
-        unreachable!("The fixed maintenance state always exists")
+        unreachable!("The maintenance state always exists")
     }
 }
 
@@ -782,6 +787,55 @@ fn checkpoint_lake(catalog: &Url, data: &Url) {
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
+
+/// Connection setup stores the Parquet writer options in the catalog, so files
+/// written by the destination use them.
+#[tokio::test(flavor = "multi_thread")]
+async fn connection_setup_stores_parquet_writer_options() {
+    let lake = create_test_lake("parquet_writer_options").await;
+
+    let destination = new_unbuffered_destination(
+        lake.catalog_url.clone(),
+        lake.data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        MemoryStore::new(),
+    )
+    .await
+    .unwrap();
+    destination.shutdown().await.unwrap();
+
+    let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
+    let options: Vec<(String, String)> = conn
+        .prepare(
+            "select key, value from __ducklake_metadata_lake.ducklake_metadata
+             where key in ('parquet_compression', 'parquet_row_group_size_bytes',
+                 'parquet_row_group_size', 'parquet_version')
+             order by key",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    // DuckLake normalizes some values (`128MiB` is stored as bytes), so only
+    // values it stores verbatim are compared.
+    let keys: Vec<&str> = options.iter().map(|(key, _)| key.as_str()).collect();
+    assert_eq!(
+        keys,
+        [
+            "parquet_compression",
+            "parquet_row_group_size",
+            "parquet_row_group_size_bytes",
+            "parquet_version"
+        ]
+    );
+    assert_eq!(options[0].1, "zstd");
+    assert_eq!(options[1].1, DuckLakeWriterConfig::default().parquet_row_group_size());
+}
 
 /// `write_table_rows` inserts rows that can be queried back through the
 /// DuckLake catalog using a separate DuckDB connection, retaining format 1.1
@@ -1831,22 +1885,20 @@ async fn buffered_copy_expired_maintenance_pause_resumes_watcher() {
         ..ExternalMaintenanceOperations::default()
     };
     let (reports, mut reported_statuses) = mpsc::unbounded_channel();
-    let watcher_store = RecordingExternalMaintenanceStore {
-        state: ExternalMaintenanceState {
-            active_run: Some(ExternalMaintenanceRun {
-                run_id: run_id.to_owned(),
-                started_at: Some(requested_at),
-                operations,
-            }),
-            pause_request: Some(ExternalMaintenancePause {
-                run_id: run_id.to_owned(),
-                requested_at: Some(requested_at),
-                expires_at: requested_at + TimeDelta::from_std(pause_duration).unwrap(),
-            }),
-            ..ExternalMaintenanceState::present()
-        },
-        reports,
-    };
+    let (_, state) = watch::channel(ExternalMaintenanceState {
+        active_run: Some(ExternalMaintenanceRun {
+            run_id: run_id.to_owned(),
+            started_at: Some(requested_at),
+            operations,
+        }),
+        pause_request: Some(ExternalMaintenancePause {
+            run_id: run_id.to_owned(),
+            requested_at: Some(requested_at),
+            expires_at: requested_at + TimeDelta::from_std(pause_duration).unwrap(),
+        }),
+        ..ExternalMaintenanceState::present()
+    });
+    let watcher_store = RecordingExternalMaintenanceStore { state, reports };
     let mut watcher = Box::pin(run_external_maintenance_watcher(
         destination.clone(),
         watcher_store,
@@ -4857,6 +4909,120 @@ async fn write_events_restart_overlap_rebatches_only_pending_suffix() {
     assert_eq!(names.len(), 16);
     assert_eq!(names[0], "name-1");
     assert_eq!(names[15], "name-16");
+}
+
+/// A replacement pause must refresh both pools before admitting another gate
+/// holder.
+#[cfg(feature = "test-utils")]
+#[tokio::test(flavor = "multi_thread")]
+async fn external_maintenance_replacement_refreshes_pools_before_releasing_pause() {
+    let _test_hook_guard = acquire_ducklake_test_hook_guard().await;
+    let lake = create_test_lake("external_maintenance_replacement_refreshes_pools").await;
+    let destination = DuckLakeDestination::builder(
+        lake.catalog_url.clone(),
+        lake.data_url.clone(),
+        NonZeroU16::MIN,
+        MemoryStore::new(),
+    )
+    .build()
+    .await
+    .unwrap();
+
+    let requested_at = Utc::now();
+    let mut state = ExternalMaintenanceState {
+        active_run: Some(ExternalMaintenanceRun {
+            run_id: "first".to_owned(),
+            started_at: Some(requested_at),
+            operations: ExternalMaintenanceOperations {
+                inline_flush: true,
+                ..ExternalMaintenanceOperations::default()
+            },
+        }),
+        pause_request: Some(ExternalMaintenancePause {
+            run_id: "first".to_owned(),
+            requested_at: Some(requested_at),
+            expires_at: requested_at + TimeDelta::minutes(5),
+        }),
+        ..ExternalMaintenanceState::present()
+    };
+    let (state_tx, state_rx) = watch::channel(state.clone());
+    let (reports, mut statuses) = mpsc::unbounded_channel();
+    let config = ExternalMaintenanceWatcherConfig {
+        poll_interval: Duration::from_millis(10),
+        ..ExternalMaintenanceWatcherConfig::default()
+    };
+    let mut watcher = Box::pin(run_external_maintenance_watcher(
+        destination.clone(),
+        RecordingExternalMaintenanceStore { state: state_rx, reports },
+        config,
+    ));
+
+    assert!(watcher.as_mut().now_or_never().is_none());
+    assert_eq!(statuses.try_recv().unwrap().state, ExternalMaintenanceReplicatorState::Pausing);
+    let quiesced = statuses.try_recv().unwrap();
+    assert_eq!(quiesced.state, ExternalMaintenanceReplicatorState::Quiesced);
+    assert_eq!(quiesced.observed_run_id.as_deref(), Some("first"));
+
+    // Publish the previous success and replacement together, as seen by a
+    // watcher that missed the intermediate clear.
+    state.last_successful_operations.inline_flush = Some(ExternalMaintenanceOperationRun {
+        run_id: Some("first".to_owned()),
+        completed_at: Utc::now(),
+    });
+    state.active_run.as_mut().unwrap().run_id = "replacement".to_owned();
+    state.pause_request.as_mut().unwrap().run_id = "replacement".to_owned();
+    arm_fail_pool_refresh_once_for_tests();
+    state_tx.send(state).unwrap();
+
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        poll_fn(|cx| {
+            assert!(watcher.as_mut().poll(cx).is_pending());
+
+            if pool_refresh_failure_armed_for_tests() && statuses.is_empty() {
+                Poll::Pending
+            } else {
+                Poll::Ready(())
+            }
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert!(!pool_refresh_failure_armed_for_tests());
+    assert!(statuses.try_recv().is_err());
+
+    // Queue a competing gate holder before retrying. It can acquire both gates
+    // only once the old pause releases them, and before the replacement does.
+    let mut intervening_pause = Box::pin(destination.acquire_external_maintenance_pause());
+    assert!(intervening_pause.as_mut().now_or_never().is_none());
+
+    let watcher = tokio::spawn(watcher);
+    let intervening_pause =
+        tokio::time::timeout(Duration::from_secs(10), intervening_pause).await.unwrap();
+
+    assert_eq!(destination.streaming_connection_open_count_for_tests(), 2);
+    assert_eq!(destination.copy_connection_open_count_for_tests(), 2);
+
+    drop(intervening_pause);
+
+    let [running, pausing, quiesced] = tokio::time::timeout(Duration::from_secs(10), async {
+        [
+            statuses.recv().await.unwrap(),
+            statuses.recv().await.unwrap(),
+            statuses.recv().await.unwrap(),
+        ]
+    })
+    .await
+    .unwrap();
+    assert_eq!(running.state, ExternalMaintenanceReplicatorState::Running);
+    assert_eq!(pausing.state, ExternalMaintenanceReplicatorState::Pausing);
+    assert_eq!(quiesced.state, ExternalMaintenanceReplicatorState::Quiesced);
+    assert_eq!(quiesced.observed_run_id.as_deref(), Some("replacement"));
+
+    watcher.abort();
+    assert!(watcher.await.unwrap_err().is_cancelled());
+    destination.shutdown().await.unwrap();
 }
 
 /// Pool refresh must survive a transient failure and an unreadable maintenance

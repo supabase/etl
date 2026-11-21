@@ -1,23 +1,22 @@
 # Development Guide
 
-How to work in this repository. Coding agents should follow
-[AGENTS.md](AGENTS.md) (first-time setup and implementation rules).
-
-The open-source project is the replication engine: the `etl` library, the
-`etl-replicator` binary, and the built-in destinations. Product docs live at
-[supabase.github.io/etl](https://supabase.github.io/etl/).
-
 ## Start here
+
+Install the Rust toolchain pinned in `rust-toolchain.toml`, `psql`, Docker
+Compose, and SQLx CLI. Install cargo-nextest if you plan to run tests.
+
+```bash
+cargo install --version 0.9.1 sqlx-cli --no-default-features --features rustls,postgres --locked
+```
+
+Start the PostgreSQL 19 primary, read replica, and ClickHouse, then apply
+migrations:
 
 ```bash
 cargo x init
 ```
 
-That starts local Postgres and ClickHouse, and runs
-migrations. It does not write service configuration or apply Kubernetes
-resources.
-
-Then configure the replicator:
+To run a pipeline, generate config, seed a publication, and start the replicator:
 
 ```bash
 cargo x setup replicator
@@ -28,15 +27,8 @@ cargo x run replicator
 Generated files in `crates/etl-replicator/configuration/` are gitignored.
 Re-run setup with `--force` to replace them. Do not commit generated configuration.
 
-Need: Rust from `rust-toolchain.toml`, `psql`, SQLx CLI, and Docker Compose.
-The standalone replicator does not require Kubernetes. `cargo x deploy-local`
-uses `kubectl` and an OrbStack Kubernetes cluster for optional local deployment.
-
-Install SQLx CLI:
-
-```bash
-cargo install --version 0.9.0 sqlx-cli --no-default-features --features rustls,postgres --locked
-```
+`cargo x deploy-local` uses `kubectl` and OrbStack for optional deployment to
+local Kubernetes.
 
 ## Source migrations without replication
 
@@ -142,12 +134,28 @@ cargo xtask nextest run  # full sharded test suite (needs Postgres)
 | Postgres replica | `localhost:6430` |
 | ClickHouse | `http://localhost:8123` (`etl` / `etl`) |
 
-Override with `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`,
-`POSTGRES_PASSWORD`, `POSTGRES_DB`, `CLICKHOUSE_*`, or `SKIP_DOCKER=1` when
-Postgres is already running. Persistent volume paths: `POSTGRES_DATA_VOLUME`,
-`POSTGRES_REPLICA_DATA_VOLUME`, `CLICKHOUSE_DATA_VOLUME`.
+Set `POSTGRES_VERSION` to run a different major version or `POSTGRES_IMAGE`
+to use a custom image. Compose uses separate projects and named volumes for
+each major version. To free the default ports while keeping the old data,
+stop the old project before starting the new one. For example, from the
+repository root:
 
-`cargo xtask postgres start` starts only the test Postgres clusters.
+```bash
+POSTGRES_VERSION=18 docker compose -f scripts/docker/docker-compose.yaml stop
+cargo x init
+```
+
+To run stacks side by side, set distinct `POSTGRES_PORT`,
+`POSTGRES_REPLICA_PORT`, `CLICKHOUSE_HTTP_PORT`, and
+`CLICKHOUSE_NATIVE_PORT` values. Keep custom `POSTGRES_DATA_VOLUME` and
+`POSTGRES_REPLICA_DATA_VOLUME` paths separate across major versions.
+
+To use an existing Postgres server, set `SKIP_DOCKER=1` and the matching
+`POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, and
+`POSTGRES_DB`.
+
+`cargo xtask postgres start` starts sharded test services. Pass
+`--source-only` to skip ClickHouse.
 `cargo xtask multigres --help` covers the optional Multigres cluster.
 
 ### DuckDB version
@@ -211,14 +219,36 @@ statements inside explicit transactions. SQLx prepares and executes in separate
 protocol exchanges; the transaction pins both to the same backend. Disabling
 statement persistence alone does not prevent backend reassignment. Pooler
 connections omit the `extra_float_digits` startup parameter for PgBouncer
-compatibility. If a pooled metadata read fails, the reader logs a warning with
-the operation, error category, and database error code, then retries the entire
-read through `catalog_url`. Provider error text and connection strings are
-omitted from this warning. The reader and its clones use the direct pool for
-the rest of that destination or maintenance run; recreating the destination or
-starting another maintenance run tries the configured pooler again. If the
-direct retry also fails, its error is returned normally. Only read-only catalog
-operations use this fallback.
+compatibility. Each attempt has seven seconds after checkout to run the read
+transaction and release its connection, in addition to the pool's 15-second
+checkout limit. Inside that transaction, `statement_timeout` is set to six
+seconds so PostgreSQL also stops work after a client disconnect. The lower
+server limit leaves nominal headroom for the cancellation response and
+connection cleanup; the setting does not change subsequent foreground
+operations. Interrupted connections are discarded instead of returned to the
+pool. Legitimate metadata statements exceeding six seconds will fail under
+this policy. The read and statement limits are centralized in `METADATA_READ_TIMEOUT` and
+`METADATA_STATEMENT_TIMEOUT` in
+[`metadata.rs`](crates/etl-maintenance/src/ducklake/metadata.rs).
+
+If a pooled metadata read fails or times out, the reader logs a warning with
+its operation, error category, and any SQLSTATE, then retries the entire read
+through `catalog_url`. Provider error text and connection strings are omitted
+from this warning. The reader and its clones use the direct pool until the
+destination is recreated or a new maintenance run begins. Only read-only
+catalog operations use this fallback. If the direct retry fails, its error is
+returned to the caller.
+
+Each failed metadata attempt increments
+`etl_ducklake_catalog_metadata_read_errors_total`, labeled by `route` (`pooler`
+or `direct`) and `reason` (`client_timeout`, `checkout_timeout`,
+`query_canceled`, or `other`). Client timeouts include the read deadline and
+client I/O timeouts. PostgreSQL reports statement timeouts and other query
+cancellations with SQLSTATE `57014`, so `query_canceled` includes both. A failed
+pooled attempt is counted even if its direct retry succeeds; a failed retry
+adds a separate direct error. Repeated direct failures remain visible after
+fallback. Successful attempts and task cancellation do not increment this
+counter. Series appear when their first failure occurs.
 
 The replicator increments `etl_ducklake_catalog_pooler_fallbacks_total` once
 when a destination switches to direct reads, even if the direct retry also
@@ -302,16 +332,17 @@ published Compose defaults. Cloud destination secrets are fake placeholders.
 
 ## Tests
 
-After `cargo x init`:
+Start the test clusters, then run the sharded suite:
 
 ```bash
-cargo xtask nextest run
+cargo --locked xtask postgres start
+cargo --locked xtask nextest run
 ```
 
 Unit tests that do not need Postgres:
 
 ```bash
-cargo nextest run --workspace --all-features --lib
+cargo nextest run --locked --workspace --all-features --lib
 ```
 
 Integration tests need `TESTS_DATABASE_HOST`, `TESTS_DATABASE_PORT`, and

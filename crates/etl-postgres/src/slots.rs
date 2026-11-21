@@ -284,7 +284,7 @@ pub async fn delete_pipeline_replication_slots(
 
                 debug!(%pipeline_id, "waiting for backoff before retrying to drop replication slot(s)");
 
-                // Exponential backoff: 100ms, 200ms, 400ms
+                // Exponential backoff between attempts: 100 ms, then 200 ms.
                 let backoff_ms = INITIAL_BACKOFF_MS * 2_u64.pow(attempt);
                 tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
             }

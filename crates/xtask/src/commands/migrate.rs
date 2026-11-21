@@ -14,7 +14,7 @@ const ETL_SOURCE_MIGRATIONS_DIR: &str = "crates/etl/migrations/source";
 /// Migration directory for Postgres store migrations.
 const ETL_STORE_MIGRATIONS_DIR: &str = "crates/etl/migrations/postgres_store";
 /// SQLx CLI installation command shown when SQLx is missing.
-const SQLX_INSTALL_COMMAND: &str = "cargo install --version 0.9.0 sqlx-cli --no-default-features \
+const SQLX_INSTALL_COMMAND: &str = "cargo install --version 0.9.1 sqlx-cli --no-default-features \
                                     --features rustls,postgres --locked";
 /// SQLx connection option that makes the migration table live in the etl
 /// schema.

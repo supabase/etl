@@ -8,7 +8,7 @@
 //!
 //! # Supported Versions
 //!
-//! ETL officially supports PostgreSQL versions 14, 15, 16, 17, and 18.
+//! ETL supports PostgreSQL 14 through 19.
 
 use std::num::NonZeroI32;
 
@@ -22,6 +22,8 @@ pub const POSTGRES_16: i32 = 160000;
 pub const POSTGRES_17: i32 = 170000;
 /// Postgres 18 server version number.
 pub const POSTGRES_18: i32 = 180000;
+/// Postgres 19 server version number.
+pub const POSTGRES_19: i32 = 190000;
 
 /// Returns [`true`] if the server version meets or exceeds the required
 /// version.
@@ -69,6 +71,7 @@ mod tests {
         assert_eq!(POSTGRES_16, 160000);
         assert_eq!(POSTGRES_17, 170000);
         assert_eq!(POSTGRES_18, 180000);
+        assert_eq!(POSTGRES_19, 190000);
     }
 
     #[test]

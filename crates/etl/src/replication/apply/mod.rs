@@ -94,7 +94,7 @@ mod tasks;
 /// Fallback source timeout when PostgreSQL disables it or cannot report it.
 ///
 /// Matches PostgreSQL's default `wal_sender_timeout` of 60 seconds.
-const DEFAULT_WAL_SENDER_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const DEFAULT_WAL_SENDER_TIMEOUT: Duration = Duration::from_secs(60);
 /// Fraction of `wal_sender_timeout` used for the proactive keep alive deadline.
 ///
 /// PostgreSQL normally emits an idle keep alive around `wal_sender_timeout /

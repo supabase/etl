@@ -4,6 +4,7 @@ use std::{
     env::var,
     error::Error,
     fs::read_to_string,
+    io::ErrorKind as IoErrorKind,
     net::IpAddr,
     time::{Duration, Instant},
 };
@@ -26,7 +27,10 @@ use etl::{
         },
     },
 };
-use etl_config::shared::{IntoConnectOptions, PgConnectionConfig, TcpKeepaliveConfig, TlsConfig};
+use etl_config::{
+    ducklake_catalog_metadata_connect_options,
+    shared::{IntoConnectOptions, PgConnectionConfig, TcpKeepaliveConfig, TlsConfig},
+};
 use etl_postgres::{source::connect_to_source_database, tokio::tls::MakeRustlsConnect};
 use rustls::{
     ClientConfig, RootCertStore,
@@ -34,7 +38,11 @@ use rustls::{
     pki_types::{CertificateDer, pem::PemObject},
 };
 use serde_json::{Value, from_slice, json};
-use sqlx::{Error as SqlxError, query_as, query_scalar};
+use sqlx::{
+    ConnectOptions, Connection, Error as SqlxError, PgConnection,
+    postgres::{PgConnectOptions, PgPoolOptions},
+    query_as, query_scalar,
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream, lookup_host},
@@ -352,6 +360,84 @@ async fn tls_and_pin_controls() -> TestResult {
 
     control("a").await?;
     println!("NETWORK_RESULT tls valid_host=ok wrong_host=rejected explicit_pin=ok");
+
+    Ok(())
+}
+
+/// Source/store and catalog pools retain hostname verification on reconnect.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the isolated scripts/network-tests fixture"]
+async fn pinned_connections_verify_hostname() -> TestResult {
+    control("a").await?;
+    resolve(ADDRESS_A, false).await?;
+
+    let database = spawn_source_database().await;
+    let mut config = database.config.clone();
+
+    for address in [ADDRESS_A, "172.30.248.10"] {
+        config.hostaddr = Some(address.parse()?);
+
+        for (host, root, accepted) in [
+            ("admin.test", "/certs/root.crt", true),
+            ("wrong.test", "/certs/root.crt", false),
+            ("admin.test", "/certs/untrusted.crt", false),
+        ] {
+            config.host = host.to_owned();
+            config.tls.trusted_root_certs = read_to_string(root)?;
+            config.password = if accepted {
+                database.config.password.clone()
+            } else {
+                // A bad password distinguishes TLS rejection from
+                // authentication.
+                Some("placeholder-wrong-password".into())
+            };
+
+            let source: PgConnectOptions = config.with_db(None);
+            let mut catalog_url = source.to_url_lossy();
+            catalog_url
+                .query_pairs_mut()
+                .clear()
+                .append_pair("hostaddr", address)
+                .append_pair("sslmode", "verify-full")
+                .append_pair("sslrootcert", root);
+            let catalog = ducklake_catalog_metadata_connect_options(&catalog_url)?;
+
+            for options in [source, catalog] {
+                if !accepted {
+                    let error =
+                        timeout(DEADLINE, PgConnection::connect_with(&options)).await?.unwrap_err();
+
+                    assert!(
+                        matches!(error, SqlxError::Io(cause) if cause.kind() == IoErrorKind::InvalidData)
+                    );
+                    continue;
+                }
+
+                let pool = PgPoolOptions::new()
+                    .max_connections(1)
+                    .acquire_timeout(DEADLINE)
+                    .connect_with(options)
+                    .await?;
+                let (server, first): (String, i32) =
+                    query_as("select host(inet_server_addr()), pg_backend_pid()")
+                        .fetch_one(&pool)
+                        .await?;
+
+                assert_eq!(server, address);
+
+                pool.acquire().await?.close().await?;
+                let second: i32 = query_scalar("select pg_backend_pid()").fetch_one(&pool).await?;
+
+                assert_ne!(first, second);
+                pool.close().await;
+            }
+        }
+    }
+
+    println!(
+        "NETWORK_RESULT pinned_tls reconnect=ok wrong_host=pre_auth_rejected \
+         untrusted_ca=pre_auth_rejected"
+    );
 
     Ok(())
 }

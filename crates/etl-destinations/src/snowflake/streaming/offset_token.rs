@@ -77,9 +77,8 @@ impl FromStr for OffsetToken {
             return Err(Error::Channel(format!("invalid offset token format: {s}")));
         }
 
-        let token = OffsetToken(s.to_owned());
-        token.decode()?;
-        Ok(token)
+        // The width and digit checks guarantee both components fit in a u64.
+        Ok(Self(s.to_owned()))
     }
 }
 

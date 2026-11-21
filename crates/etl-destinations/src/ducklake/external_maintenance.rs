@@ -18,7 +18,7 @@ use tokio::time;
 use tracing::{debug, info, warn};
 
 use crate::ducklake::{
-    DuckLakeDestination, DuckLakeExternalMaintenancePause,
+    DuckLakeDestination, DuckLakeExternalMaintenancePause, DuckLakeTableName,
     metrics::{
         ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_PAUSE_ACTIVE,
         ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_PAUSE_DURATION_SECONDS,
@@ -116,6 +116,7 @@ where
     M: ExternalMaintenanceStore,
 {
     let mut held_pause: Option<HeldPause> = None;
+    let mut resume_after = None;
     let mut expire_snapshots_gate = ExpireSnapshotsRequestGate::default();
     record_external_maintenance_pause_active(ExternalMaintenanceOperations::default(), false);
 
@@ -154,6 +155,7 @@ where
                             &state,
                             &config,
                             &mut expire_snapshots_gate,
+                            &mut resume_after,
                         )
                         .await;
                     }
@@ -307,9 +309,11 @@ where
         return Ok(());
     }
 
-    let mut pool_refresh_required = false;
+    if let Some(held) = held_pause.as_mut() {
+        refresh_pools_if_required(destination, held).await?;
+    }
+
     if let Some(held) = held_pause.take() {
-        pool_refresh_required = held.pool_refresh_required;
         info!(
             previous_run_id = %held.run_id,
             next_run_id = %pause.run_id,
@@ -391,7 +395,7 @@ where
         operations,
         quiesced_at,
         quiesced_reported,
-        pool_refresh_required,
+        pool_refresh_required: false,
         pause: Arc::new(external_pause),
     });
 
@@ -608,6 +612,7 @@ async fn maybe_request_operations<S, M>(
     state: &ExternalMaintenanceState,
     config: &ExternalMaintenanceWatcherConfig,
     expire_snapshots_gate: &mut ExpireSnapshotsRequestGate,
+    resume_after: &mut Option<DuckLakeTableName>,
 ) where
     S: DestinationStore,
     M: ExternalMaintenanceStore,
@@ -624,6 +629,7 @@ async fn maybe_request_operations<S, M>(
             config.inline_flush_min_inlined_bytes,
             config.rewrite_data_files_min_active_data_files,
             state.operation_policy,
+            resume_after,
         )
         .await
     {
