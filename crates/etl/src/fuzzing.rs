@@ -267,7 +267,7 @@ fn fuzz_schema_change_message(input: &mut FuzzBytes<'_>) -> SchemaChangeMessage 
     let mut columns = Vec::with_capacity(column_count);
     let mut primary_key_attnums = Vec::new();
     let mut replica_identity_index_attnums = Vec::new();
-    for _ in 0..column_count {
+    for column_index in 0..column_count {
         // Postgres column names are unique, so a taken name moves on to the
         // next free one.
         let name_selector = usize::from(input.byte());
@@ -277,10 +277,12 @@ fn fuzz_schema_change_message(input: &mut FuzzBytes<'_>) -> SchemaChangeMessage 
             .expect("a stored schema has at most as many columns as names");
         used_names[name_index] = true;
         let type_oid = relation_fuzz_type_oid(input.byte());
-        // A zero step repeats the previous attnum, which Postgres never
-        // sends but the parser must survive.
+        // A zero step on subsequent columns repeats the previous attnum, which
+        // Postgres never sends but the parser must survive; the first column
+        // always starts at a positive attnum so identity keys remain valid.
         let attnum_step = input.byte();
-        attnum += if attnum_step == 0 { 0 } else { i32::from(attnum_step % 3) + 1 };
+        attnum +=
+            if column_index > 0 && attnum_step == 0 { 0 } else { i32::from(attnum_step % 3) + 1 };
         let typmod = i32::from(input.byte()) - 1;
         let flags = input.byte();
         if flags & 2 != 0 {
@@ -605,16 +607,20 @@ pub fn check_pgoutput_relation_materialization(data: &[u8]) {
             .all(|column| replicated_names.contains(column.name.as_str()))
     );
 
-    let decoder_columns: Vec<(&str, Option<Type>)> = replicated_table_schema
+    let decoder_columns: Vec<(&str, Type, i32)> = replicated_table_schema
         .column_schemas()
-        .map(|column| (column.name.as_str(), Some(column.typ.clone())))
+        .map(|column| (column.name.as_str(), column.typ.clone(), column.modifier))
         .collect();
-    let relation_columns: Vec<(&str, Option<Type>)> = relation
+    let relation_columns: Vec<(&str, Type, i32)> = relation
         .columns()
         .iter()
         .map(|column| {
             let name = column.name().expect("relation names parsed above");
-            (name, u32::try_from(column.type_id()).ok().map(convert_type_oid_to_type))
+            (
+                name,
+                convert_type_oid_to_type(column.type_id().cast_unsigned()),
+                column.type_modifier(),
+            )
         })
         .collect();
     match mismatch.map(|mismatch| mismatch.kind()) {
@@ -632,6 +638,12 @@ pub fn check_pgoutput_relation_materialization(data: &[u8]) {
             assert_eq!(
                 kind == RelationSchemaMismatchKind::NameOrder,
                 decoder_column.0 != relation_column.0
+            );
+            assert_eq!(
+                kind == RelationSchemaMismatchKind::TypeModifier,
+                decoder_column.0 == relation_column.0
+                    && decoder_column.1 == relation_column.1
+                    && decoder_column.2 != relation_column.2
             );
         }
     }
@@ -651,5 +663,23 @@ pub fn check_pgoutput_relation_materialization(data: &[u8]) {
         codec::parse_event_from_insert_message(replicated_table_schema, PgLsn::from(0), 0, &insert)
     {
         assert_eq!(event.table_row.values().len(), replicated_count);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::fuzzing::check_pgoutput_relation_materialization;
+
+    #[test]
+    fn relation_fuzz_oracle_handles_type_modifier_mismatch() {
+        // 1 column: name=0 ("a"), type=0 (INT4), attnum_step=1 (attnum=1),
+        // typmod=5 (stored=4 != relation=-1), flags=0; relreplident=0 ("d");
+        // relation: replident=0, count=1, name=0 ("a"), type=0 (INT4), flags=0.
+        check_pgoutput_relation_materialization(&[0, 0, 0, 1, 5, 0, 0, 0, 1, 0, 0, 0]);
+    }
+
+    #[test]
+    fn relation_fuzz_generator_keeps_first_column_attnum_positive() {
+        check_pgoutput_relation_materialization(&[0, 0, 0, 0, 0, 4, 2]);
     }
 }

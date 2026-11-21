@@ -9,7 +9,7 @@
 //!
 //! The DDL path captures the default inside the user's session through the
 //! `supabase_etl_ddl` logical message, while the bootstrap path reads it in an
-//! ETL-configured session. Both call `etl.describe_table_schema`, which pins
+//! ETL-configured session. Both use `etl.describe_table_columns`, which pins
 //! the settings that change `pg_get_expr` output, so both paths must carry a
 //! default that denotes the same value.
 
@@ -85,7 +85,7 @@ impl SessionSettings {
     }
 }
 
-/// The column `c` as ETL builds it from `etl.describe_table_schema`.
+/// The column `c` as ETL builds it from `etl.describe_table_columns`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DescribedColumn {
     /// Postgres type of the column, or `text` for types ETL does not know.
@@ -98,6 +98,9 @@ struct DescribedColumn {
     modifier: i32,
     /// `pg_get_expr` output for the column default, if ETL keeps it.
     default_expression: Option<String>,
+    /// Captured literal for rows that predate the column, if it differs from
+    /// the default.
+    missing_value_expression: Option<String>,
 }
 
 /// A column's base type after resolving domains: OID, type modifier, and
@@ -113,6 +116,7 @@ impl DescribedColumn {
         modifier: i32,
         base_type: BaseType,
         default_expression: Option<String>,
+        missing_value_expression: Option<String>,
     ) -> Self {
         let (base_oid, base_modifier, base_formatted_type) = &base_type;
         let base_type = (*base_oid != type_oid).then_some(DomainBaseType {
@@ -130,6 +134,7 @@ impl DescribedColumn {
             formatted_type,
             modifier,
             default_expression,
+            missing_value_expression,
         }
     }
 }
@@ -196,29 +201,40 @@ impl Harness {
         added
     }
 
+    /// Returns the catalog name of a type, which the oracle casts through.
+    async fn type_name(&self, type_oid: u32) -> String {
+        self.etl
+            .query_one("select typname::text from pg_catalog.pg_type where oid = $1", &[&type_oid])
+            .await
+            .unwrap()
+            .get(0)
+    }
+
     /// Returns column `c` as the bootstrap path sees it in the ETL session.
     async fn bootstrap_column(&self) -> DescribedColumn {
         let row = self
             .etl
             .query_one(
                 &format!(
-                    "select s.atttypid, s.typname, s.formatted_type, s.default_expression, \
-                     s.atttypmod, b.base_type_oid, b.base_typmod, b.base_formatted_type from \
-                     etl.describe_table_schema('{CASE_TABLE}'::regclass) s cross join lateral \
-                     etl.describe_base_type(s.atttypid, s.atttypmod) b where s.attname = 'c'"
+                    "select s.atttypid, s.formatted_type, s.default_expression, s.atttypmod, \
+                     s.base_type_oid, s.base_typmod, s.base_formatted_type, \
+                     s.missing_value_expression from \
+                     etl.describe_table_columns('{CASE_TABLE}'::regclass) s where s.attname = 'c'"
                 ),
                 &[],
             )
             .await
             .unwrap();
+        let type_oid: u32 = row.get(0);
 
         DescribedColumn::new(
-            row.get(0),
+            type_oid,
+            self.type_name(type_oid).await,
             row.get(1),
-            row.get(2),
-            row.get(4),
-            (row.get(5), row.get(6), row.get(7)),
             row.get(3),
+            (row.get(4), row.get(5), row.get(6)),
+            row.get(2),
+            row.get(7),
         )
     }
 
@@ -251,17 +267,27 @@ impl Harness {
             .find(|column| column["attname"] == "c")
             .unwrap();
 
-        DescribedColumn::new(
-            u32::try_from(column["atttypid"].as_i64().unwrap()).unwrap(),
-            column["typname"].as_str().unwrap().to_owned(),
-            column["formatted_type"].as_str().unwrap().to_owned(),
-            i32::try_from(column["atttypmod"].as_i64().unwrap()).unwrap(),
-            (
-                u32::try_from(column["base_type_oid"].as_i64().unwrap()).unwrap(),
+        let type_oid = u32::try_from(column["atttypid"].as_i64().unwrap()).unwrap();
+        let modifier = i32::try_from(column["atttypmod"].as_i64().unwrap()).unwrap();
+        let formatted_type = column["formatted_type"].as_str().unwrap().to_owned();
+        // The trigger sends a base type only for domains.
+        let base_type = match column["base_type_oid"].as_i64() {
+            Some(base_type_oid) => (
+                u32::try_from(base_type_oid).unwrap(),
                 i32::try_from(column["base_typmod"].as_i64().unwrap()).unwrap(),
                 column["base_formatted_type"].as_str().unwrap().to_owned(),
             ),
+            None => (type_oid, modifier, formatted_type.clone()),
+        };
+
+        DescribedColumn::new(
+            type_oid,
+            self.type_name(type_oid).await,
+            formatted_type,
+            modifier,
+            base_type,
             column["default_expression"].as_str().map(ToOwned::to_owned),
+            column["missing_value_expression"].as_str().map(ToOwned::to_owned),
         )
     }
 
@@ -729,6 +755,9 @@ fn check_ddl_message_matches_bootstrap(
         let message = harness.ddl_message_column().await;
         let bootstrap = harness.bootstrap_column().await;
         prop_assert_eq!(&message.typ, &bootstrap.typ);
+        // ETL renders add-time values itself, so both paths must carry the
+        // same literal whatever the user's session settings were.
+        prop_assert_eq!(&message.missing_value_expression, &bootstrap.missing_value_expression);
 
         let message_value = harness.denoted_value(&message, &message.formatted_type).await;
         let bootstrap_value = harness.denoted_value(&bootstrap, &bootstrap.formatted_type).await;
