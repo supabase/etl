@@ -42,7 +42,7 @@ use tokio::{pin, time::timeout};
 use tokio_postgres::{
     Client, CopyOutStream, IsolationLevel, NoTls,
     config::{ChannelBinding, ReplicationMode},
-    types::{ToSql, Type},
+    types::{PgLsn, ToSql, Type},
 };
 
 use crate::support::{
@@ -350,6 +350,22 @@ where
     }
 
     counts
+}
+
+/// Starts a feedback-free replication stream after setup has already queued DDL
+/// in `slot_name`, avoiding idle sender timeouts during setup, and collects
+/// `expected_count` DDL messages.
+async fn collect_queued_ddl_messages(
+    client: &mut PgReplicationClient,
+    publication: &str,
+    slot_name: &str,
+    start_lsn: PgLsn,
+    expected_count: usize,
+) -> Vec<JsonValue> {
+    let (stream, _) =
+        client.start_logical_replication(publication, slot_name, start_lsn, None).await.unwrap();
+
+    collect_ddl_messages(stream, expected_count).await
 }
 
 async fn collect_ddl_messages(
@@ -2426,13 +2442,14 @@ async fn schema_change_capture_read_committed_refreshes_visibility() {
         .unwrap();
     transaction.commit().await.unwrap();
 
-    // The slot retains the DDL. Start this feedback-free reader only
-    // when ready to consume, avoiding idle sender timeouts during setup.
-    let (stream, _) = replication
-        .start_logical_replication("ddl_visibility_pub", &slot_name, slot.consistent_point, None)
-        .await
-        .unwrap();
-    let messages = collect_ddl_messages(stream, 2).await;
+    let messages = collect_queued_ddl_messages(
+        &mut replication,
+        "ddl_visibility_pub",
+        &slot_name,
+        slot.consistent_point,
+        2,
+    )
+    .await;
     assert_eq!(messages[0]["columns"].as_array().unwrap().len(), 3);
     let captured_names = messages[1]["columns"]
         .as_array()
@@ -2697,14 +2714,15 @@ async fn schema_change_messages_refresh_partition_subtree() {
                 .unwrap();
         }
 
-        // The slot retains the DDL. Start this feedback-free reader only
-        // when ready to consume, avoiding idle sender timeouts during setup.
-        let (stream, _) = client
-            .start_logical_replication(publication, &slot_name, slot.consistent_point, None)
-            .await
-            .unwrap();
         let expected_count = phases.iter().map(|(_, _, ids)| ids.len()).sum();
-        let messages = collect_ddl_messages(stream, expected_count).await;
+        let messages = collect_queued_ddl_messages(
+            &mut client,
+            publication,
+            &slot_name,
+            slot.consistent_point,
+            expected_count,
+        )
+        .await;
         let mut messages = messages.as_slice();
         for (_, value, expected_ids) in &phases {
             let (batch, rest) = messages.split_at(expected_ids.len());
@@ -2784,11 +2802,14 @@ async fn schema_change_messages_refresh_partition_leaves_on_per_table_publicatio
     };
     database.run_sql(&alter_sql).await.unwrap();
 
-    let (stream, _) = client
-        .start_logical_replication(publication, &slot_name, slot.consistent_point, None)
-        .await
-        .unwrap();
-    let messages = collect_ddl_messages(stream, expected_leaves.len()).await;
+    let messages = collect_queued_ddl_messages(
+        &mut client,
+        publication,
+        &slot_name,
+        slot.consistent_point,
+        expected_leaves.len(),
+    )
+    .await;
 
     let captured_ids = messages
         .iter()
@@ -2876,11 +2897,9 @@ async fn partition_leaf_inherits_parent_publication_column_list() {
         .await
         .unwrap();
 
-    let (stream, _) = client
-        .start_logical_replication(publication, &slot_name, slot.consistent_point, None)
-        .await
-        .unwrap();
-    let messages = collect_ddl_messages(stream, 1).await;
+    let messages =
+        collect_queued_ddl_messages(&mut client, publication, &slot_name, slot.consistent_point, 1)
+            .await;
 
     assert_eq!(messages[0]["oid"], u64::from(leaf_id.into_inner()));
     assert_eq!(messages[0]["publication_column_attnums"][publication], serde_json::json!([1, 2]));
@@ -3122,13 +3141,14 @@ async fn schema_change_messages_emit_and_decode_set_and_drop_default() {
         .await
         .unwrap();
 
-    // The slot retains the DDL. Start this feedback-free reader only
-    // when ready to consume, avoiding idle sender timeouts during setup.
-    let (stream, _) = client
-        .start_logical_replication(publication_name, &slot_name, slot.consistent_point, None)
-        .await
-        .unwrap();
-    let messages = collect_ddl_messages(stream, 2).await;
+    let messages = collect_queued_ddl_messages(
+        &mut client,
+        publication_name,
+        &slot_name,
+        slot.consistent_point,
+        2,
+    )
+    .await;
     let set_default_message = &messages[0];
     let drop_default_message = &messages[1];
 
@@ -3240,13 +3260,9 @@ async fn schema_change_messages_capture_missing_values_separately_from_defaults(
         .await
         .unwrap();
 
-    // The slot retains the DDL. Start this feedback-free reader only
-    // when ready to consume, avoiding idle sender timeouts during setup.
-    let (stream, _) = client
-        .start_logical_replication(publication, &slot_name, slot.consistent_point, None)
-        .await
-        .unwrap();
-    let messages = collect_ddl_messages(stream, 1).await;
+    let messages =
+        collect_queued_ddl_messages(&mut client, publication, &slot_name, slot.consistent_point, 1)
+            .await;
     let columns = column_schemas_from_ddl_message(&messages[0]);
     for (name, typ, current_default) in
         [("exact_float", "double precision", "3.456789012345"), ("exact_real", "real", "3.456789")]
@@ -3637,16 +3653,16 @@ async fn schema_change_capture_can_be_skipped_disabled_or_fail_open() {
         database.run_sql(&sql).await.unwrap();
     }
 
-    // The slot retains the DDL. Start this feedback-free reader only
-    // when ready to consume, avoiding idle sender timeouts during setup.
-    let (stream, _) = client
-        .start_logical_replication(publication_name, &slot_name, slot.consistent_point, None)
-        .await
-        .unwrap();
-
     // Messages arrive in WAL order, so the first one proves the earlier DDL
     // emitted nothing.
-    let messages = collect_ddl_messages(stream, 1).await;
+    let messages = collect_queued_ddl_messages(
+        &mut client,
+        publication_name,
+        &slot_name,
+        slot.consistent_point,
+        1,
+    )
+    .await;
     let columns = column_schemas_from_ddl_message(&messages[0]);
     assert_eq!(columns.last().unwrap().name, "captured");
     assert_eq!(columns.len(), 6);

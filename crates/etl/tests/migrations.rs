@@ -1252,6 +1252,7 @@ async fn source_upgrade_from_main_preserves_queued_identity_messages() {
         .await
         .unwrap();
     tokio::pin!(stream);
+
     let mut messages = Vec::<serde_json::Value>::new();
     while messages.len() < 3 {
         let event = tokio::time::timeout(Duration::from_secs(10), stream.next())
@@ -1266,10 +1267,12 @@ async fn source_upgrade_from_main_preserves_queued_identity_messages() {
             messages.push(serde_json::from_slice(message.content()).unwrap());
         }
     }
+
     assert!(messages[0].get("publication_column_attnums").is_none());
     assert!(messages[0]["identity"].get("replica_identity_attnums").is_none());
     assert_eq!(messages[1]["identity"]["replica_identity_attnums"], serde_json::json!([2]));
     assert_eq!(messages[2]["identity"]["replica_identity_attnums"], serde_json::json!([1]));
+
     for (message, mode, legacy_keys) in
         [(&messages[0], "i", vec![2]), (&messages[1], "i", vec![2]), (&messages[2], "d", vec![])]
     {
