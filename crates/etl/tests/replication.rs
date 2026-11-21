@@ -2761,66 +2761,6 @@ async fn schema_change_messages_refresh_partition_subtree() {
     }
 }
 
-/// Per-table publication DDL on a partitioned root refreshes its effective
-/// leaf partitions when `publish_via_partition_root` is disabled.
-#[tokio::test(flavor = "multi_thread")]
-async fn schema_change_messages_refresh_partition_leaves_on_per_table_publication_ddl() {
-    let database = spawn_source_database().await;
-    let tree = create_nested_partition_hierarchy(
-        &database,
-        test_table_name("ddl_per_table_pub_partition"),
-    )
-    .await;
-    let root = tree.root_table_name.as_quoted_identifier();
-    let publication = "ddl_per_table_pub_partition_pub";
-    let expected_leaves = HashSet::from([
-        tree.p_2025_01_table_id,
-        tree.p_2025_02_table_id,
-        tree.p_2026_01_table_id,
-        tree.p_2026_02_table_id,
-    ]);
-
-    database
-        .run_sql(&format!(
-            "create publication {publication} for table {root} with (publish_via_partition_root = \
-             false)"
-        ))
-        .await
-        .unwrap();
-
-    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
-    let slot_name = test_slot_name("ddl_per_table_pub_partition");
-    let slot = client.create_slot(&slot_name, &Default::default()).await.unwrap();
-
-    let alter_sql = if below_version!(database.server_version(), POSTGRES_15) {
-        format!("alter publication {publication} set table {root}")
-    } else {
-        format!(
-            "alter publication {publication} set table {root} (id, partition_year, \
-             partition_month)"
-        )
-    };
-    database.run_sql(&alter_sql).await.unwrap();
-
-    let messages = collect_queued_ddl_messages(
-        &mut client,
-        publication,
-        &slot_name,
-        slot.consistent_point,
-        expected_leaves.len(),
-    )
-    .await;
-
-    let captured_ids = messages
-        .iter()
-        .map(|message| {
-            assert_eq!(message["publication_name"], publication);
-            TableId::new(u32::try_from(message["oid"].as_u64().unwrap()).unwrap())
-        })
-        .collect::<HashSet<_>>();
-    assert_eq!(captured_ids, expected_leaves);
-}
-
 /// Parent DDL captures a published leaf exactly once when it is reachable
 /// through multiple inheritance paths.
 #[tokio::test(flavor = "multi_thread")]

@@ -469,14 +469,12 @@ begin
                     cross join lateral etl.publication_table_candidates(p.oid) candidate
                     join pg_catalog.pg_class c on c.oid = candidate.table_oid
                 ),
-                -- Table DDL refreshes all inheritance descendants, which
-                -- recursive commands change without separate event rows.
-                -- Per-table publication DDL on a partitioned root also expands
-                -- declarative partitions so publish_via_partition_root = false
-                -- refreshes the effective leaves. Ancestors and siblings keep
-                -- their descriptions: PostgreSQL rejects adding, dropping,
-                -- renaming, or retyping a partition's columns. UNION emits each
-                -- identity once, including across inheritance diamonds.
+                -- Table DDL also refreshes descendants, which recursive commands
+                -- change without separate pg_event_trigger_ddl_commands() rows.
+                -- Ancestors and siblings keep their descriptions: PostgreSQL rejects
+                -- adding, dropping, renaming, or retyping a partition's columns.
+                -- UNION emits each identity once, including across inheritance diamonds.
+                -- Publication DDL already supplies its scoped effective identities.
                 affected as (
                     select b.* from base b
                     union
@@ -485,9 +483,7 @@ begin
                         b.publication_name
                     from affected b
                     join pg_catalog.pg_inherits i on i.inhparent = b.table_oid
-                    join pg_catalog.pg_class child on child.oid = i.inhrelid
-                    where not i.inhdetachpending
-                      and (b.publication_name is null or child.relispartition)
+                    where b.publication_name is null and not i.inhdetachpending
                 )
                 select
                     c.oid as table_oid,
