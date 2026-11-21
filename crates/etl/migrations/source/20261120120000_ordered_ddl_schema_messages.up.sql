@@ -70,6 +70,8 @@ with column_values as (
       on ad.adrelid = a.attrelid and ad.adnum = a.attnum
     where a.attrelid = p_table and a.attnum > 0
       and not a.attisdropped and a.attgenerated = ''
+-- Keep this CTE materialized so the planner cannot inline array_to_json past
+-- the missing_value_supported guard or evaluate it more than once per column.
 ), converted_values as materialized (
     select v.attname, v.attnum, v.atttypid, v.atttypmod, v.attnotnull,
            v.default_expression, v.atthasmissing, v.missing_value_supported,
@@ -159,14 +161,6 @@ protocol_identity as (
     select coalesce(pg_catalog.jsonb_agg(p.attnum order by p.position),
                     '[]'::pg_catalog.jsonb) as attnums
     from protocol_identity_cols p
-),
-replica_identity_index as (
-    select ic.relname as index_name
-    from pg_catalog.pg_index i
-    join pg_catalog.pg_class ic
-      on ic.oid = i.indexrelid
-    where i.indrelid = p_table
-      and i.indisreplident
 )
 select pg_catalog.jsonb_build_object(
     'primary_key_attnums',
@@ -177,12 +171,6 @@ select pg_catalog.jsonb_build_object(
     pi.attnums,
     'relreplident',
     r.relreplident::pg_catalog.text,
-    'replica_identity_index_relname',
-    (
-        select rii.index_name
-        from replica_identity_index rii
-        limit 1
-    ),
     -- Older binaries still read this field for explicit-index identity.
     'replica_identity_index_attnums',
     case when r.relreplident = 'i' then pi.attnums else '[]'::pg_catalog.jsonb end
