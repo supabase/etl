@@ -268,19 +268,41 @@ begin
             join pg_catalog.pg_publication_namespace pn on pn.pnnspid = a.relnamespace
         )
         select p.pubname::pg_catalog.text,
-               case when not p.puballtables and pr.prattrs is not null
-                         and not exists (
-                             select 1 from pg_catalog.pg_publication_namespace pn
-                             where pn.pnpubid = p.oid and pn.pnnspid = c.relnamespace
+               case when p.puballtables
+                         or exists (
+                             select 1
+                             from ancestors a
+                             join pg_catalog.pg_publication_namespace pn
+                               on pn.pnpubid = p.oid and pn.pnnspid = a.relnamespace
                          )
-                    then pr.prattrs::pg_catalog.int2[]
-                    else null::pg_catalog.int2[]
+                         or exists (
+                             select 1
+                             from ancestors a
+                             join pg_catalog.pg_publication_rel pr
+                               on pr.prpubid = p.oid and pr.prrelid = a.oid
+                             where pr.prattrs is null
+                         )
+                    then null::pg_catalog.int2[]
+                    else (
+                        -- Map published ancestor column lists by name onto c's own attnums,
+                        -- since attached partitions can have a different physical column order.
+                        select pg_catalog.array_agg(distinct dst_att.attnum order by dst_att.attnum)
+                        from ancestors a
+                        join pg_catalog.pg_publication_rel pr
+                          on pr.prpubid = p.oid and pr.prrelid = a.oid
+                        join pg_catalog.pg_attribute src_att
+                          on src_att.attrelid = a.oid and src_att.attnum = any(pr.prattrs)
+                        join pg_catalog.pg_attribute dst_att
+                          on dst_att.attrelid = c.oid
+                         and dst_att.attname = src_att.attname
+                         and dst_att.attnum > 0
+                         and not dst_att.attisdropped
+                         and dst_att.attgenerated = ''
+                    )
                end
         from (select distinct pa.pubid from published_ancestors pa) candidates
         join pg_catalog.pg_publication p on p.oid = candidates.pubid
         join pg_catalog.pg_class c on c.oid = p_table
-        left join pg_catalog.pg_publication_rel pr
-          on pr.prpubid = p.oid and pr.prrelid = c.oid
         where (p_publication is null or p.pubname::pg_catalog.text = p_publication)
           and c.relkind in ('r', 'p') and c.relpersistence = 'p'
           and c.oid >= 16384
