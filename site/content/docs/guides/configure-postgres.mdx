@@ -62,8 +62,9 @@ GRANT EXECUTE ON FUNCTION etl.describe_table_schema(oid),
   etl.describe_table_publication_columns(oid, text) TO etl_user;
 ```
 
-Repeat these grants after upgrades that add helpers; upgrades do not grant to
-other roles. The legacy `describe_table_schema` grant supports older binaries.
+Repeat these grants after upgrades that add helpers; upgrades grant new helpers
+only to the event trigger function's owner. The legacy `describe_table_schema`
+grant supports older binaries.
 Keep the `etl` schema and its owner trusted; the replication role needs USAGE,
 not CREATE, on that schema.
 

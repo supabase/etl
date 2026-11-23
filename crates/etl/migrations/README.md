@@ -167,8 +167,9 @@ and `POSTGRES_DB`; see the [development guide](../../../DEVELOPMENT.md).
 
 When source migrations are disabled, apply the latest source set before starting
 this binary: initial copy requires the new column and publication helpers. The
-upgrade grants nothing to other roles; a pipeline role that does not own the
-helpers needs the grants in the
+upgrade grants the new helpers only to the trigger function's owner, when that
+owner differs from the upgrading role, so capture keeps working. A pipeline
+role that does not own the helpers needs the grants in the
 [configuration guide](../../../site/content/docs/guides/configure-postgres.mdx).
 
 Queued legacy payloads remain readable without reconstructing missing history
