@@ -6,7 +6,7 @@ use crate::schema::{SnapshotId, TableId, TableSchema};
 ///
 /// This type owns the rules for snapshot lookup and cleanup so store
 /// implementations do not each reimplement retention behavior.
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 pub(crate) struct TableSchemaSnapshots {
     /// Schema versions keyed first by table and then by snapshot.
     table_schemas: BTreeMap<TableId, BTreeMap<SnapshotId, Arc<TableSchema>>>,
