@@ -5315,12 +5315,7 @@ mod tests {
             let relation_columns: Vec<(String, u32)> = relation
                 .columns()
                 .iter()
-                .map(|column| {
-                    (
-                        column.name().unwrap().to_owned(),
-                        u32::from_ne_bytes(column.type_id().to_ne_bytes()),
-                    )
-                })
+                .map(|column| (column.name().unwrap().to_owned(), column.type_id().cast_unsigned()))
                 .collect();
             prop_assert_eq!(mismatch.is_some(), decoder_columns != relation_columns);
             if mismatch.is_some() {

@@ -18,7 +18,7 @@ use tokio::time;
 use tracing::{debug, info, warn};
 
 use crate::ducklake::{
-    DuckLakeDestination, DuckLakeExternalMaintenancePause,
+    DuckLakeDestination, DuckLakeExternalMaintenancePause, DuckLakeTableName,
     metrics::{
         ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_PAUSE_ACTIVE,
         ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_PAUSE_DURATION_SECONDS,
@@ -116,6 +116,7 @@ where
     M: ExternalMaintenanceStore,
 {
     let mut held_pause: Option<HeldPause> = None;
+    let mut resume_after = None;
     let mut expire_snapshots_gate = ExpireSnapshotsRequestGate::default();
     record_external_maintenance_pause_active(ExternalMaintenanceOperations::default(), false);
 
@@ -154,6 +155,7 @@ where
                             &state,
                             &config,
                             &mut expire_snapshots_gate,
+                            &mut resume_after,
                         )
                         .await;
                     }
@@ -610,6 +612,7 @@ async fn maybe_request_operations<S, M>(
     state: &ExternalMaintenanceState,
     config: &ExternalMaintenanceWatcherConfig,
     expire_snapshots_gate: &mut ExpireSnapshotsRequestGate,
+    resume_after: &mut Option<DuckLakeTableName>,
 ) where
     S: DestinationStore,
     M: ExternalMaintenanceStore,
@@ -626,6 +629,7 @@ async fn maybe_request_operations<S, M>(
             config.inline_flush_min_inlined_bytes,
             config.rewrite_data_files_min_active_data_files,
             state.operation_policy,
+            resume_after,
         )
         .await
     {

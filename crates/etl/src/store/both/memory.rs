@@ -28,7 +28,7 @@ pub(crate) struct MemoryStoreData {
     /// Replaced states for each table, oldest first, restored by rollback.
     table_state_history: HashMap<TableId, Vec<TableState>>,
     /// Stored table schema snapshots.
-    table_schemas: Arc<TableSchemaSnapshots>,
+    table_schemas: TableSchemaSnapshots,
     /// Destination table metadata indexed by table ID.
     destination_tables_metadata: DestinationTablesMetadata,
     /// Replication checkpoints indexed by worker type.
@@ -109,7 +109,7 @@ impl MemoryStoreData {
         table_id: TableId,
         metadata: DestinationTableMetadata,
     ) {
-        Arc::make_mut(&mut self.destination_tables_metadata).insert(table_id, metadata);
+        self.destination_tables_metadata.insert(table_id, metadata);
     }
 
     /// Returns the newest schema of a table at or before `snapshot_id`.
@@ -128,7 +128,7 @@ impl MemoryStoreData {
 
     /// Stores a schema snapshot and returns the shared stored schema.
     pub(crate) fn store_table_schema(&mut self, table_schema: TableSchema) -> Arc<TableSchema> {
-        Arc::make_mut(&mut self.table_schemas).insert(table_schema)
+        self.table_schemas.insert(table_schema)
     }
 
     /// Removes schemas older than each table's retention snapshot and returns
@@ -137,15 +137,15 @@ impl MemoryStoreData {
         &mut self,
         retention_snapshot_ids: &BTreeMap<TableId, SnapshotId>,
     ) -> u64 {
-        Arc::make_mut(&mut self.table_schemas).prune(retention_snapshot_ids)
+        self.table_schemas.prune(retention_snapshot_ids)
     }
 
     /// Applies a table lifecycle operation to every affected store domain.
     pub(crate) fn apply_table_state_operation(&mut self, operation: TableStateOperation) {
         match operation {
             TableStateOperation::PrepareForCopy { table_id } => {
-                Arc::make_mut(&mut self.table_schemas).remove_table(table_id);
-                Arc::make_mut(&mut self.destination_tables_metadata).remove(&table_id);
+                self.table_schemas.remove_table(table_id);
+                self.destination_tables_metadata.remove(&table_id);
                 self.replication_checkpoints.remove(&WorkerType::TableSync { table_id });
             }
             TableStateOperation::ResetForResync => {
@@ -160,8 +160,8 @@ impl MemoryStoreData {
             TableStateOperation::Delete { table_id } => {
                 Arc::make_mut(&mut self.table_states).remove(&table_id);
                 self.table_state_history.remove(&table_id);
-                Arc::make_mut(&mut self.table_schemas).remove_table(table_id);
-                Arc::make_mut(&mut self.destination_tables_metadata).remove(&table_id);
+                self.table_schemas.remove_table(table_id);
+                self.destination_tables_metadata.remove(&table_id);
                 self.replication_checkpoints.remove(&WorkerType::TableSync { table_id });
             }
         }

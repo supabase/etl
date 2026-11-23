@@ -617,10 +617,9 @@ impl<'a> PgReplicationTransactionCore<'a> {
                             'base_typmod', s.base_typmod,
                             'base_formatted_type', s.base_formatted_type,
                             'attnotnull', s.attnotnull,
-                            'default_expression', s.default_expression
-                        ) || case when s.missing_value_expression is null then '{{}}'::pg_catalog.jsonb
-                                  else pg_catalog.jsonb_build_object('missing_value_expression', s.missing_value_expression)
-                             end
+                            'default_expression', s.default_expression,
+                            'missing_value_expression', s.missing_value_expression
+                        )
                         order by s.attnum
                     ),
                     '[]'::pg_catalog.jsonb

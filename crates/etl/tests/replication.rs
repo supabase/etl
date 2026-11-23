@@ -42,7 +42,7 @@ use tokio::{pin, time::timeout};
 use tokio_postgres::{
     Client, CopyOutStream, IsolationLevel, NoTls,
     config::{ChannelBinding, ReplicationMode},
-    types::{ToSql, Type},
+    types::{PgLsn, ToSql, Type},
 };
 
 use crate::support::{
@@ -350,6 +350,22 @@ where
     }
 
     counts
+}
+
+/// Starts a feedback-free replication stream after setup has already queued DDL
+/// in `slot_name`, avoiding idle sender timeouts during setup, and collects
+/// `expected_count` DDL messages.
+async fn collect_queued_ddl_messages(
+    client: &mut PgReplicationClient,
+    publication: &str,
+    slot_name: &str,
+    start_lsn: PgLsn,
+    expected_count: usize,
+) -> Vec<JsonValue> {
+    let (stream, _) =
+        client.start_logical_replication(publication, slot_name, start_lsn, None).await.unwrap();
+
+    collect_ddl_messages(stream, expected_count).await
 }
 
 async fn collect_ddl_messages(
@@ -2426,13 +2442,14 @@ async fn schema_change_capture_read_committed_refreshes_visibility() {
         .unwrap();
     transaction.commit().await.unwrap();
 
-    // The slot retains the DDL. Start this feedback-free reader only
-    // when ready to consume, avoiding idle sender timeouts during setup.
-    let (stream, _) = replication
-        .start_logical_replication("ddl_visibility_pub", &slot_name, slot.consistent_point, None)
-        .await
-        .unwrap();
-    let messages = collect_ddl_messages(stream, 2).await;
+    let messages = collect_queued_ddl_messages(
+        &mut replication,
+        "ddl_visibility_pub",
+        &slot_name,
+        slot.consistent_point,
+        2,
+    )
+    .await;
     assert_eq!(messages[0]["columns"].as_array().unwrap().len(), 3);
     let captured_names = messages[1]["columns"]
         .as_array()
@@ -2448,6 +2465,93 @@ async fn schema_change_capture_read_committed_refreshes_visibility() {
         .find(|column| column["attname"] == "value")
         .unwrap();
     assert_eq!(value["default_expression"], "1");
+}
+
+/// Protocol replica-identity keys exclude included index columns and
+/// deferrable primary keys.
+#[tokio::test(flavor = "multi_thread")]
+async fn replica_identity_excludes_include_columns_and_deferrable_primary_keys() {
+    let database = spawn_source_database().await;
+    let client = database.client.as_ref().unwrap();
+    let include_table = test_table_name("replident_include");
+    let deferrable_table = test_table_name("replident_deferrable");
+    let include_sql = include_table.as_quoted_identifier();
+    let deferrable_sql = deferrable_table.as_quoted_identifier();
+
+    client
+        .batch_execute(&format!(
+            "create table {include_sql} (id integer not null, key_col integer not null, extra \
+             text);
+             create unique index replident_include_idx on {include_sql} (key_col) include (extra);
+             alter table {include_sql} replica identity using index replident_include_idx;
+             create table {deferrable_sql} (id integer primary key deferrable, value text)"
+        ))
+        .await
+        .unwrap();
+
+    let include_identity: JsonValue = client
+        .query_one("select etl.describe_table_identity($1::text::regclass)", &[&include_sql])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(include_identity["relreplident"], "i");
+    assert_eq!(include_identity["replica_identity_attnums"], serde_json::json!([2]));
+
+    let deferrable_identity: JsonValue = client
+        .query_one("select etl.describe_table_identity($1::text::regclass)", &[&deferrable_sql])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(deferrable_identity["relreplident"], "d");
+    assert_eq!(deferrable_identity["primary_key_attnums"], serde_json::json!([1]));
+    assert_eq!(deferrable_identity["primary_key_condeferrable"], true);
+    assert_eq!(deferrable_identity["replica_identity_attnums"], serde_json::json!([]));
+}
+
+/// Partitioned tables store no rows and report no missing-value hints, while
+/// their leaf partitions retain the captured add-time literal.
+#[tokio::test(flavor = "multi_thread")]
+async fn partitioned_table_reports_no_missing_value_expression() {
+    let database = spawn_source_database().await;
+    let client = database.client.as_ref().unwrap();
+    let root = test_table_name("partitioned_missing_root");
+    let leaf = test_table_name("partitioned_missing_leaf");
+    let root_sql = root.as_quoted_identifier();
+    let leaf_sql = leaf.as_quoted_identifier();
+
+    client
+        .batch_execute(&format!(
+            "create table {root_sql} (id integer not null) partition by range (id);
+             create table {leaf_sql} partition of {root_sql} for values from (0) to (10);
+             insert into {root_sql} values (1);
+             alter table {root_sql}
+                 add column score integer default 1,
+                 alter column score set default 2"
+        ))
+        .await
+        .unwrap();
+
+    let root_missing: Option<String> = client
+        .query_one(
+            "select missing_value_expression from etl.describe_table_columns($1::text::regclass) \
+             where attname = 'score'",
+            &[&root_sql],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    let leaf_missing: Option<String> = client
+        .query_one(
+            "select missing_value_expression from etl.describe_table_columns($1::text::regclass) \
+             where attname = 'score'",
+            &[&leaf_sql],
+        )
+        .await
+        .unwrap()
+        .get(0);
+
+    assert_eq!(root_missing, None);
+    assert_eq!(leaf_missing.as_deref(), Some("1"));
 }
 
 /// A partition's schema reports only its own primary key, in key order over its
@@ -2610,14 +2714,15 @@ async fn schema_change_messages_refresh_partition_subtree() {
                 .unwrap();
         }
 
-        // The slot retains the DDL. Start this feedback-free reader only
-        // when ready to consume, avoiding idle sender timeouts during setup.
-        let (stream, _) = client
-            .start_logical_replication(publication, &slot_name, slot.consistent_point, None)
-            .await
-            .unwrap();
         let expected_count = phases.iter().map(|(_, _, ids)| ids.len()).sum();
-        let messages = collect_ddl_messages(stream, expected_count).await;
+        let messages = collect_queued_ddl_messages(
+            &mut client,
+            publication,
+            &slot_name,
+            slot.consistent_point,
+            expected_count,
+        )
+        .await;
         let mut messages = messages.as_slice();
         for (_, value, expected_ids) in &phases {
             let (batch, rest) = messages.split_at(expected_ids.len());
@@ -2892,13 +2997,14 @@ async fn schema_change_messages_emit_and_decode_set_and_drop_default() {
         .await
         .unwrap();
 
-    // The slot retains the DDL. Start this feedback-free reader only
-    // when ready to consume, avoiding idle sender timeouts during setup.
-    let (stream, _) = client
-        .start_logical_replication(publication_name, &slot_name, slot.consistent_point, None)
-        .await
-        .unwrap();
-    let messages = collect_ddl_messages(stream, 2).await;
+    let messages = collect_queued_ddl_messages(
+        &mut client,
+        publication_name,
+        &slot_name,
+        slot.consistent_point,
+        2,
+    )
+    .await;
     let set_default_message = &messages[0];
     let drop_default_message = &messages[1];
 
@@ -3009,13 +3115,9 @@ async fn schema_change_messages_capture_missing_values_separately_from_defaults(
         .await
         .unwrap();
 
-    // The slot retains the DDL. Start this feedback-free reader only
-    // when ready to consume, avoiding idle sender timeouts during setup.
-    let (stream, _) = client
-        .start_logical_replication(publication, &slot_name, slot.consistent_point, None)
-        .await
-        .unwrap();
-    let messages = collect_ddl_messages(stream, 1).await;
+    let messages =
+        collect_queued_ddl_messages(&mut client, publication, &slot_name, slot.consistent_point, 1)
+            .await;
     let columns = column_schemas_from_ddl_message(&messages[0]);
     for (name, typ, current_default) in
         [("exact_float", "double precision", "3.456789012345"), ("exact_real", "real", "3.456789")]
@@ -3091,6 +3193,12 @@ async fn schema_change_messages_capture_missing_values_separately_from_defaults(
             .missing_value_expression
             .is_none()
     );
+
+    // Bytea defaults render in canonical hex regardless of session
+    // bytea_output, and retain the unsupported-missing-value fallback.
+    let binary_column = columns.iter().find(|column| column.name == "binary_value").unwrap();
+    assert_eq!(binary_column.default_expression.as_deref(), Some("'\\x6364'::bytea"));
+    assert_eq!(binary_column.missing_value_expression, None);
 
     let mut copy_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let (transaction, _) = copy_client
@@ -3434,21 +3542,25 @@ async fn schema_change_capture_can_be_skipped_disabled_or_fail_open() {
         "alter function etl.describe_table_publication_columns_moved(oid, text) rename to \
          describe_table_publication_columns"
             .to_owned(),
+        // An unrecognized skip_ddl_log string must not fail customer DDL or
+        // suppress capture.
+        "set supabase_etl.skip_ddl_log = 'invalid'".to_owned(),
         format!("alter table {table} add column captured text"),
+        "reset supabase_etl.skip_ddl_log".to_owned(),
     ] {
         database.run_sql(&sql).await.unwrap();
     }
 
-    // The slot retains the DDL. Start this feedback-free reader only
-    // when ready to consume, avoiding idle sender timeouts during setup.
-    let (stream, _) = client
-        .start_logical_replication(publication_name, &slot_name, slot.consistent_point, None)
-        .await
-        .unwrap();
-
     // Messages arrive in WAL order, so the first one proves the earlier DDL
     // emitted nothing.
-    let messages = collect_ddl_messages(stream, 1).await;
+    let messages = collect_queued_ddl_messages(
+        &mut client,
+        publication_name,
+        &slot_name,
+        slot.consistent_point,
+        1,
+    )
+    .await;
     let columns = column_schemas_from_ddl_message(&messages[0]);
     assert_eq!(columns.last().unwrap().name, "captured");
     assert_eq!(columns.len(), 6);

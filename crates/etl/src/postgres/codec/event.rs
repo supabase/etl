@@ -624,7 +624,7 @@ fn detect_relation_schema_mismatch(
         let name = relation_column.name()?;
         // The protocol library exposes the unsigned OID through an i32, so
         // OIDs above `i32::MAX` must be reinterpreted rather than converted.
-        let type_oid = u32::from_ne_bytes(relation_column.type_id().to_ne_bytes());
+        let type_oid = relation_column.type_id().cast_unsigned();
         let typ = convert_type_oid_to_type(type_oid);
         let kind = if name != decoder_column.name {
             RelationSchemaMismatchKind::NameOrder
