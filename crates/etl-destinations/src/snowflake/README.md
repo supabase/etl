@@ -14,7 +14,7 @@ partial updates use the same destination and table format. With a supported
 primary key and `REPLICA IDENTITY DEFAULT`, Postgres can omit unchanged large
 TOAST values from updates. `REPLICA IDENTITY FULL` supplies complete update rows.
 
-Each record includes `_cdc_operation`, `_cdc_sequence_number`, and `_cdc_missing_columns ARRAY`. An omitted value is stored as a NULL placeholder with its PostgreSQL attribute number (`pg_attribute.attnum`) in the array. These IDs survive column renames and are not reused after a drop within the same source table. They are not row indexes or Snowflake column positions. An explicitly supplied SQL NULL has no entry and replaces the previous value. Complete records have an empty array. Deletes end a row's lifetime; their values are not carried forward into a later insert.
+Each record includes `_cdc_operation`, `_cdc_sequence_number`, and `_cdc_missing_columns ARRAY`. An omitted value is stored as a NULL placeholder with its PostgreSQL attribute number (`pg_attribute.attnum`) in the array. These IDs survive column renames and are not reused after a drop within the same source table. They are not row indexes or Snowflake column positions. An explicitly supplied SQL NULL has no entry and replaces the previous value. Complete records have an empty array. A NULL mask in historical insert or update records also means the row was complete for its replicated schema at the time. Deletes end a row's lifetime; their values are not carried forward into a later insert.
 
 ### Querying current state
 
@@ -106,20 +106,6 @@ warning. A table that loses eligibility after having a view fails reconciliation
 and leaves that view unavailable. Recreating a pipeline with fresh ETL state
 requires an unused destination namespace or deliberate removal of the old raw
 tables and both reserved view names.
-
-### Existing destination tables
-
-For ETL-owned tables using the supported previous CDC format, ETL adds the
-nullable `_cdc_missing_columns` column before opening the write channel.
-Existing insert/update records have NULL metadata, interpreted as complete
-records within their replicated schema at event time. The upgrade preserves
-stored history and replication offsets and requires no backfill.
-
-The configured Snowflake role must allow the ALTER. Unrelated schema mismatches
-remain errors. ETL updates the table format; customer-owned queries must support
-partial records before consuming them. Existing deployments also need the
-`CREATE VIEW` grant before upgrading; ETL creates views for applied tables at
-startup.
 
 ## Request Packing and Large Rows
 

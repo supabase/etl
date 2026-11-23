@@ -216,39 +216,6 @@ impl<T: TokenProvider> SqlClient<T> {
         Ok(())
     }
 
-    /// Upgrades only the known legacy CDC format before opening a channel.
-    ///
-    /// Authoritative destination metadata must establish ownership first.
-    /// Repeating the additive DDL is safe after an unknown outcome. External
-    /// removal of previously written masks is unsupported and indistinguishable
-    /// from a legacy table without independent durable format evidence.
-    pub(super) async fn upgrade_legacy_table(
-        &self,
-        table_name: &str,
-        columns: &[etl::schema::ColumnSchema],
-    ) -> Result<()> {
-        use crate::snowflake::schema::{
-            CDC_MISSING_COLUMNS_COLUMN, CDC_OPERATION_COLUMN, CDC_SEQUENCE_COLUMN,
-        };
-
-        let fqn = self.fully_qualified_name(table_name);
-        let response = self.execute_statement(&format!("SHOW COLUMNS IN TABLE {fqn}")).await?;
-        let expected = columns
-            .iter()
-            .map(|column| column.name.as_str())
-            .chain([CDC_OPERATION_COLUMN, CDC_SEQUENCE_COLUMN])
-            .collect::<Vec<_>>();
-        validate_table_response(&response, table_name, &expected, &[])?;
-        // TODO: Remove after table migration coverage and the
-        // supported self-hosted upgrade path no longer require legacy
-        // format upgrades.
-        self.execute_ddl(&format!(
-            "ALTER TABLE {fqn} ADD COLUMN IF NOT EXISTS {} ARRAY",
-            quote_identifier(CDC_MISSING_COLUMNS_COLUMN),
-        ))
-        .await
-    }
-
     /// Remove all rows from a table without dropping it.
     ///
     /// `request_id` must remain stable while one execution has an unknown
@@ -742,8 +709,6 @@ fn validate_table_response<'a>(
     json_column_names: &[&str],
 ) -> Result<Vec<&'a str>> {
     let names = parse_show_columns(response)?;
-    // Missing column errors must precede metadata validation so callers can
-    // recognize the legacy layout and attempt its supported upgrade.
     validate_column_names(table_name, expected_column_names, &names)?;
     let columns = parse_table_columns(response, names)?;
     validate_cdc_metadata(&columns)?;
@@ -1032,7 +997,7 @@ mod tests {
         ));
     }
 
-    /// Missing mask errors remain available to the legacy-upgrade dispatcher.
+    /// A missing column is reported even when other type metadata is malformed.
     #[test]
     fn table_response_checks_names_before_type_metadata() {
         let response = column_response(&[
@@ -1048,19 +1013,27 @@ mod tests {
         ));
     }
 
-    /// Legacy validation ignores unrelated type JSON and default expressions.
+    /// Only CDC columns and selected JSON columns require type or default
+    /// metadata.
     #[test]
     fn table_response_interprets_only_selected_column_metadata() {
         let mut response = column_response(&[
             ("payload", r#"{"type":"VARIANT"}"#, json!("PARSE_JSON('{}')")),
             ("unrelated", "not-json", json!(false)),
+            ("_cdc_missing_columns", r#"{"type":"ARRAY","nullable":true}"#, json!(null)),
             ("_cdc_sequence_number", r#"{"type":"TEXT","nullable":false}"#, json!(null)),
             ("_cdc_operation", r#"{"type":"TEXT","nullable":false}"#, json!(null)),
         ]);
         for column in &mut response.result_set_meta_data.as_mut().unwrap().row_type {
             column.name.make_ascii_uppercase();
         }
-        let expected = ["_cdc_operation", "_cdc_sequence_number", "payload", "unrelated"];
+        let expected = [
+            "_cdc_operation",
+            "_cdc_sequence_number",
+            "_cdc_missing_columns",
+            "payload",
+            "unrelated",
+        ];
 
         assert!(validate_table_response(&response, "events", &expected, &[]).unwrap().is_empty());
         assert_eq!(
