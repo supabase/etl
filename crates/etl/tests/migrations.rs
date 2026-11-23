@@ -1319,8 +1319,9 @@ async fn source_upgrade_by_another_role_keeps_capture_working() {
     drop(conn);
 
     // Simulate an installation by a non-superuser that owns every ETL object.
+    // A mixed-case name checks that the migration quotes the owner.
     let installer = format!(
-        "etl_installer_{}",
+        "Etl_Installer_{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock should be after unix epoch")
@@ -1329,8 +1330,8 @@ async fn source_upgrade_by_another_role_keeps_capture_working() {
     let client = database.client.as_ref().unwrap();
     client
         .batch_execute(&format!(
-            "create role {installer} nologin nosuperuser;
-             alter schema etl owner to {installer};
+            "create role \"{installer}\" nologin nosuperuser;
+             alter schema etl owner to \"{installer}\";
              do $do$
              declare v_function pg_catalog.regprocedure;
              begin
@@ -1338,7 +1339,7 @@ async fn source_upgrade_by_another_role_keeps_capture_working() {
                      select p.oid::pg_catalog.regprocedure from pg_catalog.pg_proc p
                      where p.pronamespace = 'etl'::pg_catalog.regnamespace
                  loop
-                     execute pg_catalog.format('alter function %s owner to {installer}', \
+                     execute pg_catalog.format('alter function %s owner to \"{installer}\"', \
              v_function);
                  end loop;
              end
@@ -1355,19 +1356,24 @@ async fn source_upgrade_by_another_role_keeps_capture_working() {
         PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("owner_upgrade");
     let slot = replication_client.create_slot(&slot_name, &Default::default()).await.unwrap();
+    // Table and publication DDL call different helpers.
     client
-        .batch_execute("alter table public.upgrade_owner add column value integer")
+        .batch_execute(
+            "alter table public.upgrade_owner add column value integer;
+             alter publication upgrade_owner_pub set (publish = 'insert')",
+        )
         .await
         .unwrap();
 
-    // Capture fails open, so only an emitted snapshot proves the owner could
-    // run the new helpers.
+    // Capture fails open, so only emitted snapshots prove the owner could run
+    // the new helpers.
     let (stream, _) = replication_client
         .start_logical_replication("upgrade_owner_pub", &slot_name, slot.consistent_point, None)
         .await
         .unwrap();
     tokio::pin!(stream);
-    loop {
+    let mut messages = Vec::<serde_json::Value>::new();
+    while messages.len() < 2 {
         let event = tokio::time::timeout(Duration::from_secs(10), stream.next())
             .await
             .unwrap()
@@ -1377,11 +1383,12 @@ async fn source_upgrade_by_another_role_keeps_capture_working() {
             && let LogicalReplicationMessage::Message(message) = event.data()
             && message.prefix().unwrap() == "supabase_etl_ddl"
         {
-            let message: serde_json::Value = serde_json::from_slice(message.content()).unwrap();
-            assert_eq!(message["relname"], "upgrade_owner");
-            break;
+            messages.push(serde_json::from_slice(message.content()).unwrap());
         }
     }
+    assert_eq!(messages[0]["command_tag"], "ALTER TABLE");
+    assert_eq!(messages[1]["command_tag"], "ALTER PUBLICATION");
+    assert_eq!(messages[1]["publication_name"], "upgrade_owner_pub");
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -592,7 +592,8 @@ that owner or a superuser.$$;
 -- CREATE OR REPLACE keeps the trigger function's original owner, while the
 -- helpers above belong to the role running this upgrade. When those differ,
 -- the SECURITY DEFINER trigger could not call the helpers and every capture
--- would fail open, so let the owner execute them.
+-- would fail open, so let the owner execute them. Granting to the upgrading
+-- role itself is a no-op, so no ownership comparison is needed.
 do $do$
 declare
     v_owner pg_catalog.regrole;
@@ -601,13 +602,11 @@ begin
     from pg_catalog.pg_proc p
     where p.oid = 'etl.emit_schema_change_messages()'::pg_catalog.regprocedure;
 
-    if v_owner <> current_user::pg_catalog.text::pg_catalog.regrole then
-        execute pg_catalog.format(
-            'grant execute on function etl.describe_table_columns(pg_catalog.oid), '
-            'etl.describe_table_publication_columns(pg_catalog.oid, pg_catalog.text), '
-            'etl.publication_table_candidates(pg_catalog.oid) to %s',
-            v_owner
-        );
-    end if;
+    execute pg_catalog.format(
+        'grant execute on function etl.describe_table_columns(pg_catalog.oid), '
+        'etl.describe_table_publication_columns(pg_catalog.oid, pg_catalog.text), '
+        'etl.publication_table_candidates(pg_catalog.oid) to %s',
+        v_owner
+    );
 end
 $do$;
