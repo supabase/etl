@@ -1199,6 +1199,8 @@ async fn source_upgrade_from_main_preserves_queued_identity_messages() {
         replica_identity_index_attnums: Vec<i32>,
     }
 
+    // GIVEN: a database on the previous source migration with a published table
+    // and slot.
     let database = spawn_unmigrated_database().await;
     let mut connection = migration_connection(&database.config).await;
     source_migrator()
@@ -1228,6 +1230,7 @@ async fn source_upgrade_from_main_preserves_queued_identity_messages() {
     let slot_name = test_slot_name("identity_upgrade");
     let slot = replication_client.create_slot(&slot_name, &Default::default()).await.unwrap();
 
+    // WHEN: DDL runs before and after upgrading the source migrations.
     client
         .batch_execute(
             "alter table public.upgrade_identity replica identity using index \
@@ -1246,7 +1249,8 @@ async fn source_upgrade_from_main_preserves_queued_identity_messages() {
         .await
         .unwrap();
 
-    // Start decoding only after both formats are already queued in the slot.
+    // THEN: queued legacy and upgraded payloads both decode cleanly, including
+    // legacy identity fields.
     let (stream, _) = replication_client
         .start_logical_replication("upgrade_pub", &slot_name, slot.consistent_point, None)
         .await
@@ -1288,6 +1292,8 @@ async fn source_upgrade_from_main_preserves_queued_identity_messages() {
 /// event trigger stays disabled.
 #[tokio::test(flavor = "multi_thread")]
 async fn source_upgrade_preserves_disabled_ddl_trigger() {
+    // GIVEN: a pre-upgrade source installation whose DDL event trigger is
+    // disabled.
     let database = spawn_unmigrated_database().await;
     let mut conn = migration_connection(&database.config).await;
     source_migrator().run_to(SOURCE_PRE_ORDERED_DDL_MESSAGES_VERSION, &mut conn).await.unwrap();
@@ -1298,8 +1304,11 @@ async fn source_upgrade_preserves_disabled_ddl_trigger() {
         .await
         .unwrap();
 
+    // WHEN: the latest source migrations are applied.
     run_source_migrations(&database.config).await.unwrap();
 
+    // THEN: the event trigger remains disabled and still points to the replaced
+    // function.
     assert!(
         query_bool(
             &database,
@@ -1316,13 +1325,13 @@ async fn source_upgrade_preserves_disabled_ddl_trigger() {
 /// helpers the upgrade adds.
 #[tokio::test(flavor = "multi_thread")]
 async fn source_upgrade_by_another_role_keeps_capture_working() {
+    // GIVEN: a pre-upgrade ETL schema and trigger owned by a mixed-case
+    // non-superuser role.
     let database = spawn_unmigrated_database().await;
     let mut conn = migration_connection(&database.config).await;
     source_migrator().run_to(SOURCE_PRE_ORDERED_DDL_MESSAGES_VERSION, &mut conn).await.unwrap();
     drop(conn);
 
-    // Simulate an installation by a non-superuser that owns every ETL object.
-    // A mixed-case name checks that the migration quotes the owner.
     let installer = format!(
         "Etl_Installer_{}",
         std::time::SystemTime::now()
@@ -1353,13 +1362,14 @@ async fn source_upgrade_by_another_role_keeps_capture_working() {
         .await
         .unwrap();
 
+    // WHEN: a different role runs the source upgrade and table plus publication
+    // DDL execute.
     run_source_migrations(&database.config).await.unwrap();
 
     let mut replication_client =
         PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("owner_upgrade");
     let slot = replication_client.create_slot(&slot_name, &Default::default()).await.unwrap();
-    // Table and publication DDL call different helpers.
     client
         .batch_execute(
             "alter table public.upgrade_owner add column value integer;
@@ -1368,8 +1378,8 @@ async fn source_upgrade_by_another_role_keeps_capture_working() {
         .await
         .unwrap();
 
-    // Capture fails open, so only emitted snapshots prove the owner could run
-    // the new helpers.
+    // THEN: the original trigger owner can call the new helpers and both
+    // snapshots are emitted.
     let (stream, _) = replication_client
         .start_logical_replication("upgrade_owner_pub", &slot_name, slot.consistent_point, None)
         .await

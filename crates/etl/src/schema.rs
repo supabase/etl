@@ -2644,13 +2644,20 @@ mod tests {
             (Some("2"), None, Some("2")),
             (None, Some("1"), Some("1")),
         ] {
+            // GIVEN: a schema diff adding a column with separate future and
+            // add-time defaults.
             let id = ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false);
             let before = create_replicated_schema(vec![id.clone()]);
             let column = ColumnSchema::new("score".to_owned(), Type::INT4, -1, 2, true)
                 .with_default_expression_option(future_default.map(ToOwned::to_owned))
                 .with_missing_value_expression(missing_value.map(ToOwned::to_owned));
             let after = create_replicated_schema(vec![id, column]);
+
+            // WHEN: the shared schema change plan is computed.
             let plan = plan_schema_change(&before, &after, ColumnNameMapping::Identity);
+
+            // THEN: one AddColumn operation preserves both defaults and
+            // converges to the target.
             let [SchemaOperation::AddColumn { after_column_schema, reason }] =
                 plan.ordered_operations()
             else {

@@ -928,6 +928,8 @@ async fn table_schema_copy_is_consistent() {
 /// Invalid identity metadata fails copy setup while retaining its parse error.
 #[tokio::test(flavor = "multi_thread")]
 async fn table_schema_identity_parse_error_preserves_source() {
+    // GIVEN: a source table whose describe_table_identity helper returns
+    // incomplete index metadata.
     let database = spawn_source_database().await;
     let table_id = database
         .create_table(test_table_name("invalid_identity"), true, &[("value", "integer")])
@@ -942,12 +944,17 @@ async fn table_schema_identity_parse_error_preserves_source() {
         )
         .await
         .unwrap();
+
+    // WHEN: copy setup reads the table schema and identity.
     let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let (transaction, _) = client
         .create_table_copy_slot(&test_slot_name("invalid_identity"), table_id, &Default::default())
         .await
         .unwrap();
     let error = transaction.get_table_schema_with_identity(table_id).await.unwrap_err();
+
+    // THEN: it returns DeserializationError with the underlying
+    // serde_json::Error source.
     assert_eq!(error.kind(), ErrorKind::DeserializationError);
     assert!(error.source().unwrap().downcast_ref::<serde_json::Error>().is_some());
 }
@@ -2207,6 +2214,7 @@ async fn start_logical_replication() {
 /// how many unrelated tables exist in the database.
 #[tokio::test(flavor = "multi_thread")]
 async fn schema_change_capture_ignores_unrelated_table_metadata() {
+    // GIVEN: a single-table publication with function-call tracking enabled.
     let mut database = spawn_source_database().await;
     let client = database.client.as_mut().unwrap();
     let transaction = client.transaction().await.unwrap();
@@ -2226,6 +2234,8 @@ async fn schema_change_capture_ignores_unrelated_table_metadata() {
         where s.schemaname = 'etl' and p.prorettype <> 'pg_catalog.event_trigger'::regtype";
     let alter_publication = "alter publication capture_scope_pub set (publish = 'insert')";
 
+    // WHEN: ALTER PUBLICATION runs before and after creating 20 unrelated
+    // tables.
     let initial: i64 = transaction.query_one(helper_calls, &[]).await.unwrap().get(0);
     transaction.batch_execute(alter_publication).await.unwrap();
     let before_unrelated: i64 = transaction.query_one(helper_calls, &[]).await.unwrap().get(0);
@@ -2240,6 +2250,8 @@ async fn schema_change_capture_ignores_unrelated_table_metadata() {
     transaction.batch_execute(alter_publication).await.unwrap();
     let after_unrelated: i64 = transaction.query_one(helper_calls, &[]).await.unwrap().get(0);
 
+    // THEN: the number of ETL helper calls per ALTER PUBLICATION does not
+    // increase.
     assert_eq!(before_unrelated - initial, after_unrelated - before_unrelated);
 
     transaction.commit().await.unwrap();
@@ -2250,6 +2262,8 @@ async fn schema_change_capture_ignores_unrelated_table_metadata() {
 #[tokio::test(flavor = "multi_thread")]
 async fn schema_change_capture_does_not_lock_other_published_tables() {
     for partitioned in [false, true] {
+        // GIVEN: two published tables (or partition siblings) where one holds
+        // ACCESS EXCLUSIVE.
         let database = spawn_source_database().await;
         let client = database.client.as_ref().unwrap();
         let setup = if partitioned {
@@ -2273,6 +2287,7 @@ async fn schema_change_capture_does_not_lock_other_published_tables() {
         let lock = holder.transaction().await.unwrap();
         lock.batch_execute("lock table test.lock_other in access exclusive mode").await.unwrap();
 
+        // WHEN: table and publication DDL run under a 1s lock_timeout.
         let result = client
             .batch_execute(
                 "set lock_timeout = '1s';
@@ -2284,12 +2299,12 @@ async fn schema_change_capture_does_not_lock_other_published_tables() {
         lock.rollback().await.unwrap();
         result.unwrap();
 
+        // THEN: both commands succeed without blocking and emit accurate
+        // default expressions.
         let (stream, _) = replication
             .start_logical_replication("lock_pub", &slot_name, slot.consistent_point, None)
             .await
             .unwrap();
-        // The table DDL describes its target; the publication DDL describes
-        // both.
         let messages = collect_ddl_messages(stream, 3).await;
         for message in messages {
             let value = message["columns"]
@@ -2308,6 +2323,8 @@ async fn schema_change_capture_does_not_lock_other_published_tables() {
 /// table, including object references, without evaluating any default.
 #[tokio::test(flavor = "multi_thread")]
 async fn schema_change_capture_default_deparsing_matches_postgres() {
+    // GIVEN: a published table with diverse defaults including a volatile
+    // function that raises.
     let database = spawn_source_database().await;
     let client = database.client.as_ref().unwrap();
     client
@@ -2344,8 +2361,7 @@ async fn schema_change_capture_default_deparsing_matches_postgres() {
     let slot_name = test_slot_name("default_deparsing");
     let slot = replication.create_slot(&slot_name, &Default::default()).await.unwrap();
 
-    // Any captured command describes every column's current default; this one
-    // leaves all defaults unchanged.
+    // WHEN: a DDL statement triggers capture without changing any default.
     client
         .batch_execute("alter table test.default_expressions alter column literal set not null")
         .await
@@ -2368,8 +2384,8 @@ async fn schema_change_capture_default_deparsing_matches_postgres() {
         .collect::<Vec<_>>();
     assert_eq!(expected.len(), 11);
 
-    // A capture failure, such as evaluating the raising default, would emit
-    // no message and time out here.
+    // THEN: the captured defaults match pg_get_expr without evaluating the
+    // raising default.
     let (stream, _) = replication
         .start_logical_replication(
             "default_expressions_pub",
@@ -2401,6 +2417,8 @@ async fn schema_change_capture_default_deparsing_matches_postgres() {
 /// Read committed capture sees DDL committed after an earlier statement.
 #[tokio::test(flavor = "multi_thread")]
 async fn schema_change_capture_read_committed_refreshes_visibility() {
+    // GIVEN: an open READ COMMITTED transaction that has already queried
+    // pg_attribute.
     let database = spawn_source_database().await;
     let table_name = test_table_name("ddl_capture_visibility");
     let table_id =
@@ -2425,6 +2443,8 @@ async fn schema_change_capture_read_committed_refreshes_visibility() {
         .await
         .unwrap();
 
+    // WHEN: another session adds a column and commits, then the first
+    // transaction runs ALTER TABLE.
     database
         .alter_table(
             table_name.clone(),
@@ -2442,6 +2462,8 @@ async fn schema_change_capture_read_committed_refreshes_visibility() {
         .unwrap();
     transaction.commit().await.unwrap();
 
+    // THEN: the second snapshot sees both the newly added column and the
+    // updated default.
     let messages = collect_queued_ddl_messages(
         &mut replication,
         "ddl_visibility_pub",
@@ -2471,6 +2493,8 @@ async fn schema_change_capture_read_committed_refreshes_visibility() {
 /// deferrable primary keys.
 #[tokio::test(flavor = "multi_thread")]
 async fn replica_identity_excludes_include_columns_and_deferrable_primary_keys() {
+    // GIVEN: a table with a USING INDEX INCLUDE column and a table with a
+    // DEFERRABLE primary key.
     let database = spawn_source_database().await;
     let client = database.client.as_ref().unwrap();
     let include_table = test_table_name("replident_include");
@@ -2489,19 +2513,23 @@ async fn replica_identity_excludes_include_columns_and_deferrable_primary_keys()
         .await
         .unwrap();
 
+    // WHEN: describe_table_identity inspects both tables.
     let include_identity: JsonValue = client
         .query_one("select etl.describe_table_identity($1::text::regclass)", &[&include_sql])
         .await
         .unwrap()
         .get(0);
-    assert_eq!(include_identity["relreplident"], "i");
-    assert_eq!(include_identity["replica_identity_attnums"], serde_json::json!([2]));
-
     let deferrable_identity: JsonValue = client
         .query_one("select etl.describe_table_identity($1::text::regclass)", &[&deferrable_sql])
         .await
         .unwrap()
         .get(0);
+
+    // THEN: replica_identity_attnums omits the INCLUDE column and is empty for
+    // the deferrable key.
+    assert_eq!(include_identity["relreplident"], "i");
+    assert_eq!(include_identity["replica_identity_attnums"], serde_json::json!([2]));
+
     assert_eq!(deferrable_identity["relreplident"], "d");
     assert_eq!(deferrable_identity["primary_key_attnums"], serde_json::json!([1]));
     assert_eq!(deferrable_identity["primary_key_condeferrable"], true);
@@ -2512,6 +2540,7 @@ async fn replica_identity_excludes_include_columns_and_deferrable_primary_keys()
 /// their leaf partitions retain the captured add-time literal.
 #[tokio::test(flavor = "multi_thread")]
 async fn partitioned_table_reports_no_missing_value_expression() {
+    // GIVEN: a partitioned root and leaf with one existing row.
     let database = spawn_source_database().await;
     let client = database.client.as_ref().unwrap();
     let root = test_table_name("partitioned_missing_root");
@@ -2519,6 +2548,8 @@ async fn partitioned_table_reports_no_missing_value_expression() {
     let root_sql = root.as_quoted_identifier();
     let leaf_sql = leaf.as_quoted_identifier();
 
+    // WHEN: a column is added with default 1 and altered to default 2 on the
+    // root.
     client
         .batch_execute(&format!(
             "create table {root_sql} (id integer not null) partition by range (id);
@@ -2550,6 +2581,8 @@ async fn partitioned_table_reports_no_missing_value_expression() {
         .unwrap()
         .get(0);
 
+    // THEN: the root reports no missing_value_expression while the leaf retains
+    // 1.
     assert_eq!(root_missing, None);
     assert_eq!(leaf_missing.as_deref(), Some("1"));
 }
@@ -2559,6 +2592,8 @@ async fn partitioned_table_reports_no_missing_value_expression() {
 #[tokio::test(flavor = "multi_thread")]
 async fn partition_primary_key_metadata_is_table_local() {
     for parent_only in [false, true] {
+        // GIVEN: an attached leaf partition with reordered columns and either a
+        // local or parent-only PK.
         let database = spawn_source_database().await;
         let root = test_table_name("local_partition_pk");
         let leaf = test_table_name("local_partition_pk_leaf");
@@ -2591,6 +2626,7 @@ async fn partition_primary_key_metadata_is_table_local() {
                 .get(0),
         );
 
+        // WHEN: the leaf's copy schema and identity metadata are read.
         let mut replication = PgReplicationClient::connect(database.config.clone()).await.unwrap();
         let (transaction, _) = replication
             .create_table_copy_slot(
@@ -2603,6 +2639,8 @@ async fn partition_primary_key_metadata_is_table_local() {
         let (schema, _) = transaction.get_table_schema_with_identity(leaf_id).await.unwrap();
         transaction.commit().await.unwrap();
 
+        // THEN: the leaf reports only its own key in leaf attnum order, or
+        // empty for parent-only.
         let mut primary_key = schema
             .column_schemas
             .iter()
@@ -2616,8 +2654,6 @@ async fn partition_primary_key_metadata_is_table_local() {
         assert_eq!(primary_key, expected);
         assert!(!schema.primary_key_deferrable);
 
-        // The decoder builds row identity from this source-to-decoder payload
-        // field, so it must use the leaf's own key in leaf attribute numbers.
         let replica_identity: JsonValue = database
             .client
             .as_ref()
@@ -2641,6 +2677,8 @@ async fn partition_primary_key_metadata_is_table_local() {
 #[tokio::test(flavor = "multi_thread")]
 async fn schema_change_messages_refresh_partition_subtree() {
     for mode in ["root", "leaves", "mixed"] {
+        // GIVEN: a nested partition tree published via root, leaves, or mixed
+        // publications.
         let database = spawn_source_database().await;
         let tree =
             create_nested_partition_hierarchy(&database, test_table_name("ddl_tree_refresh")).await;
@@ -2690,6 +2728,8 @@ async fn schema_change_messages_refresh_partition_subtree() {
         let slot_name = test_slot_name("ddl_tree_refresh");
         let slot = client.create_slot(&slot_name, &Default::default()).await.unwrap();
 
+        // WHEN: ALTER TABLE SET DEFAULT runs on the root, middle partition, and
+        // one leaf in turn.
         let subtrees = [
             targets.clone(),
             vec![tree.p_2026_table_id, tree.p_2026_01_table_id, tree.p_2026_02_table_id],
@@ -2714,6 +2754,8 @@ async fn schema_change_messages_refresh_partition_subtree() {
                 .unwrap();
         }
 
+        // THEN: each phase emits snapshots only for the published targets in
+        // that altered subtree.
         let expected_count = phases.iter().map(|(_, _, ids)| ids.len()).sum();
         let messages = collect_queued_ddl_messages(
             &mut client,
@@ -2735,7 +2777,6 @@ async fn schema_change_messages_refresh_partition_subtree() {
 
             for message in batch {
                 let id = TableId::new(u32::try_from(message["oid"].as_u64().unwrap()).unwrap());
-                // Recursive SET DEFAULT reaches every table in the subtree.
                 let data = message["columns"]
                     .as_array()
                     .unwrap()
@@ -2765,6 +2806,8 @@ async fn schema_change_messages_refresh_partition_subtree() {
 /// through multiple inheritance paths.
 #[tokio::test(flavor = "multi_thread")]
 async fn schema_change_messages_capture_inherited_leaf() {
+    // GIVEN: a diamond inheritance graph where only the leaf table is
+    // published.
     let database = spawn_source_database().await;
     let root = test_table_name("ddl_diamond_root");
     let left = test_table_name("ddl_diamond_left");
@@ -2793,6 +2836,8 @@ async fn schema_change_messages_capture_inherited_leaf() {
     let slot_name = test_slot_name("ddl_diamond");
     let slot = client.create_slot(&slot_name, &Default::default()).await.unwrap();
 
+    // WHEN: a column is added on the root, followed by a marker DDL on the
+    // leaf.
     database
         .run_sql(&format!(
             "alter table {} add column score integer default 7",
@@ -2800,7 +2845,6 @@ async fn schema_change_messages_capture_inherited_leaf() {
         ))
         .await
         .unwrap();
-    // A later leaf-only command marks the end of the parent's messages.
     database
         .run_sql(&format!(
             "alter table {} alter column id set default 1",
@@ -2809,6 +2853,8 @@ async fn schema_change_messages_capture_inherited_leaf() {
         .await
         .unwrap();
 
+    // THEN: the parent DDL emits exactly one snapshot for the leaf before the
+    // marker snapshot.
     let (stream, _) = client
         .start_logical_replication("ddl_diamond_pub", &slot_name, slot.consistent_point, None)
         .await
@@ -3058,6 +3104,8 @@ async fn schema_change_messages_emit_and_decode_set_and_drop_default() {
 /// column representation during initial copy.
 #[tokio::test(flavor = "multi_thread")]
 async fn schema_change_messages_capture_missing_values_separately_from_defaults() {
+    // GIVEN: a published table with one row in a session using non-default
+    // display settings.
     let database = spawn_source_database().await;
     let table_name = test_table_name("ddl_missing_values");
     let table = table_name.as_quoted_identifier();
@@ -3069,8 +3117,6 @@ async fn schema_change_messages_capture_missing_values_separately_from_defaults(
     let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("ddl_missing_values_slot");
     let slot = client.create_slot(&slot_name, &Default::default()).await.unwrap();
-    // Customer display settings must not round floats or change metadata
-    // compared with the canonical formats used by initial copy.
     database
         .client
         .as_ref()
@@ -3082,6 +3128,9 @@ async fn schema_change_messages_capture_missing_values_separately_from_defaults(
         )
         .await
         .unwrap();
+
+    // WHEN: columns of each supported type are added with one default and
+    // altered to another.
     database
         .run_sql(&format!(
             "alter table {table}
@@ -3115,6 +3164,8 @@ async fn schema_change_messages_capture_missing_values_separately_from_defaults(
         .await
         .unwrap();
 
+    // THEN: captured missing values match stored row values, match initial
+    // copy, and leave session settings untouched.
     let messages =
         collect_queued_ddl_messages(&mut client, publication, &slot_name, slot.consistent_point, 1)
             .await;
@@ -3233,6 +3284,7 @@ async fn schema_change_messages_capture_missing_values_separately_from_defaults(
 /// so the captured add-time default must still denote that stored value.
 #[tokio::test(flavor = "multi_thread")]
 async fn schema_change_messages_keep_backfill_default_after_heap_rewrite() {
+    // GIVEN: a published table containing an existing row.
     let database = spawn_source_database().await;
     let table_name = test_table_name("ddl_rewrite_backfill");
     let table = table_name.as_quoted_identifier();
@@ -3244,6 +3296,8 @@ async fn schema_change_messages_keep_backfill_default_after_heap_rewrite() {
     let slot_name = test_slot_name("ddl_rewrite_backfill");
     let slot = client.create_slot(&slot_name, &Default::default()).await.unwrap();
 
+    // WHEN: a NOT NULL column with default 15 is added in the same statement as
+    // a table rewrite.
     database
         .run_sql(&format!(
             "alter table {table} add column score integer not null default 15,
@@ -3252,13 +3306,11 @@ async fn schema_change_messages_keep_backfill_default_after_heap_rewrite() {
         .await
         .unwrap();
 
-    // The slot retains the DDL. Start this feedback-free reader only
-    // when ready to consume, avoiding idle sender timeouts during setup.
-    let (stream, _) = client
-        .start_logical_replication(publication, &slot_name, slot.consistent_point, None)
-        .await
-        .unwrap();
-    let messages = collect_ddl_messages(stream, 1).await;
+    // THEN: initial_default_expression falls back to 15 and matches the
+    // rewritten row value.
+    let messages =
+        collect_queued_ddl_messages(&mut client, publication, &slot_name, slot.consistent_point, 1)
+            .await;
     let columns = column_schemas_from_ddl_message(&messages[0]);
     let score = columns.iter().find(|column| column.name == "score").unwrap();
     let initial_default = score.initial_default_expression().unwrap();
@@ -3277,6 +3329,8 @@ async fn schema_change_messages_keep_backfill_default_after_heap_rewrite() {
 /// emits the snapshot for columns whose missing values it cannot render.
 #[tokio::test(flavor = "multi_thread")]
 async fn schema_change_messages_do_not_evaluate_custom_missing_value_casts() {
+    // GIVEN: a published table and a custom enum whose JSON cast raises an
+    // exception.
     let database = spawn_source_database().await;
     let table_name = test_table_name("ddl_custom_cast");
     database.create_table(table_name.clone(), true, &[("value", "integer")]).await.unwrap();
@@ -3305,6 +3359,8 @@ async fn schema_change_messages_do_not_evaluate_custom_missing_value_casts() {
     let slot_name = test_slot_name("ddl_custom_cast");
     let slot = client.create_slot(&slot_name, &Default::default()).await.unwrap();
 
+    // WHEN: scalar and array columns of that custom type are added with
+    // defaults.
     database
         .run_sql(&format!(
             "alter table {} add column custom public.ddl_custom default 'safe',
@@ -3314,8 +3370,7 @@ async fn schema_change_messages_do_not_evaluate_custom_missing_value_casts() {
         .await
         .unwrap();
 
-    // Check that the dangerous conversion is armed, rather than relying on a
-    // custom type that PostgreSQL would never convert through the cast.
+    // Verify direct array_to_json would have fired the untrusted cast.
     let conversion = database
         .client
         .as_ref()
@@ -3328,8 +3383,8 @@ async fn schema_change_messages_do_not_evaluate_custom_missing_value_casts() {
         .await;
     assert_eq!(conversion.unwrap_err().as_db_error().unwrap().code().code(), "P0001");
 
-    // Capture fails open, so only an emitted snapshot proves the cast was
-    // never evaluated. Unsupported types keep the default fallback.
+    // THEN: the snapshot still emits without calling the cast and leaves
+    // missing_value_expression None.
     let (stream, _) = client
         .start_logical_replication("ddl_custom_cast_pub", &slot_name, slot.consistent_point, None)
         .await
@@ -3512,22 +3567,20 @@ async fn single_alter_table_statement_with_multiple_subcommands_emits_one_ddl_me
 #[tokio::test(flavor = "multi_thread")]
 async fn schema_change_capture_can_be_skipped_disabled_or_fail_open() {
     init_test_tracing();
-    let database = spawn_source_database().await;
 
+    // GIVEN: a published table and a replication slot.
+    let database = spawn_source_database().await;
     let table_name = test_table_name("ddl_skip_log");
     database.create_table(table_name.clone(), true, &[("name", "text not null")]).await.unwrap();
     let table = table_name.as_quoted_identifier();
-
     let publication_name = "ddl_skip_log_pub";
     database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
-
     let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("ddl_skip_log_slot");
     let slot = client.create_slot(&slot_name, &Default::default()).await.unwrap();
-    // A session opt-out, a disabled trigger, and a failing capture each let
-    // the DDL commit without emitting a snapshot. Renaming a helper updates
-    // its catalog row, which also invalidates any plan the trigger cached in
-    // this session, so capture fails regardless of earlier captures.
+
+    // WHEN: DDL runs under skip_ddl_log, a disabled trigger, a renamed helper,
+    // and an invalid setting.
     for sql in [
         "set supabase_etl.skip_ddl_log = 'true'".to_owned(),
         format!("alter table {table} add column skipped text"),
@@ -3542,8 +3595,6 @@ async fn schema_change_capture_can_be_skipped_disabled_or_fail_open() {
         "alter function etl.describe_table_publication_columns_moved(oid, text) rename to \
          describe_table_publication_columns"
             .to_owned(),
-        // An unrecognized skip_ddl_log string must not fail customer DDL or
-        // suppress capture.
         "set supabase_etl.skip_ddl_log = 'invalid'".to_owned(),
         format!("alter table {table} add column captured text"),
         "reset supabase_etl.skip_ddl_log".to_owned(),
@@ -3551,8 +3602,8 @@ async fn schema_change_capture_can_be_skipped_disabled_or_fail_open() {
         database.run_sql(&sql).await.unwrap();
     }
 
-    // Messages arrive in WAL order, so the first one proves the earlier DDL
-    // emitted nothing.
+    // THEN: all DDL commits and only the final captured column emits a
+    // snapshot.
     let messages = collect_queued_ddl_messages(
         &mut client,
         publication_name,
@@ -3571,8 +3622,9 @@ async fn schema_change_capture_can_be_skipped_disabled_or_fail_open() {
 #[tokio::test(flavor = "multi_thread")]
 async fn schema_change_capture_opt_out_accepts_postgres_boolean_spellings() {
     init_test_tracing();
-    let database = spawn_source_database().await;
 
+    // GIVEN: a published table and a replication slot.
+    let database = spawn_source_database().await;
     let table_name = test_table_name("ddl_skip_spellings");
     database.create_table(table_name.clone(), true, &[("name", "text")]).await.unwrap();
     let table = table_name.as_quoted_identifier();
@@ -3582,6 +3634,8 @@ async fn schema_change_capture_opt_out_accepts_postgres_boolean_spellings() {
     let slot_name = test_slot_name("ddl_skip_spellings");
     let slot = client.create_slot(&slot_name, &Default::default()).await.unwrap();
 
+    // WHEN: DDL runs under each PostgreSQL true spelling, then under an invalid
+    // spelling.
     let spellings = ["t", "TRUE", "tru", " yes ", "Y", "on", "1"];
     for (index, spelling) in spellings.iter().enumerate() {
         database.run_sql(&format!("set supabase_etl.skip_ddl_log = '{spelling}'")).await.unwrap();
@@ -3593,16 +3647,16 @@ async fn schema_change_capture_opt_out_accepts_postgres_boolean_spellings() {
     database.run_sql("set supabase_etl.skip_ddl_log = 'maybe'").await.unwrap();
     database.run_sql(&format!("alter table {table} add column captured text")).await.unwrap();
 
-    // The slot retains the DDL. Start this feedback-free reader only
-    // when ready to consume, avoiding idle sender timeouts during setup.
-    let (stream, _) = client
-        .start_logical_replication(publication_name, &slot_name, slot.consistent_point, None)
-        .await
-        .unwrap();
-
-    // Messages arrive in WAL order, so the first one proves every opted-out
-    // DDL emitted nothing.
-    let messages = collect_ddl_messages(stream, 1).await;
+    // THEN: every true spelling suppresses capture and the invalid spelling
+    // still captures.
+    let messages = collect_queued_ddl_messages(
+        &mut client,
+        publication_name,
+        &slot_name,
+        slot.consistent_point,
+        1,
+    )
+    .await;
     let columns = column_schemas_from_ddl_message(&messages[0]);
     assert_eq!(columns.last().unwrap().name, "captured");
     assert_eq!(columns.len(), 3 + spellings.len());

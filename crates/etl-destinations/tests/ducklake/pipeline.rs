@@ -1078,6 +1078,7 @@ async fn schema_change_add_column() {
 async fn ddl_defaults_preserve_existing_rows_and_future_defaults() {
     init_test_tracing();
 
+    // GIVEN: a synced table with one existing row before any column additions.
     let mut database = spawn_source_database().await;
     let table_name = test_table_name("ordered_ddl_defaults");
     let table_id =
@@ -1106,6 +1107,8 @@ async fn ddl_defaults_preserve_existing_rows_and_future_defaults() {
         .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
         .await;
 
+    // WHEN: columns are added with default 1, altered to 2 or dropped, and a
+    // new row is inserted.
     let transaction = database.begin_transaction().await;
     for clauses in [
         "add column ordered_value integer default 1",
@@ -1125,10 +1128,11 @@ async fn ddl_defaults_preserve_existing_rows_and_future_defaults() {
     drop(destination);
     checkpoint_lake(&lake.catalog_url, &lake.data_url);
 
+    // THEN: the pre-DDL row keeps 1 while replicated and native post-DDL
+    // inserts use the final default.
     let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
     let target =
         qualified_lake_table_name(&table_name_to_ducklake_table_name(&table_name).unwrap());
-    // A native insert independently checks each final destination default.
     conn.execute_batch(&format!("insert into {target} (id) values (3)")).unwrap();
     let mut statement = conn
         .prepare(&format!(

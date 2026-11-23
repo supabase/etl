@@ -1383,8 +1383,13 @@ mod tests {
     /// Malformed DDL payloads fail without panicking and retain their cause.
     #[test]
     fn schema_change_message_rejects_malformed_json_with_source() {
+        // GIVEN: truncated, non-object, and non-ASCII malformed JSON payloads.
         for payload in ["", "{", "[]", "null", "{\"columns\": [", "{\"relname\": \"旧"] {
+            // WHEN: the payload is parsed as a schema change message.
             let error = payload.parse::<SchemaChangeMessage>().unwrap_err();
+
+            // THEN: parsing returns a ConversionError with the underlying serde
+            // cause.
             assert_eq!(error.kind(), ErrorKind::ConversionError);
             assert!(std::error::Error::source(&error).is_some());
         }
@@ -1394,24 +1399,42 @@ mod tests {
     /// payloads.
     #[test]
     fn column_schema_message_preserves_legacy_and_captured_missing_values() {
+        // GIVEN: a legacy column payload without missing_value_expression.
         let legacy = serde_json::json!({
             "attname": "score", "attnum": 2, "atttypid": Type::INT4.oid(),
             "atttypmod": -1, "formatted_type": "integer", "attnotnull": false,
             "default_expression": "2"
         });
+
+        // WHEN: the legacy payload is deserialized.
         let parsed: ColumnSchemaMessage = serde_json::from_value(legacy.clone()).unwrap();
+
+        // THEN: missing_value_expression defaults to None.
         assert!(parsed.missing_value_expression.is_none());
+
         for expression in ["1", "null"] {
+            // GIVEN: a current payload carrying a string
+            // missing_value_expression.
             let mut current = legacy.clone();
             current["missing_value_expression"] = serde_json::json!(expression);
+
+            // WHEN: the payload is deserialized and converted into a
+            // ColumnSchema.
             let parsed: ColumnSchemaMessage = serde_json::from_value(current).unwrap();
             let columns = build_column_schemas(vec![parsed], vec![]);
+
+            // THEN: both default_expression and missing_value_expression are
+            // preserved.
             assert_eq!(columns[0].default_expression.as_deref(), Some("2"));
             assert_eq!(columns[0].missing_value_expression.as_deref(), Some(expression));
         }
+
+        // GIVEN: non-string missing_value_expression values.
         for invalid in [serde_json::json!(1), serde_json::json!([]), serde_json::json!({})] {
             let mut current = legacy.clone();
             current["missing_value_expression"] = invalid;
+
+            // WHEN / THEN: deserialization rejects the invalid field type.
             assert!(serde_json::from_value::<ColumnSchemaMessage>(current).is_err());
         }
     }
@@ -1679,6 +1702,8 @@ mod tests {
             ("d", Some(vec![3]), vec![3]),
             ("i", Some(vec![3]), vec![3]),
         ] {
+            // GIVEN: a legacy or resolved identity payload for each
+            // replica-identity mode.
             let mut payload = serde_json::json!({
                 "primary_key_attnums": [1],
                 "relreplident": mode,
@@ -1687,12 +1712,20 @@ mod tests {
             if let Some(resolved) = resolved {
                 payload["replica_identity_attnums"] = serde_json::json!(resolved);
             }
+
+            // WHEN: the payload is deserialized into IdentityMessage.
             let identity: IdentityMessage = serde_json::from_value(payload).unwrap();
+
+            // THEN: explicit resolved keys win and legacy payloads normalize to
+            // protocol keys.
             assert_eq!(identity.replica_identity_attnums, expected);
             assert!(!identity.primary_key_condeferrable);
         }
 
+        // GIVEN: a deferrable primary key with default replica identity in
+        // either payload shape.
         for keys in ["replica_identity_attnums", "replica_identity_index_attnums"] {
+            // WHEN: the payload is deserialized.
             let identity: IdentityMessage = serde_json::from_value(serde_json::json!({
                 "primary_key_attnums": [1],
                 "primary_key_condeferrable": true,
@@ -1700,6 +1733,9 @@ mod tests {
                 keys: [],
             }))
             .unwrap();
+
+            // THEN: deferrability is kept and protocol identity keys remain
+            // empty.
             assert!(identity.primary_key_condeferrable);
             assert!(identity.replica_identity_attnums.is_empty());
         }
@@ -1708,6 +1744,7 @@ mod tests {
     /// Missing explicit-index metadata must not silently become an empty key.
     #[test]
     fn identity_payload_rejects_missing_or_malformed_keys() {
+        // GIVEN: an explicit-index identity payload missing both key arrays.
         for keys in [None, Some(serde_json::Value::Null)] {
             let mut payload = serde_json::json!({
                 "primary_key_attnums": [1],
@@ -1716,8 +1753,13 @@ mod tests {
             if let Some(keys) = keys {
                 payload["replica_identity_attnums"] = keys;
             }
+
+            // WHEN / THEN: deserialization fails instead of defaulting to an
+            // empty key.
             assert!(serde_json::from_value::<IdentityMessage>(payload).is_err());
         }
+
+        // GIVEN: out-of-range or non-integer replica identity attnums.
         for keys in [
             serde_json::json!(["bad"]),
             serde_json::json!([0]),
@@ -1730,6 +1772,8 @@ mod tests {
                 "relreplident": "i",
                 "replica_identity_attnums": keys,
             });
+
+            // WHEN / THEN: deserialization rejects the invalid column number.
             assert!(serde_json::from_value::<IdentityMessage>(payload).is_err());
         }
     }

@@ -1401,6 +1401,8 @@ async fn ddl_metric_labels_preserve_supported_tags_and_bound_unknown_tags() {
 #[tokio::test(flavor = "multi_thread")]
 async fn uncaptured_column_swap_stops_replication_before_writing_rows() {
     init_test_tracing();
+
+    // GIVEN: a synced pipeline replicating a two-column table.
     let (database, table_name, table_id, _store, destination, pipeline, _pipeline_id, _publication) =
         create_database_and_sync_done_pipeline_with_table(
             "uncaptured_swap",
@@ -1409,8 +1411,8 @@ async fn uncaptured_column_swap_stops_replication_before_writing_rows() {
         .await;
     let table = table_name.as_quoted_identifier();
 
-    // Renaming a helper makes capture fail open, so the swap commits without
-    // a snapshot and the next relation disagrees with the stored order.
+    // WHEN: col_a and col_b are swapped while DDL capture fails open, then a
+    // row is inserted.
     database
         .run_sql(
             "alter function etl.describe_table_publication_columns(oid, text) rename to \
@@ -1443,6 +1445,8 @@ async fn uncaptured_column_swap_stops_replication_before_writing_rows() {
         .await
         .unwrap();
 
+    // THEN: replication fails with CorruptedTableSchema before writing the
+    // inserted row.
     let error = wait_for_pipeline_error(&pipeline).await;
 
     assert_eq!(error.kind(), ErrorKind::CorruptedTableSchema);
