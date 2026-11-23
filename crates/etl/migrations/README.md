@@ -79,9 +79,11 @@ ETL role itself; tables changed that way may need resynchronization.
 
 Capture never blocks customer DDL. A capture error raises a warning and lets
 the DDL commit without a snapshot. ETL does not learn that a snapshot is
-missing: a later relation with unknown columns fails, but reordered or retyped
-columns are only reported by `etl_relation_schema_mismatches_total`, and rows
-keep decoding with the stored schema. Messages are emitted outside the
+missing until a later relation disagrees with the stored schema: unknown
+columns, a different column order, or a different type stop replication before
+the affected rows are written, and the table needs resynchronization.
+Text-compatible type and modifier changes are only reported by
+`etl_relation_schema_mismatches_total`. Messages are emitted outside the
 exception block, because a subtransaction XID would change their decoded order
 relative to DML in the same transaction. To turn capture
 off, the owner or a superuser runs:
@@ -122,7 +124,8 @@ identity masks still come from PostgreSQL's `RELATION` messages: a DDL snapshot
 leaves a pending relation, and the next real relation or row materializes it.
 Each real relation is compared with the installed decoder's column order, names,
 normalized types, and modifiers; a mismatch is logged and counted in
-`etl_relation_schema_mismatches_total`. Unknown type OIDs retain the existing
+`etl_relation_schema_mismatches_total`, and one that would misalign values
+stops replication. Unknown type OIDs retain the existing
 text fallback.
 
 Legacy identity fields are normalized during decoding; the emitted

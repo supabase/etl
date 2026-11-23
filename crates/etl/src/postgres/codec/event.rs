@@ -553,6 +553,15 @@ impl RelationSchemaMismatchKind {
             Self::TypeModifier => "type_modifier",
         }
     }
+
+    /// Returns whether decoding with the stored schema would put values in
+    /// the wrong columns or decode them with the wrong type.
+    pub(crate) fn misaligns_values(self) -> bool {
+        match self {
+            Self::ColumnCount | Self::NameOrder | Self::Type => true,
+            Self::TextCompatibleType | Self::TypeModifier => false,
+        }
+    }
 }
 
 /// The first position where a relation message disagrees with the decoder.

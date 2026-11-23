@@ -343,7 +343,8 @@ pub(crate) fn register_metrics() {
             Unit::Count,
             "Total number of relation messages whose column order, types, or type modifiers \
              disagree with the stored table schema, labeled by worker_type and mismatch_kind. \
-             Replication continues with the stored schema."
+             Column count, order, and type mismatches stop replication; text-compatible type and \
+             modifier mismatches continue with the stored schema."
         );
 
         describe_histogram!(

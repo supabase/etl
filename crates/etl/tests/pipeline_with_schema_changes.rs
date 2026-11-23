@@ -2,6 +2,7 @@
 
 use etl::{
     data::{ArrayCell, Cell, Date},
+    error::ErrorKind,
     event::{Event, EventType},
     schema::{ColumnSchema, SnapshotId, TableId, TableSchema},
     store::TableStateType,
@@ -12,6 +13,7 @@ use etl::{
         notifying_store::NotifyingStore,
         pipeline::{
             create_database_and_sync_done_pipeline_with_table, create_pipeline, random_pipeline_id,
+            wait_for_pipeline_error,
         },
         schema::{
             assert_replicated_schema_column_names_types, assert_schema_snapshots_ordering,
@@ -1392,4 +1394,63 @@ async fn ddl_metric_labels_preserve_supported_tags_and_bound_unknown_tags() {
         let value: u64 = matching[0].rsplit_once(' ').unwrap().1.parse().unwrap();
         assert_eq!(value, count);
     }
+}
+
+/// A column swap whose snapshot was never captured stops replication before
+/// the stale decoder writes source values into the wrong columns.
+#[tokio::test(flavor = "multi_thread")]
+async fn uncaptured_column_swap_stops_replication_before_writing_rows() {
+    init_test_tracing();
+    let (database, table_name, table_id, _store, destination, pipeline, _pipeline_id, _publication) =
+        create_database_and_sync_done_pipeline_with_table(
+            "uncaptured_swap",
+            &[("col_a", "integer"), ("col_b", "integer")],
+        )
+        .await;
+    let table = table_name.as_quoted_identifier();
+
+    // Renaming a helper makes capture fail open, so the swap commits without
+    // a snapshot and the next relation disagrees with the stored order.
+    database
+        .run_sql(
+            "alter function etl.describe_table_publication_columns(oid, text) rename to \
+             describe_table_publication_columns_moved",
+        )
+        .await
+        .unwrap();
+    database
+        .client
+        .as_ref()
+        .unwrap()
+        .batch_execute(&format!(
+            "begin;
+             alter table {table} rename column col_a to col_tmp;
+             alter table {table} rename column col_b to col_a;
+             alter table {table} rename column col_tmp to col_b;
+             commit"
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(
+            "alter function etl.describe_table_publication_columns_moved(oid, text) rename to \
+             describe_table_publication_columns",
+        )
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!("insert into {table} (col_a, col_b) values (111, 222)"))
+        .await
+        .unwrap();
+
+    let error = wait_for_pipeline_error(&pipeline).await;
+
+    assert_eq!(error.kind(), ErrorKind::CorruptedTableSchema);
+    let inserted_rows = destination
+        .get_events()
+        .await
+        .into_iter()
+        .filter(|event| matches!(event, Event::Insert(insert) if insert.replicated_table_schema.id() == table_id))
+        .count();
+    assert_eq!(inserted_rows, 0);
 }

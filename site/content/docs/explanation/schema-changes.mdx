@@ -494,9 +494,12 @@ PostgreSQL cache lookup.
 ETL combines stored schema snapshots with PostgreSQL `RELATION` messages to
 identify replicated columns. A column missing from a relation message can
 mean publication filtering or inconsistent schema history. ETL rejects unknown
-columns. It reports mismatches in tuple order, decoded types, or type modifiers
-with a warning and the `etl_relation_schema_mismatches_total` metric, then keeps
-decoding with the stored schema. A valid-looking subset still does not prove
+columns. Every mismatch in tuple order, decoded types, or type modifiers logs a
+warning and increments `etl_relation_schema_mismatches_total`. A different
+column count, column order, or type stops replication before the affected rows
+are written, because decoding would put values in the wrong columns; a
+text-compatible type or modifier change keeps decoding with the stored schema.
+A valid-looking subset still does not prove
 that the selected schema is correct, and custom source types retain their text
 fallback.
 

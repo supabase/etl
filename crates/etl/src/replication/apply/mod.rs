@@ -2868,7 +2868,10 @@ where
     /// schema.
     ///
     /// Logs and counts a relation whose column order or types disagree with
-    /// the materialized decoder, then installs the decoder unchanged.
+    /// the materialized decoder. A disagreement that would misalign decoded
+    /// values fails before the decoder is installed, so no affected row is
+    /// written or acknowledged; text-compatible type and modifier
+    /// differences keep decoding with the stored schema.
     async fn materialize_relation_schema(
         &mut self,
         table_id: TableId,
@@ -2879,8 +2882,8 @@ where
 
         // Masks are built by name, but tuples decode by position in the
         // relation's `attnum` order, so a stale snapshot can share names but
-        // not order or types. Mismatches are only observed for now, so the
-        // rate is known before they stop replication (PIPE-1283).
+        // not order or types. Capture fails open, so a DDL statement can
+        // commit without the snapshot that would have prevented this.
         let (replicated_table_schema, mismatch) =
             replicated_table_schema_from_relation(table_schema, relation)?;
         if let Some(mismatch) = mismatch {
@@ -2890,8 +2893,7 @@ where
                 snapshot_id = %replicated_table_schema.inner().snapshot_id,
                 mismatch_kind,
                 mismatch = %mismatch,
-                "relation message does not match the stored table schema, decoding with the \
-                 stored schema"
+                "relation message does not match the stored table schema"
             );
             counter!(
                 ETL_RELATION_SCHEMA_MISMATCHES_TOTAL,
@@ -2899,6 +2901,18 @@ where
                 MISMATCH_KIND_LABEL => mismatch_kind,
             )
             .increment(1);
+
+            if mismatch.kind().misaligns_values() {
+                bail!(
+                    ErrorKind::CorruptedTableSchema,
+                    "Relation message does not match the stored table schema",
+                    format!(
+                        "Table {table_id} at snapshot {}: {mismatch}. A schema change was \
+                         probably not captured; resynchronize the table",
+                        replicated_table_schema.inner().snapshot_id
+                    )
+                );
+            }
         }
 
         self.table_decoding_states
