@@ -78,3 +78,29 @@ where
         )
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use tokio_postgres::error::SqlState;
+
+    use super::for_each_simple_query_row;
+    use crate::test_utils::database::spawn_source_database;
+
+    /// A later query error takes precedence over the first row's visitor error
+    #[tokio::test(flavor = "multi_thread")]
+    async fn exclusive_simple_query_error_takes_precedence_over_visitor_error() {
+        let database = spawn_source_database().await;
+        let client = database.client.as_ref().unwrap();
+        let mut visited = false;
+
+        let error = for_each_simple_query_row(client, "select 1; select 1 / 0", |row| {
+            visited = true;
+            Err(row.try_get("missing_column").unwrap_err())
+        })
+        .await
+        .unwrap_err();
+
+        assert!(visited);
+        assert_eq!(error.code(), Some(&SqlState::DIVISION_BY_ZERO));
+    }
+}
