@@ -3412,6 +3412,48 @@ async fn schema_change_capture_can_be_skipped_disabled_or_fail_open() {
     assert_eq!(columns.len(), 6);
 }
 
+/// The session opt-out accepts every spelling PostgreSQL reads as true, and a
+/// malformed value leaves capture on without failing the DDL.
+#[tokio::test(flavor = "multi_thread")]
+async fn schema_change_capture_opt_out_accepts_postgres_boolean_spellings() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let table_name = test_table_name("ddl_skip_spellings");
+    database.create_table(table_name.clone(), true, &[("name", "text")]).await.unwrap();
+    let table = table_name.as_quoted_identifier();
+    let publication_name = "ddl_skip_spellings_pub";
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
+    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let slot_name = test_slot_name("ddl_skip_spellings");
+    let slot = client.create_slot(&slot_name, &Default::default()).await.unwrap();
+
+    let spellings = ["t", "TRUE", "tru", " yes ", "Y", "on", "1"];
+    for (index, spelling) in spellings.iter().enumerate() {
+        database.run_sql(&format!("set supabase_etl.skip_ddl_log = '{spelling}'")).await.unwrap();
+        database
+            .run_sql(&format!("alter table {table} add column skipped_{index} text"))
+            .await
+            .unwrap();
+    }
+    database.run_sql("set supabase_etl.skip_ddl_log = 'maybe'").await.unwrap();
+    database.run_sql(&format!("alter table {table} add column captured text")).await.unwrap();
+
+    // The slot retains the DDL. Start this feedback-free reader only
+    // when ready to consume, avoiding idle sender timeouts during setup.
+    let (stream, _) = client
+        .start_logical_replication(publication_name, &slot_name, slot.consistent_point, None)
+        .await
+        .unwrap();
+
+    // Messages arrive in WAL order, so the first one proves every opted-out
+    // DDL emitted nothing.
+    let messages = collect_ddl_messages(stream, 1).await;
+    let columns = column_schemas_from_ddl_message(&messages[0]);
+    assert_eq!(columns.last().unwrap().name, "captured");
+    assert_eq!(columns.len(), 3 + spellings.len());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn get_slot_state_returns_not_invalidated_for_healthy_slot() {
     init_test_tracing();

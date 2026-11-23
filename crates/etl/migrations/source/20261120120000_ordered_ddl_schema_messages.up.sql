@@ -409,9 +409,12 @@ declare
     v_msg_json pg_catalog.jsonb;
 begin
     -- A reset placeholder reads as an empty string. Never cast the value: an
-    -- invalid setting must not make customer DDL fail.
-    if pg_catalog.lower(pg_catalog.current_setting('supabase_etl.skip_ddl_log', true))
-       in ('on', 'true', 'yes', '1') then
+    -- invalid setting must not make customer DDL fail. The list mirrors the
+    -- true spellings PostgreSQL's boolean input accepts, including prefixes,
+    -- so values that opted out before this upgrade still do.
+    if pg_catalog.lower(pg_catalog.btrim(
+           pg_catalog.current_setting('supabase_etl.skip_ddl_log', true), E' \t\n\r\f\v'
+       )) in ('t', 'tr', 'tru', 'true', 'y', 'ye', 'yes', 'on', '1') then
         return;
     end if;
 
