@@ -8,7 +8,7 @@ use etl::{
 };
 
 /// Warns that a destination is intentionally skipping a column type change.
-#[cfg(any(feature = "bigquery", feature = "ducklake", feature = "snowflake"))]
+#[cfg(any(feature = "ducklake", feature = "snowflake"))]
 pub(crate) fn warn_unsupported_column_type_change(
     destination_name: &str,
     destination_table_id: impl std::fmt::Display,

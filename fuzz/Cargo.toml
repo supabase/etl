@@ -13,6 +13,11 @@ cargo-fuzz = true
 etl = { path = "../crates/etl", default-features = false, features = ["fuzzing", "tls-rustls-ring"] }
 libfuzzer-sys = "0.4.0"
 
+# This independent workspace uses the same PostgreSQL driver as the replicator.
+[patch.crates-io]
+sqlx-core = { git = "https://github.com/supabase/sqlx", rev = "ce568ad9091114be909747a2d906d93dfee2f098" }
+sqlx-postgres = { git = "https://github.com/supabase/sqlx", rev = "ce568ad9091114be909747a2d906d93dfee2f098" }
+
 [[bin]]
 name = "parse_bytea_hex_string"
 path = "fuzz_targets/parse_bytea_hex_string.rs"

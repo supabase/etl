@@ -5,7 +5,7 @@ export const siteConfig = {
   description:
     'A high-performance Postgres replication engine written in Rust. Embed it in your Rust application or run it as a standalone binary.',
   projectStatus:
-    'Supabase ETL is under active development. APIs and setup steps may change before the first stable release.',
+    'Supabase ETL is under active development. We are holding the first versioned release while breaking changes to APIs and setup are still frequent.',
   // Overridable so a fork, preview deployment, or custom domain does not bake in
   // supabase.github.io/etl. Keep the defaults in sync with `next.config.mjs`.
   origin: process.env.SITE_ORIGIN ?? 'https://supabase.github.io',

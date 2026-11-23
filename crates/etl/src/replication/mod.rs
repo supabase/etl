@@ -14,7 +14,8 @@ mod worker_type;
 #[cfg(feature = "benchmarking")]
 pub(crate) use apply::CdcIngestionMetrics;
 pub(crate) use apply::{
-    ApplyLoop, ApplyLoopResult, ApplyWorkerContext, TableSyncWorkerContext, WorkerContext,
+    ApplyLoop, ApplyLoopResult, ApplyWorkerContext, DEFAULT_WAL_SENDER_TIMEOUT,
+    TableSyncWorkerContext, WorkerContext,
 };
 pub(crate) use decoding_state::{PreviousRelationMasks, TableDecodingState};
 pub(crate) use durability::DurabilityMonitor;

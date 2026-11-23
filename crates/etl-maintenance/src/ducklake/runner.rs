@@ -18,7 +18,7 @@ use etl::{
     etl_error,
 };
 use etl_config::{
-    ducklake_catalog_metadata_connect_options, libpq_tcp_host,
+    DUCKLAKE_CATALOG_ACQUIRE_TIMEOUT, ducklake_catalog_metadata_connect_options, libpq_tcp_host,
     shared::{
         DuckLakeTableName as DuckLakeMaintenanceTableName, DuckLakeWriterConfig,
         validate_ducklake_table_namespace,
@@ -1648,7 +1648,7 @@ pub async fn run_maintenance_once(
         })?;
     let direct_pg_pool = PgPoolOptions::new()
         .max_connections(1)
-        .acquire_timeout(Duration::from_secs(5))
+        .acquire_timeout(DUCKLAKE_CATALOG_ACQUIRE_TIMEOUT)
         .connect_lazy_with(metadata_options);
     let metadata_pg_pool =
         DuckLakeMetadataPool::new(direct_pg_pool, config.catalog_pooler_url.as_ref()).map_err(
@@ -1848,18 +1848,13 @@ async fn list_ducklake_tables(
 ) -> EtlResult<Vec<DuckLakeMaintenanceTableName>> {
     let sql = namespaced_tables_query(metadata_schema);
     let rows: Vec<(Option<String>, String, String)> = metadata_pg_pool
-        .read("list_tables", |pool| {
-            let sql = &sql;
-            async move {
-                let mut transaction = pool.begin().await?;
-                let result = sqlx::query_as(AssertSqlSafe(sql.as_str()))
+        .read("list_tables", (sql, table_namespace), |connection, (sql, table_namespace)| {
+            Box::pin(
+                sqlx::query_as(AssertSqlSafe(sql.as_str()))
                     .persistent(false)
-                    .bind(table_namespace)
-                    .fetch_all(&mut *transaction)
-                    .await?;
-                transaction.commit().await?;
-                Ok::<_, sqlx::Error>(result)
-            }
+                    .bind(*table_namespace)
+                    .fetch_all(connection),
+            )
         })
         .await
         .map_err(|source| {
@@ -1913,17 +1908,10 @@ async fn load_replay_epoch_state(
         quote_identifier(REPLAY_EPOCHS_TABLE)
     );
     let rows: Vec<(String, String, Option<String>)> = metadata_pg_pool
-        .read("replay_epochs", |pool| {
-            let sql = &sql;
-            async move {
-                let mut transaction = pool.begin().await?;
-                let result = sqlx::query_as(AssertSqlSafe(sql.as_str()))
-                    .persistent(false)
-                    .fetch_all(&mut *transaction)
-                    .await?;
-                transaction.commit().await?;
-                Ok::<_, sqlx::Error>(result)
-            }
+        .read("replay_epochs", sql, |connection, sql| {
+            Box::pin(
+                sqlx::query_as(AssertSqlSafe(sql.as_str())).persistent(false).fetch_all(connection),
+            )
         })
         .await
         .map_err(|source| {
@@ -1954,23 +1942,25 @@ async fn postgres_metadata_table_exists(
     table_name: &str,
 ) -> EtlResult<bool> {
     let exists: bool = metadata_pg_pool
-        .read("table_exists", |pool| async move {
-            let mut transaction = pool.begin().await?;
-            let result = sqlx::query_scalar(
-                "SELECT EXISTS (
-             SELECT 1
-             FROM information_schema.tables
-             WHERE table_schema = $1 AND table_name = $2
-         );",
-            )
-            .persistent(false)
-            .bind(metadata_schema)
-            .bind(table_name)
-            .fetch_one(&mut *transaction)
-            .await?;
-            transaction.commit().await?;
-            Ok::<_, sqlx::Error>(result)
-        })
+        .read(
+            "table_exists",
+            (metadata_schema, table_name),
+            |connection, (metadata_schema, table_name)| {
+                Box::pin(
+                    sqlx::query_scalar(
+                        "select exists (
+                             select 1
+                             from information_schema.tables
+                             where table_schema = $1 and table_name = $2
+                         );",
+                    )
+                    .persistent(false)
+                    .bind(*metadata_schema)
+                    .bind(*table_name)
+                    .fetch_one(connection),
+                )
+            },
+        )
         .await
         .map_err(|source| {
             etl_error!(
@@ -1991,35 +1981,35 @@ async fn postgres_metadata_column_exists(
     table_name: &str,
     column_name: &str,
 ) -> EtlResult<bool> {
-    let exists: bool = metadata_pg_pool.read("column_exists", |pool| async move {
-        let mut transaction = pool.begin().await?;
-        let result = sqlx::query_scalar(
-            "select exists (
-                 select 1
-                 from information_schema.columns
-                 where table_schema = $1 and table_name = $2 and column_name = $3
-             )",
-        )
-        .persistent(false)
-        .bind(metadata_schema)
-        .bind(table_name)
-        .bind(column_name)
-        .fetch_one(&mut *transaction)
-        .await?;
-        transaction.commit().await?;
-        Ok::<_, sqlx::Error>(result)
-    })
-    .await
-    .map_err(|source| {
-        etl_error!(
-            ErrorKind::DestinationQueryFailed,
-            "DuckLake metadata column lookup failed",
-            format!(
-                "metadata_schema={metadata_schema}, table_name={table_name}, column_name={column_name}"
-            ),
-            source: source
-        )
-    })?;
+    let column = (metadata_schema, table_name, column_name);
+    let exists: bool = metadata_pg_pool
+        .read("column_exists", column, |connection, &(metadata_schema, table_name, column_name)| {
+            Box::pin(
+                sqlx::query_scalar(
+                    "select exists (
+                         select 1
+                         from information_schema.columns
+                         where table_schema = $1 and table_name = $2 and column_name = $3
+                     )",
+                )
+                .persistent(false)
+                .bind(metadata_schema)
+                .bind(table_name)
+                .bind(column_name)
+                .fetch_one(connection),
+            )
+        })
+        .await
+        .map_err(|source| {
+            etl_error!(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake metadata column lookup failed",
+                format!(
+                    "metadata_schema={metadata_schema}, table_name={table_name}, column_name={column_name}"
+                ),
+                source: source
+            )
+        })?;
 
     Ok(exists)
 }
@@ -3137,20 +3127,15 @@ impl DuckLakePendingInlineSizeSampler {
         let sql = pending_inline_data_bytes_query(&self.metadata_schema);
         let inlined_bytes: i64 = self
             .pool
-            .read("inline_size", |pool| {
-                let sql = &sql;
-                async move {
-                    let mut transaction = pool.begin().await?;
-                    let result = sqlx::query_scalar(AssertSqlSafe(sql.as_str()))
+            .read("inline_size", (sql, table_name), |connection, (sql, table_name)| {
+                Box::pin(
+                    sqlx::query_scalar(AssertSqlSafe(sql.as_str()))
                         .persistent(false)
                         .bind(table_name.schema())
                         .bind(table_name.table())
                         .bind(table_name.namespace())
-                        .fetch_one(&mut *transaction)
-                        .await?;
-                    transaction.commit().await?;
-                    Ok::<_, sqlx::Error>(result)
-                }
+                        .fetch_one(connection),
+                )
             })
             .await
             .map_err(|source| {
@@ -3296,20 +3281,15 @@ async fn query_table_storage_metrics(
         _active_delete_bytes,
         deleted_rows,
     ): (i64, i64, i64, i64, i64, i64, i64) = metadata_pg_pool
-        .read("table_storage_metrics", |pool| {
-            let sql = &sql;
-            async move {
-                let mut transaction = pool.begin().await?;
-                let result = sqlx::query_as(AssertSqlSafe(sql.as_str()))
+        .read("table_storage_metrics", (sql, table_name), |connection, (sql, table_name)| {
+            Box::pin(
+                sqlx::query_as(AssertSqlSafe(sql.as_str()))
                     .persistent(false)
                     .bind(table_name.schema())
                     .bind(table_name.table())
                     .bind(table_name.namespace())
-                    .fetch_one(&mut *transaction)
-                    .await?;
-                transaction.commit().await?;
-                Ok::<_, sqlx::Error>(result)
-            }
+                    .fetch_one(connection),
+            )
         })
         .await
         .map_err(|source| {

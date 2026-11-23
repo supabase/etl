@@ -34,15 +34,18 @@ use crate::{
     etl_error,
     pipeline::PipelineId,
     postgres::{FeedbackHandle, ReplicationMessageStream, client::SlotCreationMonitor},
-    replication::WorkerType,
+    replication::{DEFAULT_WAL_SENDER_TIMEOUT, WorkerType},
     schema::{TableId, TableName},
 };
 
 /// Maximum time to wait for a replication slot deletion to complete.
 ///
 /// Slot deletion uses `WAIT`, which can block until the slot is no longer in
-/// use. This timeout ensures calls are bounded and cannot wait forever.
-const DELETE_SLOT_TIMEOUT: Duration = Duration::from_secs(30);
+/// use. After a lost connection, the old walsender keeps the slot active
+/// until `wal_sender_timeout` expires, so this bound must outlast PostgreSQL's
+/// default timeout or the deletion fails before the slot is released.
+const DELETE_SLOT_TIMEOUT: Duration = Duration::from_secs(90);
+const _: () = assert!(DELETE_SLOT_TIMEOUT.as_secs() >= DEFAULT_WAL_SENDER_TIMEOUT.as_secs() + 30);
 /// Bounds DNS, socket establishment, TLS negotiation, and authentication
 /// together.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
