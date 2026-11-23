@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use futures::TryStreamExt;
 use sqlx::{
     PgExecutor, QueryBuilder, Row,
     postgres::{PgRow, types::Oid as SqlxTableId},
@@ -339,7 +340,7 @@ pub async fn load_table_schemas<'c, E>(
 where
     E: PgExecutor<'c>,
 {
-    let rows = sqlx::query(
+    let mut rows = sqlx::query(
         r#"
         select
             ts.id as table_schema_id,
@@ -362,11 +363,10 @@ where
         "#,
     )
     .bind(pipeline_id)
-    .fetch_all(executor)
-    .await?;
+    .fetch(executor);
 
     let mut table_schemas = HashMap::new();
-    for row in rows {
+    while let Some(row) = rows.try_next().await? {
         let table_oid: SqlxTableId = row.get("table_id");
         let table_id = TableId::new(table_oid.0);
         let schema_name: String = row.get("schema_name");
