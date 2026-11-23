@@ -2639,14 +2639,16 @@ mod tests {
     /// destination-specific default change in the shared plan.
     #[test]
     fn schema_plan_retains_missing_values_and_future_defaults() {
-        for (future_default, missing_value, initial_default) in
-            [(Some("2"), "1", Some("1")), (Some("2"), "null", None), (None, "1", Some("1"))]
-        {
+        for (future_default, missing_value, initial_default) in [
+            (Some("2"), Some("1"), Some("1")),
+            (Some("2"), None, Some("2")),
+            (None, Some("1"), Some("1")),
+        ] {
             let id = ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false);
             let before = create_replicated_schema(vec![id.clone()]);
             let column = ColumnSchema::new("score".to_owned(), Type::INT4, -1, 2, true)
                 .with_default_expression_option(future_default.map(ToOwned::to_owned))
-                .with_missing_value_expression(Some(missing_value.to_owned()));
+                .with_missing_value_expression(missing_value.map(ToOwned::to_owned));
             let after = create_replicated_schema(vec![id, column]);
             let plan = plan_schema_change(&before, &after, ColumnNameMapping::Identity);
             let [SchemaOperation::AddColumn { after_column_schema, reason }] =

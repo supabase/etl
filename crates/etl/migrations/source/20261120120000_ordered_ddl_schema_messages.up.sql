@@ -105,7 +105,7 @@ select l.attname, l.attnum, l.atttypid, l.atttypmod,
        pg_catalog.format_type(l.atttypid, l.atttypmod)::pg_catalog.text,
        b.base_type_oid, b.base_typmod, b.base_formatted_type,
        l.attnotnull, l.default_expression,
-       case when l.missing_literal is distinct from coalesce(l.default_expression, 'null')
+       case when l.missing_literal is distinct from l.default_expression
             then l.missing_literal end
 from literals l
 cross join lateral etl.describe_base_type(l.atttypid, l.atttypmod) b

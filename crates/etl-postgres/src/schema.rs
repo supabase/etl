@@ -374,11 +374,12 @@ pub struct ColumnSchema {
     /// The captured SQL literal used for rows missing this physical column.
     ///
     /// Destinations with add-time default semantics use this for existing rows
-    /// when adding a physical column. `Some("null")` records a missing NULL;
-    /// `None` falls back to [`Self::default_expression`], including legacy
-    /// metadata and new captures whose SQL expressions match textually.
+    /// when adding a physical column. `None` falls back to
+    /// [`Self::default_expression`], including legacy metadata, matching
+    /// expressions, and columns without a stored fast-add value.
     /// Publication-only additions do not backfill this value. This is not a
-    /// history of values materialized by heap rewrites or volatile defaults.
+    /// history of values materialized by heap rewrites or volatile
+    /// defaults.
     pub missing_value_expression: Option<String>,
 }
 
@@ -441,16 +442,12 @@ impl ColumnSchema {
     /// Returns the default used to populate existing rows on a physical column
     /// addition in destinations that support that behavior.
     ///
-    /// A captured SQL NULL means no initial default. An absent hint uses the
-    /// current default, including legacy schemas and matching expressions.
+    /// A captured fast-add value takes precedence; otherwise the current
+    /// default applies, including legacy schemas and matching expressions.
     /// Publication-only additions must not use this value to backfill
     /// historical rows.
     pub fn initial_default_expression(&self) -> Option<&str> {
-        match self.missing_value_expression.as_deref() {
-            Some(expression) if expression.eq_ignore_ascii_case("null") => None,
-            Some(expression) => Some(expression),
-            None => self.default_expression.as_deref(),
-        }
+        self.missing_value_expression.as_deref().or(self.default_expression.as_deref())
     }
 
     /// Returns whether this column is part of the table's primary key.

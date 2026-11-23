@@ -529,13 +529,14 @@ mod tests {
         assert_eq!(default_clause(&json_column), None);
     }
 
-    /// Only the captured add-time value may populate historical Snowflake rows.
+    /// Only the captured add-time value, or the current default without one,
+    /// may populate historical Snowflake rows.
     #[test]
     fn add_column_default_clause_uses_missing_value_hint() {
-        for (missing, expected) in [("1", Some(" DEFAULT 1")), ("null", None)] {
+        for (missing, expected) in [(Some("1"), Some(" DEFAULT 1")), (None, Some(" DEFAULT 2"))] {
             let column = ColumnSchema::new("score".to_owned(), Type::INT4, -1, 1, true)
                 .with_default_expression("2".to_owned())
-                .with_missing_value_expression(Some(missing.to_owned()));
+                .with_missing_value_expression(missing.map(ToOwned::to_owned));
             assert_eq!(add_column_default_clause(&column).as_deref(), expected);
         }
     }
