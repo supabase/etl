@@ -101,8 +101,11 @@ a snapshot can require resynchronizing affected tables.
 from the current default. For example, `ADD COLUMN score integer DEFAULT 1,
 ALTER COLUMN score SET DEFAULT 2` leaves existing source rows at `1` and future
 inserts at `2`. A captured SQL NULL is the string `"null"`; an absent hint falls
-back to the current default, preserving legacy behavior. Partitioned tables
-store no rows, so they report no hint and use the current default.
+back to the current default, preserving legacy behavior. Columns without a
+stored missing value report no hint: a heap rewrite clears it after storing the
+value in every row, so its absence does not prove existing rows are NULL.
+Partitioned tables store no rows, so they report no hint and use the current
+default.
 
 Conversion is restricted to supported built-in scalar types so generic JSON
 conversion cannot invoke custom casts as the trigger owner. Float literals

@@ -2981,7 +2981,6 @@ async fn schema_change_messages_capture_missing_values_separately_from_defaults(
             "alter table {table}
              add column score integer default 1, alter column score set default 2,
              add column object_id oid default 1, alter column object_id set default 2,
-             add column absent integer, alter column absent set default 2,
              add column exact_float double precision default 1.23456789012345,
              alter column exact_float set default 3.456789012345,
              add column exact_real real default 1.234567,
@@ -3062,7 +3061,6 @@ async fn schema_change_messages_capture_missing_values_separately_from_defaults(
     for (name, typ) in [
         ("score", "integer"),
         ("object_id", "oid"),
-        ("absent", "integer"),
         ("flag", "boolean"),
         ("label", "text"),
         ("day", "date"),
@@ -3121,6 +3119,50 @@ async fn schema_change_messages_capture_missing_values_separately_from_defaults(
     assert_eq!(settings.get::<_, String>(1), "sql_standard");
     assert_eq!(settings.get::<_, String>(2), "Asia/Kolkata");
     assert_eq!(settings.get::<_, String>(3), "escape");
+}
+
+/// A heap rewrite in the adding statement stores the default in existing rows,
+/// so the captured add-time default must still denote that stored value.
+#[tokio::test(flavor = "multi_thread")]
+async fn schema_change_messages_keep_backfill_default_after_heap_rewrite() {
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("ddl_rewrite_backfill");
+    let table = table_name.as_quoted_identifier();
+    database.create_table(table_name.clone(), true, &[("marker", "integer")]).await.unwrap();
+    database.run_sql(&format!("insert into {table} (marker) values (1)")).await.unwrap();
+    let publication = "ddl_rewrite_backfill_pub";
+    database.create_publication(publication, std::slice::from_ref(&table_name)).await.unwrap();
+    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let slot_name = test_slot_name("ddl_rewrite_backfill");
+    let slot = client.create_slot(&slot_name, &Default::default()).await.unwrap();
+
+    database
+        .run_sql(&format!(
+            "alter table {table} add column score integer not null default 15,
+             alter column marker type integer using marker + 0"
+        ))
+        .await
+        .unwrap();
+
+    // The slot retains the DDL. Start this feedback-free reader only
+    // when ready to consume, avoiding idle sender timeouts during setup.
+    let (stream, _) = client
+        .start_logical_replication(publication, &slot_name, slot.consistent_point, None)
+        .await
+        .unwrap();
+    let messages = collect_ddl_messages(stream, 1).await;
+    let columns = column_schemas_from_ddl_message(&messages[0]);
+    let score = columns.iter().find(|column| column.name == "score").unwrap();
+    let initial_default = score.initial_default_expression().unwrap();
+    let matches: bool = database
+        .client
+        .as_ref()
+        .unwrap()
+        .query_one(&format!("select ({initial_default})::integer = score from {table}"), &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert!(matches);
 }
 
 /// Capture never runs user-defined JSON casts as the trigger owner, and still

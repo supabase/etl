@@ -1111,7 +1111,6 @@ async fn ddl_defaults_preserve_existing_rows_and_future_defaults() {
         "add column ordered_value integer default 1",
         "alter column ordered_value set default 2",
         "add column combined_value integer default 1, alter column combined_value set default 2",
-        "add column late_default integer, alter column late_default set default 2",
         "add column dropped_default integer default 1",
         "alter column dropped_default drop default",
     ] {
@@ -1133,8 +1132,7 @@ async fn ddl_defaults_preserve_existing_rows_and_future_defaults() {
     conn.execute_batch(&format!("insert into {target} (id) values (3)")).unwrap();
     let mut statement = conn
         .prepare(&format!(
-            "select id, ordered_value, combined_value, late_default, dropped_default from \
-             {target} order by id"
+            "select id, ordered_value, combined_value, dropped_default from {target} order by id"
         ))
         .unwrap();
     let rows = statement
@@ -1144,7 +1142,6 @@ async fn ddl_defaults_preserve_existing_rows_and_future_defaults() {
                 row.get::<_, Option<i32>>(1)?,
                 row.get::<_, Option<i32>>(2)?,
                 row.get::<_, Option<i32>>(3)?,
-                row.get::<_, Option<i32>>(4)?,
             ))
         })
         .unwrap()
@@ -1152,11 +1149,7 @@ async fn ddl_defaults_preserve_existing_rows_and_future_defaults() {
         .unwrap();
     assert_eq!(
         rows,
-        [
-            (1, Some(1), Some(1), None, Some(1)),
-            (2, Some(2), Some(2), Some(2), None),
-            (3, Some(2), Some(2), Some(2), None),
-        ]
+        [(1, Some(1), Some(1), Some(1)), (2, Some(2), Some(2), None), (3, Some(2), Some(2), None),]
     );
 }
 

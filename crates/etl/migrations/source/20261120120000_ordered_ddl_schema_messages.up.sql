@@ -83,7 +83,11 @@ with column_values as (
         -- Quote like pg_get_expr: standard-conforming strings, never E''.
         case
             when not v.missing_value_supported then null
-            when not v.atthasmissing then 'null'
+            -- No stored missing value is ambiguous: the column may have been
+            -- added without a default, or a heap rewrite may have materialized
+            -- its add-time value into every row and cleared the flag. Report
+            -- no hint so destinations keep the current-default fallback.
+            when not v.atthasmissing then null
             when v.atttypid in ('pg_catalog.json'::pg_catalog.regtype, 'pg_catalog.jsonb'::pg_catalog.regtype)
                 then '''' || pg_catalog.replace(v.missing_value::pg_catalog.text, '''', '''''') || ''''
             -- A bare numeric -0 becomes positive zero before a float cast.

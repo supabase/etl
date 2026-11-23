@@ -197,8 +197,9 @@ DEFAULT 1, ALTER COLUMN score SET DEFAULT 2` adds the destination column using
 `2` for future omitted-column inserts. ClickHouse and Snowflake retain the
 add-time default; subsequent replicated rows carry their source values
 explicitly. BigQuery leaves existing rows `NULL` and installs only the current
-default. Adding a column without a default and setting one in the same statement
-keeps existing rows `NULL`. Partitioned tables store no missing values, so
+default. Without a stored fast-add value, ETL cannot tell a column added without a
+default from one whose value a heap rewrite stored in every row, so both use the
+current default for existing rows. Partitioned tables store no missing values, so
 publishing through a partition root uses the current default. This applies to
 supported built-in scalar literals;
 arrays, custom types, heap rewrites, and volatile defaults retain the existing
