@@ -2,6 +2,17 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Whether a maintenance attempt should execute and report its results.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MaintenanceReportStatus {
+    /// Execute maintenance and attempt to deliver its results.
+    Pending,
+    /// Skip execution because this run already has a valid persisted report.
+    Completed,
+    /// Execute maintenance without reporting because reporting is unavailable.
+    Disabled,
+}
+
 /// One result category in the inline-flush summaries.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -38,7 +49,7 @@ pub struct MaintenanceResults {
     pub cleaned_up_files: u64,
 }
 
-/// A runner-owned report persisted before the Job can succeed.
+/// A runner-owned report delivered best-effort after maintenance succeeds.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MaintenanceRunnerReport {

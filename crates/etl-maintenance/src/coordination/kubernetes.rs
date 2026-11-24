@@ -12,7 +12,7 @@ use kube::{
 };
 use serde_json::{Value, json};
 use tokio::time;
-use tracing::info;
+use tracing::{info, warn};
 
 use super::{
     ExternalMaintenanceOperationHistory, ExternalMaintenanceOperationPolicy,
@@ -21,12 +21,14 @@ use super::{
     ExternalMaintenanceReplicatorStatus, ExternalMaintenanceRequestOutcome, ExternalMaintenanceRun,
     ExternalMaintenanceState, ExternalMaintenanceStore,
 };
-use crate::coordination::report::MaintenanceRunnerReport;
+use crate::coordination::report::{MaintenanceReportStatus, MaintenanceRunnerReport};
 
 const CR_NAME_ENV: &str = "ETL_DUCKLAKE_MAINTENANCE_CR_NAME";
 const CR_NAMESPACE_ENV: &str = "ETL_DUCKLAKE_MAINTENANCE_CR_NAMESPACE";
 const KUBERNETES_API_TIMEOUT_SECONDS_ENV: &str =
     "ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_KUBERNETES_API_TIMEOUT_SECONDS";
+/// Maximum number of attempts for each reporting API operation.
+const REPORT_ATTEMPTS: u64 = 8;
 
 /// Kubernetes CR-backed external maintenance store.
 #[derive(Clone)]
@@ -76,35 +78,83 @@ impl KubernetesExternalMaintenanceStore {
         etl_error!(ErrorKind::SourceQueryFailed, message, source: error)
     }
 
-    /// Reads an already committed report so a retried Job does not repeat work.
-    pub async fn completed_report(
+    /// Checks for a committed report, retrying transient API failures.
+    ///
+    /// Reporting failures or attribution mismatches disable reporting without
+    /// blocking maintenance. A confirmed stale run or deleted resource still
+    /// fails the attempt before work begins.
+    pub async fn report_status(
         &self,
         pipeline_id: &str,
         project_ref: &str,
         run_id: &str,
-    ) -> EtlResult<Option<MaintenanceRunnerReport>> {
-        let resource = time::timeout(self.timeout, self.api.get(&self.name))
-            .await
-            .map_err(|_| {
-                etl_error!(ErrorKind::SourceQueryFailed, "Timed out loading maintenance report")
-            })?
-            .map_err(|error| Self::kube_error(error, "Failed to load maintenance report"))?;
-        validate_runner_scope(&resource, pipeline_id, project_ref, run_id)?;
-        Ok(resource
-            .data
-            .get("status")
-            .and_then(|status| status.get("runnerReport"))
-            .cloned()
-            .and_then(|value| serde_json::from_value::<MaintenanceRunnerReport>(value).ok())
-            .filter(|report| report.is_valid() && report.run_id == run_id))
+    ) -> EtlResult<MaintenanceReportStatus> {
+        for attempt in 0..REPORT_ATTEMPTS {
+            let resource = match time::timeout(self.timeout, self.api.get(&self.name)).await {
+                Ok(Ok(resource)) => resource,
+                Ok(Err(kube::Error::Api(error))) if error.code == 404 => {
+                    return Err(etl_error!(
+                        ErrorKind::InvalidState,
+                        "Maintenance report target no longer exists"
+                    ));
+                }
+                Ok(Err(error)) if !retryable_report_error(&error) => {
+                    // API response bodies can contain sensitive data.
+                    warn!("maintenance report lookup rejected; continuing without reporting");
+                    return Ok(MaintenanceReportStatus::Disabled);
+                }
+                _ => {
+                    time::sleep(Duration::from_millis(250 * (attempt + 1))).await;
+                    continue;
+                }
+            };
+            validate_runner_run(&resource, run_id)?;
+            if validate_report_attribution(&resource, pipeline_id, project_ref).is_err() {
+                warn!("maintenance report attribution mismatch; continuing without reporting");
+                return Ok(MaintenanceReportStatus::Disabled);
+            }
+            let completed = resource
+                .data
+                .get("status")
+                .and_then(|status| status.get("runnerReport"))
+                .cloned()
+                .and_then(|value| serde_json::from_value::<MaintenanceRunnerReport>(value).ok())
+                .is_some_and(|report| report.is_valid() && report.run_id == run_id);
+            return Ok(if completed {
+                MaintenanceReportStatus::Completed
+            } else {
+                MaintenanceReportStatus::Pending
+            });
+        }
+        warn!("maintenance report lookup retries exhausted; continuing without reporting");
+        Ok(MaintenanceReportStatus::Disabled)
     }
 
-    /// Persists one successful attempt, fenced by active run and resource
-    /// version.
+    /// Attempts to persist successful results, fenced by active run and
+    /// resource version, without failing the completed maintenance attempt.
     ///
     /// Retries only report delivery. Maintenance work must not be repeated when
-    /// the API temporarily rejects or times out a status write.
+    /// the API rejects or times out a status write. Delivery failures are
+    /// logged and may lose telemetry, but must not cause a Job retry of
+    /// successful work.
     pub async fn report_result(
+        &self,
+        pipeline_id: &str,
+        project_ref: &str,
+        report: &MaintenanceRunnerReport,
+    ) {
+        if let Err(error) = self.try_report_result(pipeline_id, project_ref, report).await {
+            // Keep the failure classification without exposing API response
+            // bodies.
+            warn!(
+                error_kind = ?error.kind(),
+                "maintenance succeeded but result delivery failed; keeping job successful"
+            );
+        }
+    }
+
+    /// Delivers a report with bounded retries and strict attribution checks.
+    async fn try_report_result(
         &self,
         pipeline_id: &str,
         project_ref: &str,
@@ -113,7 +163,7 @@ impl KubernetesExternalMaintenanceStore {
         if !report.is_valid() {
             return Err(etl_error!(ErrorKind::InvalidState, "Invalid maintenance runner report"));
         }
-        for attempt in 0..8 {
+        for attempt in 0..REPORT_ATTEMPTS {
             let operation = async {
                 let resource = self.api.get(&self.name).await?;
                 Ok::<_, kube::Error>(resource)
@@ -183,6 +233,30 @@ fn validate_runner_scope(
     project_ref: &str,
     run_id: &str,
 ) -> EtlResult<()> {
+    validate_runner_run(resource, run_id)?;
+    validate_report_attribution(resource, pipeline_id, project_ref)
+}
+
+/// Rejects stale runs and resources being deleted before executing maintenance.
+fn validate_runner_run(resource: &DynamicObject, run_id: &str) -> EtlResult<()> {
+    if run_id.is_empty()
+        || resource.metadata.deletion_timestamp.is_some()
+        || resource.data["status"]["activeRun"]["runId"].as_str() != Some(run_id)
+    {
+        return Err(etl_error!(
+            ErrorKind::InvalidState,
+            "Maintenance run is stale or its resource is being deleted"
+        ));
+    }
+    Ok(())
+}
+
+/// Requires matching attribution and a resource version before reporting.
+fn validate_report_attribution(
+    resource: &DynamicObject,
+    pipeline_id: &str,
+    project_ref: &str,
+) -> EtlResult<()> {
     let pipeline = &resource.data["spec"]["pipelineRef"];
     let observed_pipeline = pipeline["pipelineId"]
         .as_str()
@@ -190,16 +264,13 @@ fn validate_runner_scope(
         .or_else(|| pipeline["pipelineId"].as_i64().map(|id| id.to_string()));
     if project_ref.is_empty()
         || pipeline_id.is_empty()
-        || run_id.is_empty()
-        || resource.metadata.resource_version.is_none()
-        || resource.metadata.deletion_timestamp.is_some()
+        || resource.metadata.resource_version.as_deref().is_none_or(str::is_empty)
         || pipeline["tenantId"].as_str() != Some(project_ref)
         || observed_pipeline.as_deref() != Some(pipeline_id)
-        || resource.data["status"]["activeRun"]["runId"].as_str() != Some(run_id)
     {
         return Err(etl_error!(
             ErrorKind::InvalidState,
-            "Maintenance report attribution or active run mismatch"
+            "Maintenance report attribution or resource version mismatch"
         ));
     }
     Ok(())
@@ -682,6 +753,7 @@ mod tests {
 #[cfg(test)]
 mod reporting_tests {
     use std::{
+        collections::VecDeque,
         convert::Infallible,
         sync::{Arc, Mutex},
     };
@@ -693,6 +765,65 @@ mod reporting_tests {
     use super::*;
     use crate::coordination::report::{InlineFlushSummaries, MaintenanceResults};
 
+    /// Creates a synthetic successful maintenance report.
+    fn report() -> MaintenanceRunnerReport {
+        MaintenanceRunnerReport {
+            version: 1,
+            run_id: "run-1".to_owned(),
+            inline_flush: InlineFlushSummaries::default(),
+            results: MaintenanceResults::default(),
+        }
+    }
+
+    /// Creates an in-memory API with scripted status, body, and response
+    /// delays.
+    fn scripted_store(
+        responses: Vec<(u16, Value, Duration)>,
+    ) -> (KubernetesExternalMaintenanceStore, Arc<Mutex<Vec<String>>>) {
+        let responses = Arc::new(Mutex::new(VecDeque::from(responses)));
+        let methods = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&methods);
+        let client = Client::new(
+            service_fn(move |request: Request<Body>| {
+                captured.lock().unwrap().push(request.method().to_string());
+                let (code, response, delay) = responses.lock().unwrap().pop_front().unwrap();
+                async move {
+                    time::sleep(delay).await;
+                    Ok::<_, Infallible>(
+                        Response::builder()
+                            .status(code)
+                            .body(Body::from(serde_json::to_vec(&response).unwrap()))
+                            .unwrap(),
+                    )
+                }
+            }),
+            "synthetic",
+        );
+        (
+            KubernetesExternalMaintenanceStore {
+                api: Api::namespaced_with(
+                    client,
+                    "synthetic",
+                    &ducklake_maintenance_api_resource(),
+                ),
+                name: "synthetic".to_owned(),
+                timeout: Duration::from_secs(1),
+            },
+            methods,
+        )
+    }
+
+    /// Builds a synthetic Kubernetes API failure response.
+    fn api_failure(code: u16) -> (u16, Value, Duration) {
+        (
+            code,
+            json!({"apiVersion": "v1", "kind": "Status", "status": "Failure",
+                "message": "synthetic failure", "reason": "Synthetic", "code": code}),
+            Duration::ZERO,
+        )
+    }
+
+    /// Creates a synthetic report target with a matching active run.
     fn target() -> DynamicObject {
         serde_json::from_value(json!({
             "apiVersion": "etl.supabase.com/v1alpha1", "kind": "DuckLakeMaintenance",
@@ -701,6 +832,117 @@ mod reporting_tests {
             "status": {"activeRun": {"runId": "run-1"}}
         }))
         .unwrap()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn startup_retries_transient_errors_and_timeouts_before_skipping_completed_work() {
+        let mut resource = target();
+        resource.data["status"]["runnerReport"] = serde_json::to_value(report()).unwrap();
+        for failure in
+            [api_failure(429), api_failure(500), (200, json!(resource), Duration::from_secs(2))]
+        {
+            let (store, methods) =
+                scripted_store(vec![failure, (200, json!(resource), Duration::ZERO)]);
+
+            let status = store.report_status("7", "synthetic-project", "run-1").await.unwrap();
+
+            assert_eq!(status, MaintenanceReportStatus::Completed);
+            assert_eq!(*methods.lock().unwrap(), ["GET", "GET"]);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn startup_api_failures_disable_reporting_without_failing_maintenance() {
+        for (code, attempts) in [(403, 1), (503, REPORT_ATTEMPTS)] {
+            let (store, methods) =
+                scripted_store((0..attempts).map(|_| api_failure(code)).collect());
+
+            let status = store.report_status("7", "synthetic-project", "run-1").await.unwrap();
+
+            assert_eq!(status, MaintenanceReportStatus::Disabled);
+            assert_eq!(*methods.lock().unwrap(), vec!["GET"; usize::try_from(attempts).unwrap()]);
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_attribution_mismatches_disable_reporting_for_an_active_run() {
+        for (pipeline, project) in [("8", "synthetic-project"), ("7", "other-project"), ("7", "")] {
+            let (store, methods) = scripted_store(vec![(200, json!(target()), Duration::ZERO)]);
+
+            let status = store.report_status(pipeline, project, "run-1").await.unwrap();
+
+            assert_eq!(status, MaintenanceReportStatus::Disabled);
+            assert_eq!(*methods.lock().unwrap(), ["GET"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_rejects_stale_and_deleted_runs_even_with_attribution_mismatches() {
+        let mut stale = target();
+        stale.data["status"]["activeRun"]["runId"] = json!("run-2");
+        let mut cleared = target();
+        cleared.data["status"]["activeRun"] = Value::Null;
+        let mut deleting = target();
+        deleting.metadata.deletion_timestamp =
+            Some(serde_json::from_value(json!("2026-05-12T12:00:00Z")).unwrap());
+        for response in [
+            (200, json!(stale), Duration::ZERO),
+            (200, json!(cleared), Duration::ZERO),
+            (200, json!(deleting), Duration::ZERO),
+            api_failure(404),
+        ] {
+            let (store, methods) = scripted_store(vec![response]);
+
+            let error = store.report_status("7", "other-project", "run-1").await.unwrap_err();
+
+            assert_eq!(error.kind(), ErrorKind::InvalidState);
+            assert_eq!(*methods.lock().unwrap(), ["GET"]);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn successful_work_survives_report_rejection_or_exhausted_delivery_retries() {
+        for (code, attempts) in [(403, 1), (503, REPORT_ATTEMPTS)] {
+            let responses = (0..attempts)
+                .flat_map(|_| [(200, json!(target()), Duration::ZERO), api_failure(code)])
+                .collect();
+            let (store, methods) = scripted_store(responses);
+
+            // Delivery cannot return an error that fails the already successful
+            // Job.
+            store.report_result("7", "synthetic-project", &report()).await;
+
+            let expected: Vec<_> = (0..attempts).flat_map(|_| ["GET", "PATCH"]).collect();
+            assert_eq!(*methods.lock().unwrap(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn successful_work_survives_a_cleared_active_run_without_writing_a_report() {
+        let mut resource = target();
+        resource.data["status"]["activeRun"] = Value::Null;
+        let (store, methods) = scripted_store(vec![(200, json!(resource), Duration::ZERO)]);
+
+        store.report_result("7", "synthetic-project", &report()).await;
+
+        assert_eq!(*methods.lock().unwrap(), ["GET"]);
+    }
+
+    #[tokio::test]
+    async fn startup_ignores_invalid_and_other_run_reports() {
+        let mut invalid = report();
+        invalid.version = 2;
+        let mut other_run = report();
+        other_run.run_id = "run-2".to_owned();
+        for report in [Value::Null, json!(invalid), json!(other_run)] {
+            let mut resource = target();
+            resource.data["status"]["runnerReport"] = report;
+            let (store, _) = scripted_store(vec![(200, json!(resource), Duration::ZERO)]);
+
+            let status = store.report_status("7", "synthetic-project", "run-1").await.unwrap();
+
+            assert_eq!(status, MaintenanceReportStatus::Pending);
+        }
     }
 
     #[test]
@@ -779,16 +1021,16 @@ mod reporting_tests {
             name: "synthetic".to_owned(),
             timeout: Duration::from_secs(1),
         };
-        let report = MaintenanceRunnerReport {
-            version: 1,
-            run_id: "run-1".to_owned(),
-            inline_flush: InlineFlushSummaries::default(),
-            results: MaintenanceResults::default(),
-        };
-        store.report_result("7", "synthetic-project", &report).await.unwrap();
+        store.try_report_result("7", "synthetic-project", &report()).await.unwrap();
         assert_eq!(patches.lock().unwrap().len(), 2);
         assert_eq!(patches.lock().unwrap()[0]["metadata"]["resourceVersion"], "42");
-        assert!(store.completed_report("7", "synthetic-project", "run-1").await.unwrap().is_some());
-        assert!(store.completed_report("7", "other-project", "run-1").await.is_err());
+        assert_eq!(
+            store.report_status("7", "synthetic-project", "run-1").await.unwrap(),
+            MaintenanceReportStatus::Completed
+        );
+        assert_eq!(
+            store.report_status("7", "other-project", "run-1").await.unwrap(),
+            MaintenanceReportStatus::Disabled
+        );
     }
 }

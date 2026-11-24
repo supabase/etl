@@ -18,7 +18,7 @@ use etl_maintenance::{
         MergeAdjacentFilesMaintenanceConfig, RewriteDataFilesMaintenanceConfig,
         S3Config as DuckLakeS3Config, run_maintenance_once,
     },
-    report::{MaintenanceResults, MaintenanceRunnerReport},
+    report::{MaintenanceReportStatus, MaintenanceResults, MaintenanceRunnerReport},
 };
 use rustls::crypto::aws_lc_rs;
 use secrecy::ExposeSecret;
@@ -56,14 +56,18 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
         let run_id = env::var("ETL_DUCKLAKE_MAINTENANCE__RUN_ID")?;
         let store = KubernetesExternalMaintenanceStore::from_env(Duration::from_secs(10))
             .await?
-            .ok_or("maintenance Job requires its CR name and namespace for durable reporting")?;
-        let project =
-            project_ref.as_deref().ok_or("maintenance Job requires project attribution")?;
-        if store.completed_report(&pipeline_id, project, &run_id).await?.is_some() {
-            info!("maintenance results already persisted; skipping repeated execution");
-            return Ok(());
+            .ok_or("maintenance Job requires its CR name and namespace for reporting")?;
+        match store
+            .report_status(&pipeline_id, project_ref.as_deref().unwrap_or_default(), &run_id)
+            .await?
+        {
+            MaintenanceReportStatus::Completed => {
+                info!("maintenance results already persisted; skipping repeated execution");
+                return Ok(());
+            }
+            MaintenanceReportStatus::Pending => Some((store, run_id)),
+            MaintenanceReportStatus::Disabled => None,
         }
-        Some((store, run_id))
     } else {
         None
     };
@@ -202,7 +206,7 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
         };
         store
             .report_result(&pipeline_id, project_ref.as_deref().unwrap_or_default(), &report)
-            .await?;
+            .await;
     }
     info!(
         applied = outcome.applied(),
@@ -243,9 +247,8 @@ fn init_crypto_provider() {
 
 /// Initializes direct stdout logging for short-lived Kubernetes Jobs.
 fn init_stdout_tracing() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new("etl_ducklake_maintenance=info,etl_maintenance::ducklake=info")
-    });
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("etl_ducklake_maintenance=info,etl_maintenance=info"));
     let _ = tracing_subscriber::registry()
         .with(filter)
         .with(tracing_subscriber::fmt::layer().with_target(true))
