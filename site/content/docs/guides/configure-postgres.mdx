@@ -73,9 +73,10 @@ If ETL instead observes an existing slot with `wal_status = 'lost'`, it reports
 a manually retryable table error.
 
 If a previous session still holds the table-sync slot when a copy starts,
-ETL gives it 90 seconds to release the slot. A release during that window
-lets the same attempt proceed. If the slot is still busy at the end, the
-table uses its configured retry policy.
+ETL checks every five seconds for up to 90 seconds. If a check finds the
+slot available, the same copy attempt proceeds. If the last check reported
+the slot busy, the table uses its configured retry policy when the deadline
+expires. If a check is still awaiting a reply, ETL reports a deletion timeout.
 
 ETL keeps a table-sync worker's concurrency capacity reserved until it observes
 that both the creating backend and the slot are gone. Delayed session teardown

@@ -13,7 +13,10 @@ use rustls::{
     ClientConfig,
     pki_types::{CertificateDer, pem::PemObject},
 };
-use tokio::{sync::watch, time::timeout};
+use tokio::{
+    sync::watch,
+    time::{Instant, sleep_until, timeout, timeout_at},
+};
 use tokio_postgres::{
     Client, Config, Connection, IsolationLevel, NoTls, SimpleQueryMessage, Socket, Transaction,
     config::ReplicationMode, error::SqlState, tls::MakeTlsConnect, types::PgLsn,
@@ -737,28 +740,35 @@ impl PgReplicationClient {
     /// A missing slot is already deleted. Other failures preserve the source
     /// error, and deletion waits are bounded by [`DELETE_SLOT_TIMEOUT`].
     pub async fn delete_slot_if_exists(&self, slot_name: &str) -> EtlResult<()> {
-        self.drop_slot_if_exists(slot_name, true).await
+        self.drop_slot_if_exists(slot_name, true, Instant::now() + DELETE_SLOT_TIMEOUT).await
     }
 
     /// Gives the previous sync session time to exit without leaving a
     /// server-side WAIT command that could drop a later attempt's slot.
     pub(crate) async fn delete_table_sync_slot_if_exists(&self, slot_name: &str) -> EtlResult<()> {
-        let deadline = tokio::time::Instant::now() + DELETE_SLOT_TIMEOUT;
+        let deadline = Instant::now() + DELETE_SLOT_TIMEOUT;
         loop {
-            let Err(error) = self.drop_slot_if_exists(slot_name, false).await else {
+            let Err(error) = self.drop_slot_if_exists(slot_name, false, deadline).await else {
                 return Ok(());
             };
 
-            let now = tokio::time::Instant::now();
-            if error.kind() != ErrorKind::ReplicationSlotInUse || now >= deadline {
+            if error.kind() != ErrorKind::ReplicationSlotInUse {
                 return Err(error);
             }
 
-            tokio::time::sleep_until(deadline.min(now + SYNC_SLOT_RECHECK_INTERVAL)).await;
+            sleep_until(deadline.min(Instant::now() + SYNC_SLOT_RECHECK_INTERVAL)).await;
+            if Instant::now() >= deadline {
+                return Err(error);
+            }
         }
     }
 
-    async fn drop_slot_if_exists(&self, slot_name: &str, wait: bool) -> EtlResult<()> {
+    async fn drop_slot_if_exists(
+        &self,
+        slot_name: &str,
+        wait: bool,
+        deadline: Instant,
+    ) -> EtlResult<()> {
         debug!(slot_name, "deleting replication slot");
 
         // PostgreSQL requires uppercase keywords in replication protocol
@@ -766,9 +776,7 @@ impl PgReplicationClient {
         let wait_clause = if wait { " WAIT" } else { "" };
         let query = format!("DROP_REPLICATION_SLOT {}{wait_clause};", quote_identifier(slot_name));
 
-        let Ok(delete_result) =
-            tokio::time::timeout(DELETE_SLOT_TIMEOUT, self.client.simple_query(&query)).await
-        else {
+        let Ok(delete_result) = timeout_at(deadline, self.client.simple_query(&query)).await else {
             bail!(
                 ErrorKind::ReplicationSlotDeletionTimeout,
                 "Replication slot deletion timed out",
@@ -970,7 +978,7 @@ mod tests {
         net::TcpListener,
         spawn,
         sync::oneshot,
-        time::{Instant, pause, resume, timeout_at},
+        time::{pause, resume},
     };
     use tokio_util::task::AbortOnDropHandle;
 
@@ -1033,6 +1041,56 @@ mod tests {
                 0
             );
         }
+    }
+
+    /// A busy reply followed by a stalled recheck shares one deletion deadline.
+    #[tokio::test]
+    async fn exclusive_stalled_sync_slot_recheck_uses_original_deadline() {
+        use futures::FutureExt;
+
+        use crate::test_utils::{database::local_pg_connection_config, pipeline::test_slot_name};
+
+        let config =
+            PgConnectionConfig { name: "postgres".to_owned(), ..local_pg_connection_config() };
+        let slot_name = test_slot_name("stalled_sync_drop");
+        let mut owner = PgReplicationClient::connect(config.clone()).await.unwrap();
+        owner
+            .create_slot(
+                &slot_name,
+                &ReplicationSlotConfig {
+                    persistence: ReplicationSlotPersistence::Temporary,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let lock_key = owner.backend_pid().await.unwrap();
+        owner.client.simple_query("select pg_advisory_lock(pg_backend_pid())").await.unwrap();
+
+        let probe = PgReplicationClient::connect(config).await.unwrap();
+        let deletion = probe.delete_table_sync_slot_if_exists(&slot_name);
+        tokio::pin!(deletion);
+        assert!(deletion.as_mut().now_or_never().is_none());
+
+        // The same connection processes this query after the first busy reply.
+        probe.client.simple_query("select 1").await.unwrap();
+        let block_query = format!("select pg_advisory_xact_lock({lock_key})");
+        let blocker = probe.client.simple_query(&block_query);
+        tokio::pin!(blocker);
+        assert!(blocker.as_mut().now_or_never().is_none());
+
+        pause();
+        let deadline = Instant::now() + DELETE_SLOT_TIMEOUT;
+        assert!(deletion.as_mut().now_or_never().is_none());
+        tokio::time::advance(DELETE_SLOT_TIMEOUT - Duration::from_secs(1)).await;
+
+        // The recheck is queued behind the lock with one second left.
+        let error = deletion.await.unwrap_err();
+        let finished = Instant::now();
+        resume();
+
+        assert_eq!(error.kind(), ErrorKind::ReplicationSlotDeletionTimeout);
+        assert!(finished <= deadline + Duration::from_millis(1), "cleanup exceeded its deadline");
     }
 
     /// Certificate-less bundles fail before a crypto provider or connection
