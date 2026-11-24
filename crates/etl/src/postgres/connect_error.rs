@@ -3,9 +3,9 @@
 use std::{error::Error as _, io};
 
 use sqlx::postgres::PgConnectOptions;
-use tokio_postgres::{Config, config::Host};
+use tokio_postgres::{Client, Config, Connection, Socket, config::Host, tls::MakeTlsConnect};
 
-use crate::error::{ErrorKind, EtlError};
+use crate::error::{ErrorKind, EtlError, EtlResult};
 
 /// Checks the socket errors that can indicate a stale or missing TCP address.
 fn unreachable(error: &io::Error) -> bool {
@@ -23,16 +23,46 @@ fn unreachable(error: &io::Error) -> bool {
             && error.to_string() == "could not resolve any addresses")
 }
 
-/// Classifies a failed replication or snapshot connection.
-pub(super) fn replication_connect_error(config: &Config, error: tokio_postgres::Error) -> EtlError {
-    // The pinned driver exposes Kind::Connect only through this fixed label.
-    // TLS, authentication and protocol I/O can also have an io::Error source.
-    let tcp = !config.get_hostaddrs().is_empty()
-        || matches!(config.get_hosts(), [Host::Tcp(host)] if !host.is_empty());
-    let failed = tcp
-        && error.source().and_then(|e| e.downcast_ref::<io::Error>()).is_some_and(unreachable)
-        && error.to_string() == "error connecting to server";
-    EtlError::from(error).with_source_network_failure(failed)
+/// Observes when the driver starts PostgreSQL or TLS negotiation on any
+/// candidate socket.
+struct ObserveConnectedSocket<'a, T> {
+    connected: &'a mut bool,
+    tls: T,
+}
+
+impl<T: MakeTlsConnect<Socket>> MakeTlsConnect<Socket> for ObserveConnectedSocket<'_, T> {
+    type Stream = T::Stream;
+    type TlsConnect = T::TlsConnect;
+    type Error = T::Error;
+
+    fn make_tls_connect(&mut self, domain: &str) -> Result<Self::TlsConnect, Self::Error> {
+        // tokio-postgres invokes the factory after TCP connects, even for
+        // NoTls.
+        *self.connected = true;
+        self.tls.make_tls_connect(domain)
+    }
+}
+
+/// Connects a replication or snapshot client, preserving the driver's address
+/// fallback.
+pub(super) async fn connect_replication<T: MakeTlsConnect<Socket>>(
+    config: &Config,
+    tls: T,
+) -> EtlResult<(Client, Connection<Socket, T::Stream>)> {
+    let mut connected = false;
+    let result = config.connect(ObserveConnectedSocket { connected: &mut connected, tls }).await;
+    result.map_err(|error| {
+        let hosts = config.get_hosts();
+        let tcp = !config.get_hostaddrs().is_empty()
+            || (!hosts.is_empty()
+                && hosts.iter().all(|h| matches!(h, Host::Tcp(host) if !host.is_empty())));
+        // A later failed dial can mask an earlier authentication or TLS
+        // rejection.
+        let failed = !connected
+            && tcp
+            && error.source().and_then(|e| e.downcast_ref::<io::Error>()).is_some_and(unreachable);
+        EtlError::from(error).with_postgres_dial_failure(failed)
+    })
 }
 
 /// Preserves the migration's normal error handling for all other causes.
@@ -42,11 +72,20 @@ pub(super) fn migration_connect_error(
     fallback: ErrorKind,
     description: &'static str,
 ) -> EtlError {
+    let dial_error = match &error {
+        // The pinned SQLx driver uses this error for its per-address TCP deadline.
+        // A generic I/O timeout can also come from the TLS or startup exchange.
+        sqlx::Error::Io(io) if io.kind() == io::ErrorKind::TimedOut => {
+            io.get_ref().is_some_and(|cause| cause.to_string() == "TCP connection timed out")
+        }
+        sqlx::Error::Io(io) => unreachable(io),
+        _ => false,
+    };
     let failed = options.get_socket().is_none()
         && !options.get_host().is_empty()
         && !options.get_host().starts_with('/')
-        && matches!(&error, sqlx::Error::Io(io) if unreachable(io));
-    EtlError::from((fallback, description)).with_source(error).with_source_network_failure(failed)
+        && dial_error;
+    EtlError::from((fallback, description)).with_source(error).with_postgres_dial_failure(failed)
 }
 
 #[cfg(test)]
@@ -77,9 +116,9 @@ mod tests {
         };
         let mut config = Config::new();
         config.host("127.0.0.1").port(port).user("test").ssl_mode(SslMode::Require);
-        let (connection, ()) = tokio::join!(config.connect(NoTls), reject_tls());
-        let error = replication_connect_error(&config, connection.err().unwrap());
-        assert!(!error.is_source_network_failure());
+        let (connection, ()) = tokio::join!(connect_replication(&config, NoTls), reject_tls());
+        let error = connection.err().unwrap();
+        assert!(!error.is_postgres_dial_failure());
         assert_eq!(error.kind(), ErrorKind::SourceConnectionFailed);
 
         let options = PgConnectOptions::new()
@@ -95,7 +134,41 @@ mod tests {
             "Test migration",
         );
         assert_eq!(error.kind(), ErrorKind::SourceError);
-        assert!(!error.is_source_network_failure());
+        assert!(!error.is_postgres_dial_failure());
+    }
+
+    /// The last refused dial must not hide that the first server rejected the
+    /// credentials.
+    #[tokio::test]
+    async fn refused_fallback_after_auth_rejection_is_not_a_dial_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut config = Config::new();
+        config
+            .host("localhost")
+            .host("127.0.0.1")
+            .port(listener.local_addr().unwrap().port())
+            .user("test");
+        let reject_auth = async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            drop(listener);
+            let len = socket.read_u32().await.unwrap();
+            let mut startup = vec![0; (len - 4) as usize];
+            socket.read_exact(&mut startup).await.unwrap();
+            assert_eq!(&startup[..4], &[0, 3, 0, 0]);
+            let fields = b"SFATAL\0C28P01\0Mtest authentication rejected\0\0";
+            socket.write_u8(b'E').await.unwrap();
+            socket.write_u32(u32::try_from(fields.len() + 4).unwrap()).await.unwrap();
+            socket.write_all(fields).await.unwrap();
+        };
+
+        let (result, ()) = tokio::join!(connect_replication(&config, NoTls), reject_auth);
+        let error = result.err().unwrap();
+        assert_eq!(error.kind(), ErrorKind::SourceConnectionFailed);
+        assert!(!error.is_postgres_dial_failure());
+
+        let error = connect_replication(&config, NoTls).await.err().unwrap();
+        assert_eq!(error.kind(), ErrorKind::SourceConnectionFailed);
+        assert!(error.is_postgres_dial_failure());
     }
 
     #[test]
@@ -110,6 +183,8 @@ mod tests {
         }
         for error in [
             sqlx::Error::PoolTimedOut,
+            sqlx::Error::Io(io::ErrorKind::TimedOut.into()),
+            sqlx::Error::Io(io::Error::new(io::ErrorKind::TimedOut, "Startup read timed out")),
             sqlx::Error::Tls(io::Error::from(io::ErrorKind::TimedOut).into()),
             sqlx::Error::Io(io::ErrorKind::InvalidData.into()),
             sqlx::Error::Protocol("test protocol error".into()),
@@ -118,18 +193,23 @@ mod tests {
             let error =
                 migration_connect_error(&options, error, ErrorKind::SourceError, "Test migration");
             assert_eq!(error.kind(), ErrorKind::SourceError);
-            assert!(!error.is_source_network_failure());
+            assert!(!error.is_postgres_dial_failure());
         }
-        let protocol = tokio_postgres::Error::parse(io::ErrorKind::TimedOut.into());
-        assert!(
-            !replication_connect_error(Config::new().host("localhost"), protocol)
-                .is_source_network_failure()
+        let options = PgConnectOptions::new().host("localhost");
+        let dial_timeout = io::Error::new(io::ErrorKind::TimedOut, "TCP connection timed out");
+        let error = migration_connect_error(
+            &options,
+            dial_timeout.into(),
+            ErrorKind::SourceError,
+            "Test migration",
         );
+        assert!(error.is_postgres_dial_failure());
+
         let socket = PgConnectOptions::new().host("/example/socket");
         let refused = sqlx::Error::Io(io::ErrorKind::ConnectionRefused.into());
         assert!(
             !migration_connect_error(&socket, refused, ErrorKind::SourceError, "Test migration")
-                .is_source_network_failure()
+                .is_postgres_dial_failure()
         );
     }
 }

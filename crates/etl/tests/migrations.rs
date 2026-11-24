@@ -240,7 +240,7 @@ async fn pipeline_start_runs_source_migrations_without_postgres_store_tables() {
     let mut pipeline = Pipeline::new(pipeline_config(database.config.clone()), store, destination);
 
     let error = pipeline.start().await.unwrap_err();
-    assert!(!error.is_source_network_failure());
+    assert!(!error.is_postgres_dial_failure());
 
     assert!(source_helper_exists(&database).await);
     assert!(!postgres_store_table_exists(&database).await);
@@ -258,10 +258,10 @@ async fn source_network_failure_excludes_rejected_credentials() {
 
     let migration = run_source_migrations(&config).await.unwrap_err();
     assert_eq!(migration.kind(), ErrorKind::SourceConnectionFailed);
-    assert!(!migration.is_source_network_failure());
+    assert!(!migration.is_postgres_dial_failure());
     let store = PostgresStore::new("1", config.clone()).await.unwrap_err();
     assert_eq!(store.kind(), ErrorKind::SourceError);
-    assert!(!store.is_source_network_failure());
+    assert!(!store.is_postgres_dial_failure());
 
     let mut pipeline_config = pipeline_config(config);
     pipeline_config.run_source_migrations = false;
@@ -269,7 +269,7 @@ async fn source_network_failure_excludes_rejected_credentials() {
     let mut pipeline = Pipeline::new(pipeline_config, store.clone(), MemoryDestination::new(store));
     let error = pipeline.start().await.unwrap_err();
     assert_eq!(error.kind(), ErrorKind::SourceAuthenticationError);
-    assert!(!error.is_source_network_failure());
+    assert!(!error.is_postgres_dial_failure());
 }
 
 #[tokio::test(flavor = "multi_thread")]

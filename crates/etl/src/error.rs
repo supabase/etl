@@ -31,8 +31,8 @@ pub type EtlResult<T> = Result<T, EtlError>;
 #[derive(Debug, Clone)]
 struct ErrorPayload {
     kind: ErrorKind,
-    /// Recorded only at a source TCP connection boundary.
-    source_network_failure: bool,
+    /// Recorded only at a PostgreSQL TCP connection boundary.
+    postgres_dial_failure: bool,
     /// Whether the failed operation may succeed if it runs again.
     retryability: Retryability,
     description: Cow<'static, str>,
@@ -53,7 +53,7 @@ impl ErrorPayload {
     ) -> Self {
         Self {
             kind,
-            source_network_failure: false,
+            postgres_dial_failure: false,
             retryability,
             description,
             detail,
@@ -341,22 +341,23 @@ impl ErrorKind {
 }
 
 impl EtlError {
-    /// Returns whether a source dial failed to resolve or reach its TCP
-    /// address.
+    /// Returns whether a PostgreSQL TCP dial failed to resolve or reach its
+    /// address. The caller identifies the database (for example, the source
+    /// or the store).
     ///
     /// An aggregate reports true if any member observed such a failure.
-    pub fn is_source_network_failure(&self) -> bool {
+    pub fn is_postgres_dial_failure(&self) -> bool {
         match &self.repr {
-            ErrorRepr::Single(payload) => payload.source_network_failure,
-            ErrorRepr::Many { errors } => errors.iter().any(Self::is_source_network_failure),
+            ErrorRepr::Single(payload) => payload.postgres_dial_failure,
+            ErrorRepr::Many { errors } => errors.iter().any(Self::is_postgres_dial_failure),
         }
     }
 
     /// Records the dial classification independently of its existing error kind
     /// and retry policy.
-    pub(crate) fn with_source_network_failure(mut self, failed: bool) -> Self {
+    pub(crate) fn with_postgres_dial_failure(mut self, failed: bool) -> Self {
         if let ErrorRepr::Single(payload) = &mut self.repr {
-            payload.source_network_failure = failed;
+            payload.postgres_dial_failure = failed;
         }
         self
     }

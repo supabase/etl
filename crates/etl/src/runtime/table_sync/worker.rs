@@ -677,7 +677,7 @@ where
                     return Ok(result);
                 }
                 Err(err) => {
-                    if err.is_source_network_failure() {
+                    if err.is_postgres_dial_failure() {
                         let _ = self.source_network_failures.send(());
                     }
                     let result = Self::handle_table_sync_worker_error(

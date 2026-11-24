@@ -274,7 +274,7 @@ where
                         retry_attempts = 0;
                     }
 
-                    if err.is_source_network_failure() {
+                    if err.is_postgres_dial_failure() {
                         let _ = self.source_network_failures.send(());
                     }
 

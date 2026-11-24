@@ -149,9 +149,10 @@ where
 
     /// Subscribes to failed source TCP connection attempts in running workers.
     ///
-    /// Notifications coalesce and never block a retry. During startup,
-    /// [`Self::start`] returns the error with
-    /// [`crate::error::EtlError::is_source_network_failure`] set.
+    /// Notifications coalesce. Use the receiver's `changed()` method to wait
+    /// without holding a watch borrow. For startup errors from
+    /// [`Self::start`], inspect
+    /// [`crate::error::EtlError::is_postgres_dial_failure`].
     pub fn subscribe_source_network_failures(&self) -> watch::Receiver<()> {
         self.source_network_failures.subscribe()
     }
@@ -579,12 +580,12 @@ mod tests {
             let store =
                 PostgresStore::new("1", pipeline.config.pg_connection.clone()).await.unwrap_err();
             assert_eq!(store.kind(), ErrorKind::SourceError);
-            assert!(store.is_source_network_failure());
+            assert!(store.is_postgres_dial_failure());
             for migrate in [true, false] {
                 Arc::make_mut(&mut pipeline.config).run_source_migrations = migrate;
                 let error = pipeline.start().await.unwrap_err();
                 assert_eq!(error.kind(), ErrorKind::SourceConnectionFailed);
-                assert!(error.is_source_network_failure());
+                assert!(error.is_postgres_dial_failure());
             }
         }
     }

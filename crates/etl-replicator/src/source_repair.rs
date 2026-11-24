@@ -92,7 +92,7 @@ impl<'a> SourceRepair<'a> {
     /// Gives an eligible startup error one bounded opportunity for repair and
     /// replacement before returning the original error to the supervisor.
     pub(crate) async fn startup(&self, error: &EtlError) {
-        if error.is_source_network_failure() {
+        if error.is_postgres_dial_failure() {
             let deadline = Instant::now() + ATTEMPT_WINDOW;
             if matches!(timeout_at(deadline, self.report()).await, Ok(true)) {
                 sleep_until(deadline).await;
@@ -228,7 +228,7 @@ mod tests {
 
     /// Reading the full request before dropping the socket models a lost
     /// acknowledgement.
-    async fn receive(listener: &TcpListener, phase: Phase) -> TcpStream {
+    async fn receive(listener: &TcpListener, phase: &str) -> TcpStream {
         let (socket, _) =
             timeout(Duration::from_secs(8), listener.accept()).await.unwrap().unwrap();
         let mut stream = BufReader::new(socket);
@@ -238,8 +238,7 @@ mod tests {
             line,
             format!(
                 "POST /system/replication/{PROJECT}/sources/42?cluster_id=cluster-a&\
-                 repair_phase={} HTTP/1.1\r\n",
-                phase.query()
+                 repair_phase={phase} HTTP/1.1\r\n"
             )
         );
         let mut key = false;
@@ -263,12 +262,21 @@ mod tests {
         stream.into_inner()
     }
 
-    async fn reply(mut socket: TcpStream, body: &str) {
+    async fn reply(mut socket: TcpStream, body: &str) -> TcpStream {
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         );
         socket.write_all(response.as_bytes()).await.unwrap();
+        socket
+    }
+
+    async fn acknowledge_save(listener: &TcpListener) {
+        reply(receive(listener, "save").await, r#"{"status":"source_saved"}"#).await;
+    }
+
+    async fn acknowledge_rollout(listener: &TcpListener) -> TcpStream {
+        reply(receive(listener, "rollout").await, r#"{"status":"rollout_requested"}"#).await
     }
 
     #[tokio::test]
@@ -277,11 +285,10 @@ mod tests {
         let flags = flags(true);
         let repair = reporter(&api, &flags);
         let (confirmed, ()) = tokio::join!(repair.report(), async {
-            drop(receive(&listener, Phase::Save).await);
-            reply(receive(&listener, Phase::Save).await, r#"{"status":"source_saved"}"#).await;
-            drop(receive(&listener, Phase::Rollout).await);
-            reply(receive(&listener, Phase::Rollout).await, r#"{"status":"rollout_requested"}"#)
-                .await;
+            drop(receive(&listener, "save").await);
+            acknowledge_save(&listener).await;
+            drop(receive(&listener, "rollout").await);
+            acknowledge_rollout(&listener).await;
         });
         assert!(confirmed);
     }
@@ -294,7 +301,7 @@ mod tests {
         for body in [r#"{"status":"rollout_requested"}"#.to_owned(), " ".repeat(MAX_ACK_BYTES + 1)]
         {
             let (confirmed, ()) = tokio::join!(repair.report(), async {
-                reply(receive(&listener, Phase::Save).await, &body).await;
+                reply(receive(&listener, "save").await, &body).await;
             });
             assert!(!confirmed);
         }
@@ -309,13 +316,12 @@ mod tests {
             _ = first.report() => panic!("first caller completed before save acknowledgement"),
 
             // The backend committed this request, then the pod was replaced.
-            socket = receive(&listener, Phase::Save) => drop(socket),
+            socket = receive(&listener, "save") => drop(socket),
         }
         let replacement = reporter(&api, &flags);
         let (confirmed, ()) = tokio::join!(replacement.report(), async {
-            reply(receive(&listener, Phase::Save).await, r#"{"status":"source_saved"}"#).await;
-            reply(receive(&listener, Phase::Rollout).await, r#"{"status":"rollout_requested"}"#)
-                .await;
+            acknowledge_save(&listener).await;
+            acknowledge_rollout(&listener).await;
         });
         assert!(confirmed);
     }
@@ -351,13 +357,39 @@ mod tests {
         let error =
             run_source_migrations(&unreachable_config().pipeline.pg_connection).await.unwrap_err();
         let ((), mut socket) = tokio::join!(repair.startup(&error), async {
-            let socket = receive(&listener, Phase::Save).await;
+            let socket = receive(&listener, "save").await;
             pause();
             advance(ATTEMPT_WINDOW).await;
             socket
         });
         let mut byte = [0];
         assert_eq!(socket.read(&mut byte).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn acknowledged_startup_waits_for_replacement_until_deadline() {
+        let (listener, api) = server().await;
+        let flags = flags(true);
+        let repair = reporter(&api, &flags);
+        let error =
+            run_source_migrations(&unreachable_config().pipeline.pg_connection).await.unwrap_err();
+        let deadline = Instant::now() + ATTEMPT_WINDOW;
+        let startup = repair.startup(&error);
+        tokio::pin!(startup);
+
+        tokio::select! {
+            () = &mut startup => panic!("startup returned before replacement grace period"),
+
+            () = async {
+                acknowledge_save(&listener).await;
+                let mut rollout = acknowledge_rollout(&listener).await;
+                // Let the client consume the acknowledgement before advancing the clock.
+                assert_eq!(rollout.read(&mut [0]).await.unwrap(), 0);
+            } => {}
+        }
+        pause();
+        assert!(timeout_at(deadline - Duration::from_secs(1), &mut startup).await.is_err());
+        timeout_at(deadline + Duration::from_secs(1), startup).await.unwrap();
     }
 
     #[tokio::test]
@@ -371,7 +403,7 @@ mod tests {
         let result =
             crate::core::start_replicator_with_config(config.clone(), None, Some(&repair)).await;
         assert!(
-            matches!(result, Err(crate::error::ReplicatorError::Etl(error)) if error.is_source_network_failure())
+            matches!(result, Err(crate::error::ReplicatorError::Etl(error)) if error.is_postgres_dial_failure())
         );
         assert!(timeout(Duration::from_millis(30), listener.accept()).await.is_err());
 
@@ -379,10 +411,10 @@ mod tests {
         let (result, ()) = tokio::join!(
             crate::core::start_replicator_with_config(config, None, Some(&repair)),
             async {
-                reply(receive(&listener, Phase::Save).await, r#"{"status":"source_saved"}"#).await;
+                acknowledge_save(&listener).await;
                 // The backend declined rollout. Preserve the original startup
                 // error.
-                let mut socket = receive(&listener, Phase::Rollout).await;
+                let mut socket = receive(&listener, "rollout").await;
                 socket
                     .write_all(
                         b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -392,63 +424,42 @@ mod tests {
             }
         );
         assert!(
-            matches!(result, Err(crate::error::ReplicatorError::Etl(error)) if error.is_source_network_failure())
+            matches!(result, Err(crate::error::ReplicatorError::Etl(error)) if error.is_postgres_dial_failure())
         );
     }
 
     #[cfg(feature = "any-destination")]
     #[tokio::test]
-    async fn cooldown_requires_a_fresh_failure_and_allows_a_later_report() {
+    async fn worker_failures_coalesce_until_cooldown_and_shutdown_cancels_rollout() {
         let (listener, api) = server().await;
         let flags = flags(true);
         let repair = reporter(&api, &flags);
         let (failures, receiver) = watch::channel(());
         failures.send(()).unwrap();
-        tokio::select! {
+        let mut rollout = tokio::select! {
             () = repair.run(receiver) => panic!("reporter stopped before shutdown"),
 
-            () = async {
-                reply(receive(&listener, Phase::Save).await, r#"{"status":"source_saved"}"#).await;
-                let rollout = receive(&listener, Phase::Rollout).await;
-                failures.send(()).unwrap();
-                reply(rollout, r#"{"status":"rollout_requested"}"#).await;
+            socket = async {
+                let save = receive(&listener, "save").await;
+                for _ in 0..10 {
+                    failures.send(()).unwrap();
+                }
+                reply(save, r#"{"status":"source_saved"}"#).await;
+                acknowledge_rollout(&listener).await;
                 assert!(timeout(Duration::from_millis(100), listener.accept()).await.is_err());
                 failures.send(()).unwrap();
                 pause();
                 advance(Duration::from_secs(91)).await;
                 tokio::time::resume();
                 assert!(timeout(Duration::from_millis(100), listener.accept()).await.is_err());
+
                 failures.send(()).unwrap();
-                drop(receive(&listener, Phase::Save).await);
-            } => {}
-        }
-    }
-
-    #[cfg(feature = "any-destination")]
-    #[tokio::test]
-    async fn concurrent_worker_failures_coalesce_and_shutdown_cancels_rollout() {
-        let (listener, api) = server().await;
-        let flags = flags(true);
-        let repair = reporter(&api, &flags);
-        let (failures, receiver) = watch::channel(());
-        failures.send(()).unwrap();
-        let mut rollout = {
-            let run = repair.run(receiver);
-            tokio::pin!(run);
-            tokio::select! {
-                () = &mut run => panic!("reporter stopped before shutdown"),
-
-                socket = async {
-                    let save = receive(&listener, Phase::Save).await;
-                    for _ in 0..10 { failures.send(()).unwrap(); }
-                    reply(save, r#"{"status":"source_saved"}"#).await;
-                    receive(&listener, Phase::Rollout).await
-                } => socket,
-            }
+                acknowledge_save(&listener).await;
+                receive(&listener, "rollout").await
+            } => socket,
         };
-        let mut byte = [0];
         assert_eq!(
-            timeout(Duration::from_secs(2), rollout.read(&mut byte)).await.unwrap().unwrap(),
+            timeout(Duration::from_secs(2), rollout.read(&mut [0])).await.unwrap().unwrap(),
             0
         );
         assert!(timeout(Duration::from_millis(30), listener.accept()).await.is_err());

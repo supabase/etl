@@ -35,7 +35,7 @@ use crate::{
     pipeline::PipelineId,
     postgres::{
         FeedbackHandle, ReplicationMessageStream, client::SlotCreationMonitor,
-        connect_error::replication_connect_error,
+        connect_error::connect_replication,
     },
     replication::{DEFAULT_WAL_SENDER_TIMEOUT, WorkerType},
     schema::{TableId, TableName},
@@ -350,8 +350,7 @@ impl PgReplicationClient {
             connection_config.pg_connection_config().with_db(Some(connection_config.options()));
         kind.configure(&mut config);
 
-        let (client, connection) =
-            config.connect(NoTls).await.map_err(|e| replication_connect_error(&config, e))?;
+        let (client, connection) = connect_replication(&config, NoTls).await?;
 
         let server_version =
             connection.parameter("server_version").and_then(extract_server_version);
@@ -381,10 +380,8 @@ impl PgReplicationClient {
         let tls_config = connection_config.tls_client_config().ok_or_else(|| {
             etl_error!(ErrorKind::InvalidState, "TLS client config missing for TLS connection")
         })?;
-        let (client, connection) = config
-            .connect(MakeRustlsConnect::from_shared_config(tls_config))
-            .await
-            .map_err(|e| replication_connect_error(&config, e))?;
+        let (client, connection) =
+            connect_replication(&config, MakeRustlsConnect::from_shared_config(tls_config)).await?;
 
         let server_version =
             connection.parameter("server_version").and_then(extract_server_version);
