@@ -534,10 +534,18 @@ mod tests {
     #[test]
     fn add_column_default_clause_uses_missing_value_hint() {
         for (missing, expected) in [(Some("1"), Some(" DEFAULT 1")), (None, Some(" DEFAULT 2"))] {
+            // GIVEN: a column with a future default and an optional captured
+            // add-time value.
             let column = ColumnSchema::new("score".to_owned(), Type::INT4, -1, 1, true)
                 .with_default_expression("2".to_owned())
                 .with_missing_value_expression(missing.map(ToOwned::to_owned));
-            assert_eq!(add_column_default_clause(&column).as_deref(), expected);
+
+            // WHEN: Snowflake renders the ADD COLUMN default clause.
+            let clause = add_column_default_clause(&column);
+
+            // THEN: it uses the add-time value when present and falls back to
+            // the current default.
+            assert_eq!(clause.as_deref(), expected);
         }
     }
 

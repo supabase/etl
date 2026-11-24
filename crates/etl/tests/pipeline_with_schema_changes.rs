@@ -1404,6 +1404,8 @@ async fn uncaptured_column_swap_stops_replication_before_writing_rows() {
     init_test_tracing();
 
     for widen_earlier_column in [false, true] {
+        // GIVEN: a synced pipeline replicating a table whose swapped columns
+        // follow a varchar column.
         let (database, table_name, table_id, _store, destination, pipeline, _pipeline_id, _pub) =
             create_database_and_sync_done_pipeline_with_table(
                 "uncaptured_swap",
@@ -1417,9 +1419,9 @@ async fn uncaptured_column_swap_stops_replication_before_writing_rows() {
             String::new()
         };
 
-        // Renaming a helper makes capture fail open, so the DDL commits
-        // without a snapshot and the next relation disagrees with the stored
-        // order.
+        // WHEN: col_a and col_b are swapped, optionally after widening the
+        // earlier column, while DDL capture fails open, then a row is
+        // inserted. Renaming a helper makes capture fail open.
         database
             .run_sql(
                 "alter function etl.describe_table_publication_columns(oid, text) rename to \
@@ -1453,6 +1455,8 @@ async fn uncaptured_column_swap_stops_replication_before_writing_rows() {
             .await
             .unwrap();
 
+        // THEN: replication fails with CorruptedTableSchema before writing the
+        // inserted row.
         let error = wait_for_pipeline_error(&pipeline).await;
 
         assert_eq!(error.kind(), ErrorKind::CorruptedTableSchema, "widen: {widen_earlier_column}");

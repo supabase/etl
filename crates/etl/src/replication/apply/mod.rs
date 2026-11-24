@@ -5413,12 +5413,18 @@ mod tests {
         // metadata stale.
         #[test]
         fn relation_with_changed_type_modifier_is_detected() {
+            // GIVEN: a relation whose varchar modifier (14) differs from the
+            // stored schema (-1).
             let case = published_case(&[("a", Type::VARCHAR)], &[("a", Type::VARCHAR)]);
             let mut bytes = encode_relation(&case).to_vec();
             *bytes.last_chunk_mut::<4>().unwrap() = 14_i32.to_be_bytes();
             let relation = parse_relation(&Bytes::from(bytes));
+
+            // WHEN: the relation is materialized against the stored schema.
             let (_, mismatch) =
                 replicated_table_schema_from_relation(stored_schema(&case), &relation).unwrap();
+
+            // THEN: a TypeModifier mismatch is reported.
             assert_eq!(
                 mismatch.map(|mismatch| mismatch.kind()),
                 Some(RelationSchemaMismatchKind::TypeModifier)

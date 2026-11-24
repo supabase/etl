@@ -5815,6 +5815,8 @@ mod tests {
                 r#"alter table "lake"."public"."users" alter column "score" drop default"#,
             ),
         ] {
+            // GIVEN: an added column whose add-time value differs from its
+            // final source default.
             let column = ColumnSchema::new("score".to_owned(), PgType::INT4, -1, 2, true)
                 .with_default_expression_option(future_default.map(ToOwned::to_owned))
                 .with_missing_value_expression(Some("1".to_owned()));
@@ -5825,6 +5827,8 @@ mod tests {
             );
 
             for already_added in [false, true] {
+                // WHEN: DuckLake plans the DDL on initial apply and on replay
+                // after column add.
                 let names = if already_added { vec!["id", "score"] } else { vec!["id"] };
                 let plan = plan_ducklake_schema_ddl(
                     &ducklake_table_name(),
@@ -5833,6 +5837,8 @@ mod tests {
                 )
                 .unwrap();
 
+                // THEN: it installs or drops the final default, and only adds
+                // the column if absent.
                 let sql: Vec<_> =
                     plan.statements.iter().map(|statement| statement.sql.as_str()).collect();
                 let expected = if already_added {
@@ -5851,6 +5857,8 @@ mod tests {
 
     #[test]
     fn plan_ducklake_schema_ddl_omits_redundant_set_default_when_rendered_defaults_match() {
+        // GIVEN: an added column whose missing value and cast default render
+        // identically.
         let column = ColumnSchema::new("status".to_owned(), PgType::TEXT, -1, 2, true)
             .with_default_expression("'hello'::text".to_owned())
             .with_missing_value_expression(Some("'hello'".to_owned()));
@@ -5860,10 +5868,12 @@ mod tests {
             ["id", "status"],
         );
 
+        // WHEN: DuckLake plans the column addition.
         let plan =
             plan_ducklake_schema_ddl(&ducklake_table_name(), vec!["id".to_owned()], &shared_plan)
                 .unwrap();
 
+        // THEN: only ADD COLUMN is emitted without a redundant SET DEFAULT.
         let sql: Vec<_> = plan.statements.iter().map(|statement| statement.sql.as_str()).collect();
         assert_eq!(
             sql,
