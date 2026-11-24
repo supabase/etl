@@ -82,9 +82,8 @@ async fn async_main(
     let metrics_http_listener = init::init_metrics(&replicator_config)?;
 
     // Keep the feature flags client alive for the full async runtime lifetime.
-    let feature_flags_client = init::init_feature_flags(&replicator_config)?;
-    let source_repair =
-        SourceRepair::from_env(management_api.as_ref(), feature_flags_client.as_ref());
+    let _feature_flags_client = init::init_feature_flags(&replicator_config)?;
+    let source_repair = management_api.as_ref().and_then(SourceRepair::from_env);
 
     info!("replicator bootstrap completed");
 

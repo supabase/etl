@@ -3,7 +3,6 @@
 
 use std::{env, time::Duration};
 
-use configcat::Client;
 use etl::error::EtlError;
 use etl_config::shared::validate_supabase_project_ref;
 use reqwest::StatusCode;
@@ -15,7 +14,6 @@ use tracing::{info, warn};
 
 use crate::management_api::ManagementApiClient;
 
-const ENABLED_FLAG: &str = "etl_automatic_source_repair";
 const SOURCE_ID_ENV: &str = "ETL_SOURCE_REPAIR_SOURCE_ID";
 const CLUSTER_ID_ENV: &str = "ETL_SOURCE_REPAIR_CLUSTER_ID";
 const ATTEMPT_WINDOW: Duration = Duration::from_secs(60);
@@ -58,27 +56,23 @@ struct Acknowledgement<'a> {
 /// future cancels the current request or timer without detaching work.
 pub(crate) struct SourceRepair<'a> {
     api: &'a ManagementApiClient,
-    flags: &'a Client,
     source_id: String,
     cluster_id: String,
 }
 
 impl<'a> SourceRepair<'a> {
-    /// Only managed processes with complete routing, credentials and cohort
-    /// evaluation can report.
-    pub(crate) fn from_env(
-        api: Option<&'a ManagementApiClient>,
-        flags: Option<&'a Client>,
-    ) -> Option<Self> {
-        Self::new(api?, flags?, env::var(SOURCE_ID_ENV).ok()?, env::var(CLUSTER_ID_ENV).ok()?)
+    /// The managed pod opts in by supplying both routing IDs at startup.
+    pub(crate) fn from_env(api: &'a ManagementApiClient) -> Option<Self> {
+        Self::new(api, env::var(SOURCE_ID_ENV).ok(), env::var(CLUSTER_ID_ENV).ok())
     }
 
     fn new(
         api: &'a ManagementApiClient,
-        flags: &'a Client,
-        source_id: String,
-        cluster_id: String,
+        source_id: Option<String>,
+        cluster_id: Option<String>,
     ) -> Option<Self> {
+        let source_id = source_id?;
+        let cluster_id = cluster_id?;
         validate_supabase_project_ref(api.project_ref()).ok()?;
         if source_id.is_empty()
             || !source_id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
@@ -86,7 +80,7 @@ impl<'a> SourceRepair<'a> {
         {
             return None;
         }
-        Some(Self { api, flags, source_id, cluster_id })
+        Some(Self { api, source_id, cluster_id })
     }
 
     /// Gives an eligible startup error one bounded opportunity for repair and
@@ -115,10 +109,6 @@ impl<'a> SourceRepair<'a> {
         for phase in [Phase::Save, Phase::Rollout] {
             let mut backoff_seconds = 2;
             loop {
-                // A cohort can be disabled between save and rollout.
-                if !self.flags.get_value(ENABLED_FLAG, false, None).await {
-                    return false;
-                }
                 match self.request(phase).await {
                     Reply::Acknowledged => break,
                     Reply::Stop => return false,
@@ -176,7 +166,6 @@ impl<'a> SourceRepair<'a> {
 
 #[cfg(test)]
 mod tests {
-    use configcat::{MapDataSource, OverrideBehavior, Value};
     use etl::{error::ErrorKind, migrations::run_source_migrations};
     use etl_config::shared::ReplicatorConfig;
     use tokio::{
@@ -200,16 +189,6 @@ mod tests {
         })).unwrap()
     }
 
-    fn flags(enabled: bool) -> Client {
-        Client::builder("local-test")
-            .overrides(
-                Box::new(MapDataSource::from([(ENABLED_FLAG, Value::Bool(enabled))])),
-                OverrideBehavior::LocalOnly,
-            )
-            .build()
-            .unwrap()
-    }
-
     async fn server() -> (TcpListener, ManagementApiClient) {
         let listener = TcpListener::bind("[::1]:0").await.unwrap();
         let api = ManagementApiClient::new(
@@ -222,8 +201,8 @@ mod tests {
         (listener, api)
     }
 
-    fn reporter<'a>(api: &'a ManagementApiClient, flags: &'a Client) -> SourceRepair<'a> {
-        SourceRepair::new(api, flags, "42".into(), "cluster-a".into()).unwrap()
+    fn reporter(api: &ManagementApiClient) -> SourceRepair<'_> {
+        SourceRepair::new(api, Some("42".into()), Some("cluster-a".into())).unwrap()
     }
 
     /// Reading the full request before dropping the socket models a lost
@@ -282,8 +261,7 @@ mod tests {
     #[tokio::test]
     async fn retries_each_lost_reply_before_advancing_to_the_next_phase() {
         let (listener, api) = server().await;
-        let flags = flags(true);
-        let repair = reporter(&api, &flags);
+        let repair = reporter(&api);
         let (confirmed, ()) = tokio::join!(repair.report(), async {
             drop(receive(&listener, "save").await);
             acknowledge_save(&listener).await;
@@ -296,8 +274,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_wrong_or_oversized_save_acknowledgements() {
         let (listener, api) = server().await;
-        let flags = flags(true);
-        let repair = reporter(&api, &flags);
+        let repair = reporter(&api);
         for body in [r#"{"status":"rollout_requested"}"#.to_owned(), " ".repeat(MAX_ACK_BYTES + 1)]
         {
             let (confirmed, ()) = tokio::join!(repair.report(), async {
@@ -310,15 +287,14 @@ mod tests {
     #[tokio::test]
     async fn replacement_resumes_after_the_first_caller_disappears() {
         let (listener, api) = server().await;
-        let flags = flags(true);
-        let first = reporter(&api, &flags);
+        let first = reporter(&api);
         tokio::select! {
             _ = first.report() => panic!("first caller completed before save acknowledgement"),
 
             // The backend committed this request, then the pod was replaced.
             socket = receive(&listener, "save") => drop(socket),
         }
-        let replacement = reporter(&api, &flags);
+        let replacement = reporter(&api);
         let (confirmed, ()) = tokio::join!(replacement.report(), async {
             acknowledge_save(&listener).await;
             acknowledge_rollout(&listener).await;
@@ -327,17 +303,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn incomplete_routing_disabled_cohort_and_unrelated_errors_do_not_report() {
+    async fn incomplete_routing_and_unrelated_errors_do_not_report() {
         let (listener, api) = server().await;
-        let off = flags(false);
-        for (source, cluster) in [("", "a"), ("1", " "), ("../emails", "a")] {
-            assert!(SourceRepair::new(&api, &off, source.into(), cluster.into()).is_none());
+        for (source, cluster) in [
+            (None, None),
+            (Some("42"), None),
+            (None, Some("cluster-a")),
+            (Some(""), Some("cluster-a")),
+            (Some("42"), Some(" ")),
+            (Some("../emails"), Some("cluster-a")),
+        ] {
+            assert!(
+                SourceRepair::new(&api, source.map(str::to_owned), cluster.map(str::to_owned))
+                    .is_none()
+            );
         }
-        assert!(SourceRepair::from_env(None, Some(&off)).is_none());
-        assert!(SourceRepair::from_env(Some(&api), None).is_none());
-        assert!(!reporter(&api, &off).report().await);
-        let on = flags(true);
-        let repair = reporter(&api, &on);
+        let repair = reporter(&api);
         for kind in [
             ErrorKind::SourceConnectionFailed,
             ErrorKind::SourceAuthenticationError,
@@ -352,8 +333,7 @@ mod tests {
     #[tokio::test]
     async fn startup_deadline_cancels_an_unconfirmed_save() {
         let (listener, api) = server().await;
-        let flags = flags(true);
-        let repair = reporter(&api, &flags);
+        let repair = reporter(&api);
         let error =
             run_source_migrations(&unreachable_config().pipeline.pg_connection).await.unwrap_err();
         let ((), mut socket) = tokio::join!(repair.startup(&error), async {
@@ -369,8 +349,7 @@ mod tests {
     #[tokio::test]
     async fn acknowledged_startup_waits_for_replacement_until_deadline() {
         let (listener, api) = server().await;
-        let flags = flags(true);
-        let repair = reporter(&api, &flags);
+        let repair = reporter(&api);
         let error =
             run_source_migrations(&unreachable_config().pipeline.pg_connection).await.unwrap_err();
         let deadline = Instant::now() + ATTEMPT_WINDOW;
@@ -395,8 +374,7 @@ mod tests {
     #[tokio::test]
     async fn store_startup_reports_only_the_configured_source_route() {
         let (listener, api) = server().await;
-        let flags = flags(true);
-        let repair = reporter(&api, &flags);
+        let repair = reporter(&api);
         let mut config = unreachable_config();
         config.pipeline.store_pg_connection = Some(config.pipeline.pg_connection.clone());
         config.pipeline.pg_connection.host = "other.test".into();
@@ -432,8 +410,7 @@ mod tests {
     #[tokio::test]
     async fn worker_failures_coalesce_until_cooldown_and_shutdown_cancels_rollout() {
         let (listener, api) = server().await;
-        let flags = flags(true);
-        let repair = reporter(&api, &flags);
+        let repair = reporter(&api);
         let (failures, receiver) = watch::channel(());
         failures.send(()).unwrap();
         let mut rollout = tokio::select! {
