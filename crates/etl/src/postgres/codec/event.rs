@@ -587,12 +587,12 @@ impl fmt::Display for RelationSchemaMismatch {
 }
 
 /// Returns whether ETL's text codec decodes both types to the same value.
-fn decodes_as_same_text(left: &Type, right: &Type) -> bool {
+pub(crate) fn decodes_as_same_text(left: &Type, right: &Type) -> bool {
     const STRING_TYPES: [Type; 4] = [Type::TEXT, Type::VARCHAR, Type::BPCHAR, Type::NAME];
     STRING_TYPES.contains(left) && STRING_TYPES.contains(right)
 }
 
-/// Returns where a relation message stops matching the decoder's column order,
+/// Returns how a relation message disagrees with the decoder's column order,
 /// types, and type modifiers, if it does.
 ///
 /// Masks are built by name, but tuples are decoded by position. A stored
@@ -601,6 +601,10 @@ fn decodes_as_same_text(left: &Type, right: &Type) -> bool {
 /// the name check while decoding values into the wrong column or with the
 /// wrong type. Types are compared after the same OID mapping used for stored
 /// schemas, so types ETL decodes as text still agree.
+///
+/// Every column is checked: the first disagreement that misaligns values is
+/// reported, even after an earlier harmless one, and otherwise the first
+/// harmless disagreement.
 fn detect_relation_schema_mismatch(
     relation_body: &protocol::RelationBody,
     replicated_table_schema: &ReplicatedTableSchema,
@@ -618,6 +622,7 @@ fn detect_relation_schema_mismatch(
         }));
     }
 
+    let mut first_harmless = None;
     for (index, (relation_column, decoder_column)) in
         relation_columns.iter().zip(decoder_columns).enumerate()
     {
@@ -640,7 +645,7 @@ fn detect_relation_schema_mismatch(
             continue;
         };
 
-        return Ok(Some(RelationSchemaMismatch {
+        let mismatch = RelationSchemaMismatch {
             kind,
             detail: format!(
                 "relation column {} is '{}' with type OID {} and modifier {}, but the stored \
@@ -653,18 +658,23 @@ fn detect_relation_schema_mismatch(
                 decoder_column.typ,
                 decoder_column.modifier
             ),
-        }));
+        };
+        if kind.misaligns_values() {
+            return Ok(Some(mismatch));
+        }
+        first_harmless.get_or_insert(mismatch);
     }
 
-    Ok(None)
+    Ok(first_harmless)
 }
 
 /// Builds the positional row decoder for a relation message from a stored
 /// table schema.
 ///
 /// The replication and identity masks are built by column name, so the result
-/// keeps the stored `attnum` order. The returned mismatch reports the first
-/// position where that order or a column type disagrees with the relation.
+/// keeps the stored `attnum` order. The returned mismatch is the first
+/// position that would misalign decoded values, or else the first harmless
+/// type or modifier difference.
 ///
 /// Fails when a relation column name is not UTF-8 or is missing from the
 /// stored schema.

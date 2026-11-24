@@ -5380,6 +5380,18 @@ mod tests {
             assert_eq!(mismatch_kind(&case), Some(RelationSchemaMismatchKind::NameOrder));
         }
 
+        /// A harmless difference in an earlier column must not hide a later
+        /// swap that would exchange the row's values.
+        #[test]
+        fn swap_after_text_compatible_type_change_is_detected() {
+            let case = published_case(
+                &[("label", Type::TEXT), ("b", Type::INT4), ("a", Type::INT4)],
+                &[("label", Type::VARCHAR), ("a", Type::INT4), ("b", Type::INT4)],
+            );
+
+            assert_eq!(mismatch_kind(&case), Some(RelationSchemaMismatchKind::NameOrder));
+        }
+
         /// A stale integer type would reject or misrepresent later row values.
         #[test]
         fn relation_with_changed_column_type_is_detected() {

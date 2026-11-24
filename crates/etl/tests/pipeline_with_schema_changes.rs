@@ -1397,60 +1397,73 @@ async fn ddl_metric_labels_preserve_supported_tags_and_bound_unknown_tags() {
 }
 
 /// A column swap whose snapshot was never captured stops replication before
-/// the stale decoder writes source values into the wrong columns.
+/// the stale decoder writes source values into the wrong columns, including
+/// when a harmless width change precedes the swapped columns.
 #[tokio::test(flavor = "multi_thread")]
 async fn uncaptured_column_swap_stops_replication_before_writing_rows() {
     init_test_tracing();
-    let (database, table_name, table_id, _store, destination, pipeline, _pipeline_id, _publication) =
-        create_database_and_sync_done_pipeline_with_table(
-            "uncaptured_swap",
-            &[("col_a", "integer"), ("col_b", "integer")],
-        )
-        .await;
-    let table = table_name.as_quoted_identifier();
 
-    // Renaming a helper makes capture fail open, so the swap commits without
-    // a snapshot and the next relation disagrees with the stored order.
-    database
-        .run_sql(
-            "alter function etl.describe_table_publication_columns(oid, text) rename to \
-             describe_table_publication_columns_moved",
-        )
-        .await
-        .unwrap();
-    database
-        .client
-        .as_ref()
-        .unwrap()
-        .batch_execute(&format!(
-            "begin;
-             alter table {table} rename column col_a to col_tmp;
-             alter table {table} rename column col_b to col_a;
-             alter table {table} rename column col_tmp to col_b;
-             commit"
-        ))
-        .await
-        .unwrap();
-    database
-        .run_sql(
-            "alter function etl.describe_table_publication_columns_moved(oid, text) rename to \
-             describe_table_publication_columns",
-        )
-        .await
-        .unwrap();
-    database
-        .run_sql(&format!("insert into {table} (col_a, col_b) values (111, 222)"))
-        .await
-        .unwrap();
+    for widen_earlier_column in [false, true] {
+        let (database, table_name, table_id, _store, destination, pipeline, _pipeline_id, _pub) =
+            create_database_and_sync_done_pipeline_with_table(
+                "uncaptured_swap",
+                &[("label", "varchar(10)"), ("col_a", "integer"), ("col_b", "integer")],
+            )
+            .await;
+        let table = table_name.as_quoted_identifier();
+        let widen = if widen_earlier_column {
+            format!("alter table {table} alter column label type varchar(20);")
+        } else {
+            String::new()
+        };
 
-    let error = wait_for_pipeline_error(&pipeline).await;
+        // Renaming a helper makes capture fail open, so the DDL commits
+        // without a snapshot and the next relation disagrees with the stored
+        // order.
+        database
+            .run_sql(
+                "alter function etl.describe_table_publication_columns(oid, text) rename to \
+                 describe_table_publication_columns_moved",
+            )
+            .await
+            .unwrap();
+        database
+            .client
+            .as_ref()
+            .unwrap()
+            .batch_execute(&format!(
+                "begin;
+                 {widen}
+                 alter table {table} rename column col_a to col_tmp;
+                 alter table {table} rename column col_b to col_a;
+                 alter table {table} rename column col_tmp to col_b;
+                 commit"
+            ))
+            .await
+            .unwrap();
+        database
+            .run_sql(
+                "alter function etl.describe_table_publication_columns_moved(oid, text) rename to \
+                 describe_table_publication_columns",
+            )
+            .await
+            .unwrap();
+        database
+            .run_sql(&format!("insert into {table} (label, col_a, col_b) values ('x', 111, 222)"))
+            .await
+            .unwrap();
 
-    assert_eq!(error.kind(), ErrorKind::CorruptedTableSchema);
-    let inserted_rows = destination
-        .get_events()
-        .await
-        .into_iter()
-        .filter(|event| matches!(event, Event::Insert(insert) if insert.replicated_table_schema.id() == table_id))
-        .count();
-    assert_eq!(inserted_rows, 0);
+        let error = wait_for_pipeline_error(&pipeline).await;
+
+        assert_eq!(error.kind(), ErrorKind::CorruptedTableSchema, "widen: {widen_earlier_column}");
+        let inserted_rows = destination
+            .get_events()
+            .await
+            .into_iter()
+            .filter(|event| {
+                matches!(event, Event::Insert(insert) if insert.replicated_table_schema.id() == table_id)
+            })
+            .count();
+        assert_eq!(inserted_rows, 0, "widen: {widen_earlier_column}");
+    }
 }

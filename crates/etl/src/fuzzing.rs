@@ -524,8 +524,9 @@ pub fn check_pgoutput_tuple_decoding(data: &[u8]) {
 /// order; identity columns are replicated; the schema change identity builds a
 /// mask for every mode Postgres sends, covering only replicated columns;
 /// mismatch detection reports nothing exactly when names and mapped types
-/// agree position by position, and reports `name_order` exactly when the first
-/// disagreement is a name; a decoded insert has one value per replicated
+/// agree position by position, reports a value-misaligning kind exactly when
+/// any position misaligns values, and reports `name_order` exactly when the
+/// first such position is a name; a decoded insert has one value per replicated
 /// column. That panic is the fuzz target's finding signal.
 pub fn check_pgoutput_relation_materialization(data: &[u8]) {
     let mut input = FuzzBytes { data };
@@ -630,10 +631,22 @@ pub fn check_pgoutput_relation_materialization(data: &[u8]) {
         }
         Some(kind) => {
             assert_eq!(decoder_columns.len(), relation_columns.len());
-            let (decoder_column, relation_column) = decoder_columns
+            let disagreements = decoder_columns
                 .iter()
                 .zip(&relation_columns)
-                .find(|(decoder_column, relation_column)| decoder_column != relation_column)
+                .filter(|(decoder_column, relation_column)| decoder_column != relation_column)
+                .collect::<Vec<_>>();
+            let first_misaligned =
+                disagreements.iter().find(|(decoder_column, relation_column)| {
+                    decoder_column.0 != relation_column.0
+                        || (decoder_column.1 != relation_column.1
+                            && !codec::decodes_as_same_text(&decoder_column.1, &relation_column.1))
+                });
+            // Detection scans every column, so a harmless earlier difference
+            // cannot hide a later misaligned one.
+            assert_eq!(kind.misaligns_values(), first_misaligned.is_some());
+            let (decoder_column, relation_column) = first_misaligned
+                .or(disagreements.first())
                 .expect("a reported mismatch has a disagreeing position");
             assert_eq!(
                 kind == RelationSchemaMismatchKind::NameOrder,
