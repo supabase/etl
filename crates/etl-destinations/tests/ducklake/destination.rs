@@ -1614,8 +1614,8 @@ async fn buffered_copy_rejects_batch_larger_than_global_bound() {
     assert_eq!(row_count, 1);
 }
 
-/// Reset must wait for a cancelled async caller's detached blocking append so
-/// the old session cannot publish after its replay epoch is replaced.
+/// Abandoning a cancelled append retains its maintenance fence until native
+/// work exits. Reset must also wait before replacing the replay epoch.
 #[cfg(feature = "test-utils")]
 #[tokio::test(flavor = "multi_thread")]
 async fn buffered_copy_reset_waits_for_cancelled_blocking_append() {
@@ -1662,6 +1662,11 @@ async fn buffered_copy_reset_waits_for_cancelled_blocking_append() {
     write_task.abort();
     assert!(write_task.await.unwrap_err().is_cancelled());
 
+    destination.abort_table_copy(schema.id).await;
+    let mut maintenance = Box::pin(destination.acquire_external_maintenance_pause());
+    let maintenance_waited = maintenance.as_mut().now_or_never().is_none();
+    drop(maintenance);
+
     let mut reset_task = tokio::spawn({
         let destination = destination.clone();
         let replicated_table_schema = replicated_table_schema.clone();
@@ -1670,6 +1675,7 @@ async fn buffered_copy_reset_waits_for_cancelled_blocking_append() {
     let reset_waited =
         tokio::time::timeout(Duration::from_millis(100), &mut reset_task).await.is_err();
     release_paused_copy_append_for_tests();
+    assert!(maintenance_waited);
     assert!(reset_waited);
     tokio::time::timeout(Duration::from_secs(5), reset_task).await.unwrap().unwrap().unwrap();
 

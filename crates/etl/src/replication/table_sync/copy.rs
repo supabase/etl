@@ -13,7 +13,10 @@ use std::{
 use etl_config::shared::BatchConfig;
 use futures::{Stream, StreamExt};
 use metrics::{counter, histogram};
-use tokio::{pin, sync::watch};
+use tokio::{
+    pin,
+    sync::{RwLock, watch},
+};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
@@ -86,7 +89,7 @@ impl TableCopyProgress {
 
 /// Result of a table copy operation.
 #[derive(Debug)]
-pub(crate) enum TableCopyResult {
+pub(super) enum TableCopyResult {
     /// All rows copied successfully.
     Completed {
         /// Total number of rows copied.
@@ -113,19 +116,29 @@ struct TableCopyPartition {
     planned_blocks: u64,
 }
 
-/// Allocates unique batch IDs across the workers in one table-copy attempt.
+/// Assigns batch IDs and controls write admission for one table-copy attempt.
 #[derive(Debug)]
-struct TableCopyBatchIdGenerator {
+pub(super) struct TableCopyAttempt {
     /// The table-copy execution shared by every generated batch ID.
     attempt_id: TableCopyAttemptId,
     /// The next attempt-local sequence to allocate.
     next_sequence: AtomicU64,
+    /// Closes submissions before the destination discards the failed copy.
+    writes_closed: RwLock<bool>,
 }
 
-impl TableCopyBatchIdGenerator {
-    /// Creates a batch ID generator for one table-copy attempt.
-    fn new(attempt_id: TableCopyAttemptId) -> Self {
-        Self { attempt_id, next_sequence: AtomicU64::new(0) }
+impl TableCopyAttempt {
+    /// Starts a table-copy attempt with write admission open.
+    pub(super) fn new(attempt_id: TableCopyAttemptId) -> Self {
+        Self { attempt_id, next_sequence: AtomicU64::new(0), writes_closed: RwLock::new(false) }
+    }
+
+    /// Waits for cancelled dispatch futures to release admission and fences
+    /// late submissions.
+    pub(super) async fn abort<D: Destination>(&self, destination: &D, table_id: TableId) {
+        *self.writes_closed.write().await = true;
+
+        destination.abort_table_copy(table_id).await;
     }
 
     /// Allocates the next batch ID without imposing ordering across workers.
@@ -221,7 +234,7 @@ async fn stop_table_copy_tasks(
 /// Copies a table by assigning physical ctid ranges to child-connection
 /// workers.
 #[expect(clippy::too_many_arguments)]
-pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
+pub(super) async fn table_copy<D: Destination + Clone + Send + 'static>(
     activity_handle: &ActivityHandle,
     replication_transaction: &PgReplicationTransaction<'_>,
     table_id: TableId,
@@ -236,6 +249,7 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
     destination: D,
     memory_monitor: MemoryMonitor,
     batch_memory_governor: BatchMemoryGovernor,
+    copy_attempt: Arc<TableCopyAttempt>,
 ) -> EtlResult<TableCopyResult> {
     let start_time = Instant::now();
     let ShutdownResult::Ok(copy_partitions) = with_shutdown!(
@@ -276,8 +290,6 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
         return Ok(TableCopyResult::Shutdown);
     };
     let snapshot_id = snapshot_id?;
-    let batch_id_generator =
-        Arc::new(TableCopyBatchIdGenerator::new(TableCopyAttemptId::generate()));
     let work_queue = Arc::new(Mutex::new(VecDeque::from(copy_partitions)));
     let publication_name = publication_name.map(str::to_owned);
     let mut tasks = TaskGroup::new();
@@ -305,7 +317,7 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
         // Keep these values owned by each worker. They are small, and cloning
         // them avoids extra shared ownership machinery in the hot path.
         let snapshot_id = snapshot_id.clone();
-        let batch_id_generator = Arc::clone(&batch_id_generator);
+        let copy_attempt = Arc::clone(&copy_attempt);
         let work_queue = Arc::clone(&work_queue);
         let replicated_table_schema = replicated_table_schema.clone();
         let publication_name = publication_name.clone();
@@ -320,7 +332,7 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
             child_replication_client,
             snapshot_id,
             work_queue,
-            batch_id_generator,
+            copy_attempt,
             table_id,
             replicated_table_schema,
             publication_name,
@@ -480,7 +492,7 @@ async fn table_copy_worker<D>(
     mut child_replication_client: ChildPgReplicationClient,
     snapshot_id: String,
     work_queue: Arc<Mutex<VecDeque<TableCopyPartition>>>,
-    batch_id_generator: Arc<TableCopyBatchIdGenerator>,
+    copy_attempt: Arc<TableCopyAttempt>,
     table_id: TableId,
     replicated_table_schema: ReplicatedTableSchema,
     publication_name: Option<String>,
@@ -509,7 +521,7 @@ where
         let partition_progress = table_copy_partition_rows(
             &activity_handle,
             &mut child_replication_transaction,
-            &batch_id_generator,
+            &copy_attempt,
             table_id,
             replicated_table_schema.clone(),
             publication_name.clone(),
@@ -529,7 +541,7 @@ where
 async fn table_copy_partition_rows<D>(
     activity_handle: &ActivityHandle,
     child_replication_transaction: &mut PgChildReplicationTransaction<'_>,
-    batch_id_generator: &TableCopyBatchIdGenerator,
+    copy_attempt: &TableCopyAttempt,
     table_id: TableId,
     replicated_table_schema: ReplicatedTableSchema,
     publication_name: Option<String>,
@@ -582,7 +594,7 @@ where
         table_copy_stream.as_mut(),
         connection_updates_rx,
         replicated_table_schema,
-        batch_id_generator,
+        copy_attempt,
         destination,
     )
     .await?;
@@ -612,7 +624,7 @@ async fn table_copy_rows_from_stream<D, S>(
     mut table_copy_stream: Pin<&mut S>,
     mut connection_updates_rx: watch::Receiver<PostgresConnectionUpdate>,
     replicated_table_schema: ReplicatedTableSchema,
-    batch_id_generator: &TableCopyBatchIdGenerator,
+    copy_attempt: &TableCopyAttempt,
     destination: D,
 ) -> EtlResult<TableCopyProgress>
 where
@@ -681,20 +693,29 @@ where
 
                 let dispatched_at = Instant::now();
                 let (flush_result, pending_flush_result) = WriteTableRowsResult::new(());
-                let batch_id = batch_id_generator.next_batch_id()?;
+                let batch_id = copy_attempt.next_batch_id()?;
 
                 // Inline writes are fine here: each partition has its own task
                 // and awaits both the method and its result before reading
                 // another batch. The copy owner can cancel this child during
                 // either await.
-                destination
-                    .write_table_rows(
-                        &replicated_table_schema,
-                        Some(batch_id),
-                        table_rows,
-                        flush_result,
-                    )
-                    .await?;
+                {
+                    // Aborting the tasks can race a sibling currently inside
+                    // dispatch. Fence that call before discarding the buffer.
+                    let writes_closed = copy_attempt.writes_closed.read().await;
+                    if *writes_closed {
+                        return Ok(progress);
+                    }
+
+                    destination
+                        .write_table_rows(
+                            &replicated_table_schema,
+                            Some(batch_id),
+                            table_rows,
+                            flush_result,
+                        )
+                        .await?;
+                }
                 let completed_flush_result = pending_flush_result.await;
                 let (_, completed_at, result) =
                     completed_flush_result.into_parts_with_completion();
@@ -736,7 +757,7 @@ mod tests {
     use std::num::NonZeroU16;
 
     use super::{
-        MAX_CTID_COPY_PARTITIONS, TableCopyBatchIdGenerator, partitions_for_table_weight,
+        MAX_CTID_COPY_PARTITIONS, TableCopyAttempt, partitions_for_table_weight,
         target_ctid_partition_count,
     };
     use crate::destination::{TableCopyAttemptId, TableCopyBatchId};
@@ -744,7 +765,7 @@ mod tests {
     #[test]
     fn table_copy_batch_ids_distinguish_sequences_and_attempts() {
         let first_attempt = TableCopyAttemptId::from_u128(1);
-        let first_generator = TableCopyBatchIdGenerator::new(first_attempt);
+        let first_generator = TableCopyAttempt::new(first_attempt);
 
         assert_eq!(
             first_generator.next_batch_id().unwrap(),
@@ -756,7 +777,7 @@ mod tests {
         );
 
         let second_attempt = TableCopyAttemptId::from_u128(2);
-        let second_generator = TableCopyBatchIdGenerator::new(second_attempt);
+        let second_generator = TableCopyAttempt::new(second_attempt);
         assert_ne!(
             second_generator.next_batch_id().unwrap(),
             TableCopyBatchId::new(first_attempt, 0)
