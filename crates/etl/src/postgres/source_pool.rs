@@ -146,7 +146,7 @@ mod tests {
         let pool = OutOfBandSourcePool::new(&database.config, TEST_MONITOR_REFRESH_INTERVAL);
         let name = format!("test_release_{}", Uuid::new_v4().simple());
         let mut creator = PgReplicationClient::connect(database.config.clone()).await.unwrap();
-        let backend_pid = creator.backend_pid();
+        let backend_pid = creator.backend_pid().await.unwrap();
 
         assert!(!pool.table_sync_slot_is_released(&name, backend_pid).await.unwrap());
         creator

@@ -301,7 +301,12 @@ where
                 persistence: ReplicationSlotPersistence::Temporary,
                 failover: false,
             };
-            slot.creation_started(replication_client.backend_pid());
+            let ShutdownResult::Ok(backend_pid) =
+                with_shutdown!(replication_client.backend_pid(), shutdown_token)
+            else {
+                return Ok(TableSyncResult::Stopped);
+            };
+            slot.creation_started(backend_pid?);
             let ShutdownResult::Ok(created) = with_shutdown!(
                 replication_client.create_table_copy_slot(&slot_name, table_id, &slot_config),
                 shutdown_token,

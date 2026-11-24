@@ -403,9 +403,17 @@ impl PgReplicationClient {
         self.client.is_closed()
     }
 
-    /// Returns the server process owning this connection.
-    pub(crate) fn backend_pid(&self) -> i32 {
-        self.client.backend_pid()
+    /// Returns the PostgreSQL PID visible in `pg_stat_activity` for this
+    /// replication session.
+    pub async fn backend_pid(&self) -> EtlResult<i32> {
+        // A gateway can send its own cancellation ID in the protocol handshake.
+        for message in self.client.simple_query("select pg_catalog.pg_backend_pid() as pid").await?
+        {
+            if let SimpleQueryMessage::Row(row) = message {
+                return get_row_value(&row, "pid", "pg_backend_pid");
+            }
+        }
+        bail!(ErrorKind::SourceQueryFailed, "PostgreSQL did not return its backend PID");
     }
 
     /// Returns a receiver for background connection task updates.
