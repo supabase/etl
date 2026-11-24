@@ -1050,6 +1050,9 @@ mod tests {
 
         use crate::test_utils::{database::local_pg_connection_config, pipeline::test_slot_name};
 
+        // Direct connections bypass the test fixture's TLS setup.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
         let config =
             PgConnectionConfig { name: "postgres".to_owned(), ..local_pg_connection_config() };
         let slot_name = test_slot_name("stalled_sync_drop");
