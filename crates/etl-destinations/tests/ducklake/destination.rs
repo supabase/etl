@@ -2902,62 +2902,78 @@ async fn replay_helpers_reject_restored_metadata() {
     drop(conn);
 
     for table in REPLAY_HELPER_TABLES {
-        let target = DuckLakeTableName::new("MAIN", table.to_ascii_uppercase());
-        let creating = DestinationTableMetadata::new_creating(
-            target.to_metadata_id().unwrap(),
-            schema.snapshot_id,
-            replicated_schema.replication_mask().clone(),
-        );
-        let applied = creating.clone().to_applied();
-        let applying = DestinationTableMetadata::new_applied(
-            target.to_metadata_id().unwrap(),
-            previous_schema.snapshot_id,
-            make_replicated_table_schema(&previous_schema).replication_mask().clone(),
-        )
-        .with_schema_change(schema.snapshot_id, replicated_schema.replication_mask().clone())
-        .unwrap();
-
-        for metadata in [creating, applied, applying] {
-            store.store_destination_table_metadata(schema.id, metadata.clone()).await.unwrap();
-
-            let results = [
-                destination.startup().await,
-                destination.write_table_rows(&replicated_schema, None, vec![]).await,
-                drop_table_for_copy_with_result(&destination, &replicated_schema).await,
-                destination.truncate_table(&replicated_schema).await,
-                destination
-                    .write_events(vec![Event::Relation(RelationEvent {
-                        replicated_table_schema: replicated_schema.clone(),
-                    })])
-                    .await,
-                destination
-                    .write_events(vec![Event::Insert(InsertEvent {
-                        commit_lsn: PgLsn::from(20_u64),
-                        tx_ordinal: 0,
-                        replicated_table_schema: replicated_schema.clone(),
-                        table_row: TableRow::new(vec![Cell::I32(1), Cell::Null, Cell::Null]),
-                    })])
-                    .await,
-                destination
-                    .write_events(vec![Event::Truncate(TruncateEvent {
-                        commit_lsn: PgLsn::from(20_u64),
-                        tx_ordinal: 1,
-                        options: 0,
-                        truncated_tables: vec![replicated_schema.clone()],
-                    })])
-                    .await,
-            ];
-
-            for result in results {
-                let error = result.unwrap_err();
-                assert_eq!(error.kind(), ErrorKind::DestinationTableNameInvalid);
-                assert_eq!(error.retryability(), Retryability::Permanent);
-            }
-
-            assert_eq!(
-                store.get_destination_table_metadata(schema.id).await.unwrap(),
-                Some(metadata)
+        for target in [
+            DuckLakeTableName::new("main", table),
+            DuckLakeTableName::new("MAIN", table.to_ascii_uppercase()),
+        ] {
+            let creating = DestinationTableMetadata::new_creating(
+                target.to_metadata_id().unwrap(),
+                schema.snapshot_id,
+                replicated_schema.replication_mask().clone(),
             );
+            let applied = creating.clone().to_applied();
+            let applying = DestinationTableMetadata::new_applied(
+                target.to_metadata_id().unwrap(),
+                previous_schema.snapshot_id,
+                make_replicated_table_schema(&previous_schema).replication_mask().clone(),
+            )
+            .with_schema_change(schema.snapshot_id, replicated_schema.replication_mask().clone())
+            .unwrap();
+
+            for metadata in [creating, applied, applying] {
+                store.store_destination_table_metadata(schema.id, metadata.clone()).await.unwrap();
+
+                let reset = drop_table_for_copy_with_result(&destination, &replicated_schema).await;
+
+                // Assert preservation first: the unguarded reset drops the
+                // helper.
+                let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
+                assert_eq!(replay_helper_rows(&conn), before);
+                drop(conn);
+                assert_eq!(
+                    store.get_destination_table_metadata(schema.id).await.unwrap(),
+                    Some(metadata.clone())
+                );
+
+                let results = [
+                    reset,
+                    destination.startup().await,
+                    destination.write_table_rows(&replicated_schema, None, vec![]).await,
+                    destination.truncate_table(&replicated_schema).await,
+                    destination
+                        .write_events(vec![Event::Relation(RelationEvent {
+                            replicated_table_schema: replicated_schema.clone(),
+                        })])
+                        .await,
+                    destination
+                        .write_events(vec![Event::Insert(InsertEvent {
+                            commit_lsn: PgLsn::from(20_u64),
+                            tx_ordinal: 0,
+                            replicated_table_schema: replicated_schema.clone(),
+                            table_row: TableRow::new(vec![Cell::I32(1), Cell::Null, Cell::Null]),
+                        })])
+                        .await,
+                    destination
+                        .write_events(vec![Event::Truncate(TruncateEvent {
+                            commit_lsn: PgLsn::from(20_u64),
+                            tx_ordinal: 1,
+                            options: 0,
+                            truncated_tables: vec![replicated_schema.clone()],
+                        })])
+                        .await,
+                ];
+
+                for result in results {
+                    let error = result.unwrap_err();
+                    assert_eq!(error.kind(), ErrorKind::DestinationTableNameInvalid);
+                    assert_eq!(error.retryability(), Retryability::Permanent);
+                }
+
+                assert_eq!(
+                    store.get_destination_table_metadata(schema.id).await.unwrap(),
+                    Some(metadata)
+                );
+            }
         }
     }
 
@@ -2967,160 +2983,97 @@ async fn replay_helpers_reject_restored_metadata() {
     assert_eq!(replay_helper_rows(&conn), before);
 }
 
-/// Helper basenames outside main and other internal-looking names remain
-/// usable.
+/// Noncolliding targets support COPY, startup, truncate and reset in both
+/// flat and namespaced layouts.
 #[tokio::test(flavor = "multi_thread")]
 async fn replay_helpers_allow_noncolliding_targets() {
-    let lake = create_test_lake("replay_helpers_allow_noncolliding_targets").await;
-    let store = MemoryStore::new();
-    let destination = new_test_destination(&lake.catalog_url, &lake.data_url, store.clone()).await;
+    for (namespace, buffered, targets) in [
+        (
+            None,
+            false,
+            [
+                ("public", "__etl_streaming_progress"),
+                ("public", "__etl_applied_table_batches"),
+                ("main", "__etl_other"),
+                ("main", "__etl_replay_epochs"),
+            ]
+            .as_slice(),
+        ),
+        (
+            Some("project_a"),
+            true,
+            [("MAIN", "__etl_streaming_progress"), ("MAIN", "__etl_applied_table_batches")]
+                .as_slice(),
+        ),
+    ] {
+        let lake = create_test_lake("replay_helpers_allow_noncolliding_targets").await;
+        let store = MemoryStore::new();
+        let destination = DuckLakeDestination::builder(
+            lake.catalog_url.clone(),
+            lake.data_url.clone(),
+            NonZeroU16::MIN,
+            store.clone(),
+        )
+        .table_namespace(namespace.map(str::to_owned))
+        .copy_buffer(DuckLakeCopyBufferConfig {
+            enabled: buffered,
+            ..DuckLakeCopyBufferConfig::default()
+        })
+        .build()
+        .await
+        .unwrap();
 
-    for (index, (schema_name, table)) in [
-        ("public", "__etl_streaming_progress"),
-        ("public", "__etl_applied_table_batches"),
-        ("main", "__etl_other"),
-        ("main", "__etl_replay_epochs"),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let schema = make_schema(u32::try_from(index).unwrap() + 1, schema_name, table);
-        let replicated_schema = make_replicated_table_schema(&schema);
-        let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
-        store.store_table_schema(schema).await.unwrap();
+        let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
+        seed_replay_helper_rows(&conn);
+        let before = replay_helper_rows(&conn);
+        drop(conn);
 
-        destination
-            .write_table_rows_for_tests(
-                &replicated_schema,
-                vec![TableRow::new(vec![Cell::I32(1), Cell::String("example".to_owned())])],
+        for (index, (schema_name, table)) in targets.iter().enumerate() {
+            let schema = make_schema(u32::try_from(index).unwrap() + 1, schema_name, table);
+            let replicated_schema = make_replicated_table_schema(&schema);
+            let table_name = DuckLakeTableName::from_source(&schema.name)
+                .with_namespace(namespace.map(str::to_owned));
+            store.store_table_schema(schema).await.unwrap();
+
+            destination
+                .write_table_rows_for_tests(
+                    &replicated_schema,
+                    vec![TableRow::new(vec![Cell::I32(1), Cell::String("example".to_owned())])],
+                )
+                .await
+                .unwrap();
+            destination.startup().await.unwrap();
+
+            let conn = open_lake_conn_when_tables_visible(
+                &lake.catalog_url,
+                &lake.data_url,
+                &[&table_name],
             )
-            .await
-            .unwrap();
-        destination.startup().await.unwrap();
+            .await;
+            assert_eq!(count_rows(&conn, &table_name), 1);
+            drop(conn);
 
-        let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
-        assert_eq!(count_rows(&conn, &table_name), 1);
-        drop(conn);
+            destination.truncate_table(&replicated_schema).await.unwrap();
 
-        destination.truncate_table(&replicated_schema).await.unwrap();
-
-        let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
-        assert_eq!(count_rows(&conn, &table_name), 0);
-        drop(conn);
-
-        drop_table_for_copy_with_result(&destination, &replicated_schema).await.unwrap();
-
-        let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
-        assert!(!lake_table_exists(&conn, &table_name));
-    }
-
-    destination.shutdown().await.unwrap();
-}
-
-/// Namespaced helper basenames remain valid through COPY, recovery and reset.
-#[tokio::test(flavor = "multi_thread")]
-async fn replay_helpers_allow_namespaced_targets() {
-    let lake = create_test_lake("replay_helpers_allow_namespaced_targets").await;
-    let store = MemoryStore::new();
-    let destination = DuckLakeDestination::builder(
-        lake.catalog_url.clone(),
-        lake.data_url.clone(),
-        NonZeroU16::MIN,
-        store.clone(),
-    )
-    .table_namespace(Some("project_a".to_owned()))
-    .build()
-    .await
-    .unwrap();
-    let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
-    seed_replay_helper_rows(&conn);
-    let before = replay_helper_rows(&conn);
-    drop(conn);
-
-    for (index, table) in REPLAY_HELPER_TABLES.into_iter().enumerate() {
-        let schema = make_schema(u32::try_from(index).unwrap() + 1, "MAIN", table);
-        let replicated_schema = make_replicated_table_schema(&schema);
-        let table_name = DuckLakeTableName::from_source(&schema.name)
-            .with_namespace(Some("project_a".to_owned()));
-        store.store_table_schema(schema).await.unwrap();
-
-        destination
-            .write_table_rows_for_tests(
-                &replicated_schema,
-                vec![TableRow::new(vec![Cell::I32(1), Cell::String("example".to_owned())])],
-            )
-            .await
-            .unwrap();
-        destination.startup().await.unwrap();
-
-        let conn =
-            open_lake_conn_when_tables_visible(&lake.catalog_url, &lake.data_url, &[&table_name])
-                .await;
-        assert_eq!(count_rows(&conn, &table_name), 1);
-        drop(conn);
-
-        destination.truncate_table(&replicated_schema).await.unwrap();
-        drop_table_for_copy_with_result(&destination, &replicated_schema).await.unwrap();
-    }
-
-    destination.shutdown().await.unwrap();
-
-    let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
-    // Successful copies append their own replay records; existing rows must
-    // survive.
-    for (before, after) in before.iter().zip(replay_helper_rows(&conn)) {
-        assert!(before.iter().all(|row| after.contains(row)));
-    }
-}
-
-/// A recorded source target must never let copy recovery drop shared replay
-/// state.
-#[tokio::test(flavor = "multi_thread")]
-async fn replay_helpers_reject_copy_reset() {
-    let lake = create_test_lake("replay_helpers_reject_copy_reset").await;
-    let store = MemoryStore::new();
-    let schema = make_schema(1, "public", "ordinary_source");
-    let replicated_schema = make_replicated_table_schema(&schema);
-
-    store.store_table_schema(schema.clone()).await.unwrap();
-    let destination = new_test_destination(&lake.catalog_url, &lake.data_url, store.clone()).await;
-
-    let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
-    seed_replay_helper_rows(&conn);
-    let before = replay_helper_rows(&conn);
-    drop(conn);
-
-    for table in REPLAY_HELPER_TABLES {
-        for target in [
-            DuckLakeTableName::new("main", table),
-            DuckLakeTableName::new("MAIN", table.to_ascii_uppercase()),
-        ] {
-            let metadata = DestinationTableMetadata::new_creating(
-                target.to_metadata_id().unwrap(),
-                schema.snapshot_id,
-                replicated_schema.replication_mask().clone(),
-            );
-            store.store_destination_table_metadata(schema.id, metadata.clone()).await.unwrap();
-
-            let result = drop_table_for_copy_with_result(&destination, &replicated_schema).await;
-
-            // Check the physical consequence before the result: the old
-            // implementation reported success after committing a
-            // drop of the shared helper.
             let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
-            assert_eq!(replay_helper_rows(&conn), before);
+            assert_eq!(count_rows(&conn, &table_name), 0);
+            drop(conn);
 
-            let error = result.unwrap_err();
-            assert_eq!(error.kind(), ErrorKind::DestinationTableNameInvalid);
-            assert_eq!(error.retryability(), Retryability::Permanent);
-            assert_eq!(
-                store.get_destination_table_metadata(schema.id).await.unwrap(),
-                Some(metadata)
-            );
+            drop_table_for_copy_with_result(&destination, &replicated_schema).await.unwrap();
+
+            let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
+            assert!(!lake_table_exists(&conn, &table_name));
+        }
+
+        destination.shutdown().await.unwrap();
+
+        let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
+        // Successful copies append their own replay records; existing rows must
+        // survive.
+        for (before, after) in before.iter().zip(replay_helper_rows(&conn)) {
+            assert!(before.iter().all(|row| after.contains(row)));
         }
     }
-
-    destination.shutdown().await.unwrap();
 }
 
 /// `truncate_table` deletes all rows while leaving the table schema intact.
