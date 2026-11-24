@@ -1,6 +1,6 @@
 //! One-shot DuckLake maintenance binary for Kubernetes maintenance Jobs.
 
-use std::{env, error::Error, process::ExitCode, time::Duration};
+use std::{env, error::Error, path::Path, process::ExitCode};
 
 use etl_config::{
     default_ducklake_s3_url_style, default_ducklake_s3_use_ssl, load_config,
@@ -11,14 +11,13 @@ use etl_config::{
     },
 };
 use etl_maintenance::{
-    KubernetesExternalMaintenanceStore,
     ducklake::{
         CleanupOldFilesMaintenanceConfig, DuckLakeMaintenanceConfig,
         ExpireSnapshotsMaintenanceConfig, InlineFlushMaintenanceConfig,
         MergeAdjacentFilesMaintenanceConfig, RewriteDataFilesMaintenanceConfig,
         S3Config as DuckLakeS3Config, run_maintenance_once,
     },
-    report::{MaintenanceReportStatus, MaintenanceResults, MaintenanceRunnerReport},
+    report::{MaintenanceResults, MaintenanceRunnerReport},
 };
 use rustls::crypto::aws_lc_rs;
 use secrecy::ExposeSecret;
@@ -52,25 +51,9 @@ fn try_main() -> MaintenanceResult<()> {
 async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
     let pipeline_id = config.pipeline.id.clone();
     let project_ref = config.project_ref().map(ToOwned::to_owned);
-    let report_target = if env_bool("ETL_DUCKLAKE_MAINTENANCE_REPORTING_ENABLED", false) {
-        let run_id = env::var("ETL_DUCKLAKE_MAINTENANCE__RUN_ID")?;
-        let store = KubernetesExternalMaintenanceStore::from_env(Duration::from_secs(10))
-            .await?
-            .ok_or("maintenance Job requires its CR name and namespace for reporting")?;
-        match store
-            .report_status(&pipeline_id, project_ref.as_deref().unwrap_or_default(), &run_id)
-            .await?
-        {
-            MaintenanceReportStatus::Completed => {
-                info!("maintenance results already persisted; skipping repeated execution");
-                return Ok(());
-            }
-            MaintenanceReportStatus::Pending => Some((store, run_id)),
-            MaintenanceReportStatus::Disabled => None,
-        }
-    } else {
-        None
-    };
+    // A file handoff needs no Kubernetes client or service-account token.
+    let report_path =
+        env::var("ETL_DUCKLAKE_MAINTENANCE_REPORT_PATH").ok().filter(|path| !path.is_empty());
     let DestinationConfig::Ducklake {
         catalog_url,
         catalog_pooler_url,
@@ -192,10 +175,12 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
     );
 
     let outcome = run_maintenance_once(maintenance_config).await?;
-    if let Some((store, run_id)) = report_target {
+    if let Some(path) = report_path {
         let report = MaintenanceRunnerReport {
             version: 1,
-            run_id,
+            run_id: env::var("ETL_DUCKLAKE_MAINTENANCE__RUN_ID").unwrap_or_default(),
+            project_ref: project_ref.unwrap_or_default(),
+            pipeline_id,
             inline_flush: outcome.inline_flush_summaries.clone(),
             results: MaintenanceResults {
                 merge_adjacent_files_created: outcome.merge_adjacent_files_created,
@@ -204,9 +189,7 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
                 cleaned_up_files: outcome.cleaned_up_files,
             },
         };
-        store
-            .report_result(&pipeline_id, project_ref.as_deref().unwrap_or_default(), &report)
-            .await;
+        report.write_termination_message(Path::new(&path)).await;
     }
     info!(
         applied = outcome.applied(),
