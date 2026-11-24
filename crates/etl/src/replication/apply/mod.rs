@@ -5439,7 +5439,8 @@ mod tests {
         }
 
         /// Default identity flags agree with the stored key; a relation that
-        /// flags no key and full identity's flags never imply a key change.
+        /// flags no key, as for a deferrable or invalid key, and the flags of
+        /// explicit-index or full identity never imply a key change.
         #[test]
         fn relation_key_flags_match_only_default_identity_primary_keys() {
             // GIVEN: matching columns where only `id` is the stored key.
@@ -5454,6 +5455,13 @@ mod tests {
 
             // WHEN/THEN: default identity flagging the stored key agrees.
             case.relation_columns[0].2 = true;
+            assert_eq!(mismatch_kind(&case), None);
+
+            // WHEN/THEN: explicit-index identity flags its own index, not
+            // necessarily the primary key, without a mismatch.
+            case.replica_identity = b'i';
+            case.relation_columns[0].2 = false;
+            case.relation_columns[1].2 = true;
             assert_eq!(mismatch_kind(&case), None);
 
             // WHEN/THEN: full identity flags every column without a mismatch.
