@@ -23,6 +23,7 @@ use crate::{ducklake::LAKE_CATALOG, retry::classified_error};
 const DUCKDB_EXTENSION_ROOT_ENV_VAR: &str = "ETL_DUCKDB_EXTENSION_ROOT";
 const CONTAINER_DUCKDB_EXTENSION_ROOT: &str = "/app/duckdb_extensions";
 const DUCKDB_EXTENSION_VERSION: &str = "2.0.0";
+const ICU_EXTENSION_FILE: &str = "icu.duckdb_extension";
 const DUCKLAKE_EXTENSION_FILE: &str = "ducklake.duckdb_extension";
 const HTTPFS_EXTENSION_FILE: &str = "httpfs.duckdb_extension";
 const POSTGRES_SCANNER_EXTENSION_FILE: &str = "postgres_scanner.duckdb_extension";
@@ -32,9 +33,12 @@ pub(super) const EXPIRE_SNAPSHOTS_OLDER_THAN: &str = "7 days";
 pub(super) const MIN_EXPIRE_SNAPSHOTS_OLDER_THAN: &str = "1 day";
 const PRESERVE_INSERTION_ORDER_OPTION_NAME: &str = "preserve_insertion_order";
 
-/// Builds the SQL that configures DuckDB's session-level write ordering.
+/// Builds the SQL that configures deterministic session-level writes.
 fn configure_writer_session_sql() -> String {
-    format!("SET {PRESERVE_INSERTION_ORDER_OPTION_NAME} = false;")
+    // Calendar transforms of timestamptz must use the same timezone across
+    // writers and maintenance, regardless of the host timezone selected
+    // when ICU loads.
+    format!("SET {PRESERVE_INSERTION_ORDER_OPTION_NAME} = false; SET TimeZone = 'UTC';")
 }
 
 /// Builds the SQL that sets DuckLake's maintenance target file size.
@@ -263,7 +267,7 @@ fn require_vendored_extension_dir(
 }
 
 fn ensure_vendored_extension_dir(directory: &Path) -> EtlResult<()> {
-    let missing = [DUCKLAKE_EXTENSION_FILE]
+    let missing = [DUCKLAKE_EXTENSION_FILE, ICU_EXTENSION_FILE]
         .into_iter()
         .filter(|filename| !directory.join(filename).is_file())
         .collect::<Vec<_>>();
@@ -657,16 +661,10 @@ fn build_setup_plan_with_strategy(
     let needs_postgres = matches!(catalog_url.scheme(), "postgres" | "postgresql");
     let needs_httpfs = matches!(data_path.split(':').next(), Some("s3" | "gs"));
     let lake_catalog = quote_identifier(LAKE_CATALOG);
-    let mut steps = vec![
-        DuckLakeSetupStep {
-            label: "validate_duckdb_version",
-            sql: duckdb_version_check_sql(DUCKDB_EXTENSION_VERSION),
-        },
-        DuckLakeSetupStep {
-            label: "configure_writer_session",
-            sql: configure_writer_session_sql(),
-        },
-    ];
+    let mut steps = vec![DuckLakeSetupStep {
+        label: "validate_duckdb_version",
+        sql: duckdb_version_check_sql(DUCKDB_EXTENSION_VERSION),
+    }];
     let mut secret_options = BTreeMap::from([
         ("KEY_ID", quote_literal(s3.map(|s| s.access_key_id.as_str()).unwrap_or_default())),
         ("REGION", quote_literal(s3.map(|s| s.region.as_str()).unwrap_or_default())),
@@ -687,7 +685,12 @@ fn build_setup_plan_with_strategy(
             })?;
             let ducklake_extension =
                 vendored_extension_path(extension_root, DUCKLAKE_EXTENSION_FILE)?;
-            let mut sql = format!("LOAD {};", quote_literal(&ducklake_extension));
+            let icu_extension = vendored_extension_path(extension_root, ICU_EXTENSION_FILE)?;
+            let mut sql = format!(
+                "LOAD {}; LOAD {};",
+                quote_literal(&ducklake_extension),
+                quote_literal(&icu_extension),
+            );
             if needs_postgres {
                 let postgres_extension =
                     vendored_extension_path(extension_root, POSTGRES_SCANNER_EXTENSION_FILE)?;
@@ -701,7 +704,7 @@ fn build_setup_plan_with_strategy(
             sql
         }
         DuckDbExtensionStrategy::InstallFromRepository => {
-            let mut sql = String::from("INSTALL ducklake; LOAD ducklake;");
+            let mut sql = String::from("INSTALL ducklake; LOAD ducklake; INSTALL icu; LOAD icu;");
             if needs_postgres {
                 sql.push_str(" INSTALL postgres; LOAD postgres;");
             }
@@ -712,6 +715,12 @@ fn build_setup_plan_with_strategy(
         }
     };
     steps.push(DuckLakeSetupStep { label: "load_extensions", sql: extension_sql });
+    // TimeZone is registered by ICU, so session settings must follow extension
+    // loading.
+    steps.push(DuckLakeSetupStep {
+        label: "configure_writer_session",
+        sql: configure_writer_session_sql(),
+    });
 
     if needs_httpfs && let Some(s3) = s3 {
         let secret_name = quote_identifier("ducklake_s3");
@@ -773,9 +782,12 @@ mod tests {
         let tempdir = TempDir::new().unwrap();
         let extension_dir = tempdir.path().join(DUCKDB_EXTENSION_VERSION).join(platform_dir);
         fs::create_dir_all(&extension_dir).unwrap();
-        for filename in
-            [DUCKLAKE_EXTENSION_FILE, HTTPFS_EXTENSION_FILE, POSTGRES_SCANNER_EXTENSION_FILE]
-        {
+        for filename in [
+            DUCKLAKE_EXTENSION_FILE,
+            ICU_EXTENSION_FILE,
+            HTTPFS_EXTENSION_FILE,
+            POSTGRES_SCANNER_EXTENSION_FILE,
+        ] {
             fs::write(extension_dir.join(filename), []).unwrap();
         }
 
@@ -1357,15 +1369,21 @@ mod tests {
         assert_eq!(plan.steps()[0].label, "validate_duckdb_version");
         duckdb::Connection::open_in_memory().unwrap().execute_batch(&plan.steps()[0].sql).unwrap();
         assert_eq!(plan.steps().len(), 6);
-        assert_eq!(plan.steps()[1].label, "configure_writer_session");
-        assert_eq!(plan.steps()[2].label, "load_extensions");
+        assert_eq!(plan.steps()[1].label, "load_extensions");
+        assert_eq!(plan.steps()[2].label, "configure_writer_session");
         assert_eq!(plan.steps()[3].label, "configure_object_store");
         assert_eq!(plan.steps()[4].label, "attach_catalog");
         assert_eq!(plan.steps()[5].label, "configure_parquet");
         assert!(plan.steps()[4].sql.contains("DATA_INLINING_ROW_LIMIT 0"));
-        assert_eq!(plan.steps()[1].sql, configure_writer_session_sql());
-        assert!(plan.steps()[2].sql.contains(HTTPFS_EXTENSION_FILE));
-        assert!(!plan.steps()[2].sql.contains("json"));
+        assert_eq!(
+            plan.steps()[2].sql,
+            "SET preserve_insertion_order = false; SET TimeZone = 'UTC';"
+        );
+        assert_eq!(plan.connection_steps().count(), 1);
+        assert_eq!(plan.connection_steps().next().unwrap().sql, plan.steps()[2].sql);
+        assert!(plan.steps()[1].sql.contains(ICU_EXTENSION_FILE));
+        assert!(plan.steps()[1].sql.contains(HTTPFS_EXTENSION_FILE));
+        assert!(!plan.steps()[1].sql.contains("json"));
         assert!(plan.steps()[3].sql.contains("CREATE OR REPLACE SECRET"));
         assert!(plan.steps()[3].sql.contains("PROVIDER config"));
         assert!(

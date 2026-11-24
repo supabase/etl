@@ -260,9 +260,18 @@ impl Default for ExternalMaintenanceOperationPolicy {
 /// Result of asking the coordination backend to create an operation request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExternalMaintenanceRequestOutcome {
+    /// The backend recorded the requested operations, extending any pending
+    /// request.
     Created,
+    /// The pending request already includes every requested operation.
     AlreadyCovered,
+    /// A maintenance run is active and its operations have already been
+    /// selected.
     RejectedActiveRun,
+    /// A concurrent update prevented the write. The watcher resamples on a
+    /// later poll.
+    StateChanged,
+    /// The coordination resource or database row does not exist.
     MissingState,
 }
 

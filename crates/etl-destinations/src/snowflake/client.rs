@@ -541,30 +541,16 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         Ok(())
     }
 
-    /// Validates or upgrades an owned raw table without opening a streaming
-    /// channel, including during idle-table view recovery.
+    /// Validates an owned raw table without opening a streaming channel,
+    /// including during idle-table view recovery.
     pub(super) async fn prepare_existing_schema(
         &self,
         table_name: &str,
         columns: &[ColumnSchema],
     ) -> Result<()> {
         schema::validate_no_cdc_collisions(columns)?;
-        // TODO: Remove this fallback and SqlClient::upgrade_legacy_table
-        // once all legacy destination tables (including inactive pipelines) are
-        // migrated and supported self-hosted upgrades no longer need it. New
-        // tables already include the mask; retain strict validation after
-        // removal.
-        match self.validate_table(table_name, columns).await {
-            Err(Error::MissingTableColumn { column_name, .. })
-                if column_name == schema::CDC_MISSING_COLUMNS_COLUMN =>
-            {
-                self.sql_client.upgrade_legacy_table(table_name, columns).await?;
-                self.validate_table(table_name, columns).await?;
-            }
-            result => result?,
-        }
 
-        Ok(())
+        self.validate_table(table_name, columns).await
     }
 
     /// Validates a table and removes conflicting JSON defaults before opening

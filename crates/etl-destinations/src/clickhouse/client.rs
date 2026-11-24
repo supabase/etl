@@ -15,6 +15,7 @@ use etl::{
     etl_error,
 };
 use futures::TryFutureExt;
+use tokio::time::{Instant as TokioInstant, timeout_at};
 use tracing::{debug, warn};
 use url::Url;
 use uuid::Uuid;
@@ -128,6 +129,22 @@ async fn timeout_call<T, F>(
 where
     F: Future<Output = Result<T, clickhouse::error::Error>>,
 {
+    let deadline = TokioInstant::now() + config.client_timeout_for(op);
+    timeout_call_until(op, config, deadline, context, fut).await
+}
+
+/// Like [`timeout_call`], but stops at `deadline`, so several calls can share
+/// one client-side budget.
+async fn timeout_call_until<T, F>(
+    op: ClickHouseOperationKind,
+    config: &ClickHouseClientConfig,
+    deadline: TokioInstant,
+    context: Option<&str>,
+    fut: F,
+) -> EtlResult<T>
+where
+    F: Future<Output = Result<T, clickhouse::error::Error>>,
+{
     fn detail(op: ClickHouseOperationKind, what: &str, context: Option<&str>) -> String {
         match context {
             Some(c) => format!("{op} {what}; {c}"),
@@ -135,8 +152,7 @@ where
         }
     }
 
-    let client_timeout = config.client_timeout_for(op);
-    match tokio::time::timeout(client_timeout, fut).await {
+    match timeout_at(deadline, fut).await {
         Ok(Ok(value)) => Ok(value),
         Ok(Err(err)) => Err(classified_error_with_detail(
             op.failed_kind(),
@@ -144,11 +160,14 @@ where
             detail(op, "failed", context),
             redact_clickhouse_error(err),
         )),
-        Err(_) => Err(etl_error!(
-            ErrorKind::DestinationTimeout,
-            "ClickHouse call timed out",
-            detail(op, &format!("timed out after {client_timeout:?}"), context)
-        )),
+        Err(_) => {
+            let client_timeout = config.client_timeout_for(op);
+            Err(etl_error!(
+                ErrorKind::DestinationTimeout,
+                "ClickHouse call timed out",
+                detail(op, &format!("timed out after {client_timeout:?}"), context)
+            ))
+        }
     }
 }
 
@@ -1033,6 +1052,10 @@ impl ClickHouseClient {
     /// Encodes rows into one INSERT statement until its byte budget is spent,
     /// sending each full chunk as it fills, then commits the statement.
     ///
+    /// The whole statement, from its first chunk through the commit, shares
+    /// one client-side insert timeout. A timeout per network step would let a
+    /// statement that keeps making slow progress run far past it.
+    ///
     /// Only row bytes count toward the budget, so every statement carries at
     /// least one row even when the budget is tiny.
     #[expect(clippy::too_many_arguments, reason = "one statement of insert_rows")]
@@ -1047,6 +1070,8 @@ impl ClickHouseClient {
         replication_path: &'static str,
         query_id: Uuid,
     ) -> Result<InsertStatementSummary, InsertRowsError> {
+        let deadline =
+            TokioInstant::now() + self.config.client_timeout_for(ClickHouseOperationKind::Insert);
         let mut chunk = Vec::with_capacity(INSERT_CHUNK_CAPACITY);
         chunk.extend_from_slice(&layout.header);
         let mut summary = InsertStatementSummary { rows: 0, bytes: 0 };
@@ -1071,19 +1096,27 @@ impl ClickHouseClient {
                         table_name,
                         replication_path,
                         query_id,
+                        deadline,
                         send_insert_chunk(insert, full),
                     )
                     .await?;
             }
         }
 
-        self.insert_network_step(table_name, replication_path, query_id, end_insert(insert, chunk))
-            .await?;
+        self.insert_network_step(
+            table_name,
+            replication_path,
+            query_id,
+            deadline,
+            end_insert(insert, chunk),
+        )
+        .await?;
 
         Ok(summary)
     }
 
-    /// Runs one network step of an INSERT statement under the insert timeout.
+    /// Runs one network step of an INSERT statement until the statement's
+    /// `deadline`.
     ///
     /// A failure increments the insert error counter, logs the statement's
     /// `query_id`, and records whether ClickHouse rejected the statement's
@@ -1093,12 +1126,14 @@ impl ClickHouseClient {
         table_name: &str,
         replication_path: &'static str,
         query_id: Uuid,
+        deadline: TokioInstant,
         step: impl Future<Output = Result<T, clickhouse::error::Error>>,
     ) -> Result<T, InsertRowsError> {
         let mut layout_rejected = false;
-        let result = timeout_call(
+        let result = timeout_call_until(
             ClickHouseOperationKind::Insert,
             &self.config,
+            deadline,
             Some(&format!("table: {table_name}")),
             step.inspect_err(|error| {
                 layout_rejected = is_insert_layout_rejection(error);
@@ -1194,10 +1229,105 @@ async fn pause_before_insert_statement_for_tests(statement_index: u64) {
 
 #[cfg(test)]
 mod tests {
-    use etl::schema::{ColumnSchema, Type};
-    use tokio::time::Instant as TokioInstant;
+    use etl::{
+        data::Cell,
+        schema::{ColumnSchema, Type},
+    };
+    use rand::Rng;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        time::Instant as TokioInstant,
+    };
 
     use super::*;
+    use crate::clickhouse::encoding::CdcColumns;
+
+    /// Bytes a slow fake server reads per read call.
+    const SLOW_SERVER_READ_BYTES: usize = 64 * 1024;
+
+    /// Pause after each read, so the fake server takes in about 8 MiB/s.
+    const SLOW_SERVER_READ_PAUSE: Duration = Duration::from_millis(8);
+
+    /// Accepts one INSERT, reads its body slowly, and answers 200 once the
+    /// chunked body ends.
+    async fn serve_slow_insert(listener: TcpListener) {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut received = Vec::new();
+        let mut buf = vec![0; SLOW_SERVER_READ_BYTES];
+        loop {
+            let read = socket.read(&mut buf).await.unwrap();
+            if read == 0 {
+                return;
+            }
+            received.extend_from_slice(&buf[..read]);
+            if received.ends_with(b"0\r\n\r\n") {
+                break;
+            }
+            tokio::time::sleep(SLOW_SERVER_READ_PAUSE).await;
+        }
+        socket.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n").await.unwrap();
+    }
+
+    /// The insert timeout bounds a whole statement, not each chunk: a server
+    /// that keeps reading slowly cannot hold one statement past the budget.
+    #[tokio::test]
+    async fn insert_timeout_bounds_whole_statement_with_slow_body() {
+        // GIVEN: a server that reads about 8 MiB/s, so no single network
+        // step waits long, and a 16 MiB statement that takes ~2 s to upload.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(serve_slow_insert(listener));
+        let config = ClickHouseClientConfig {
+            insert_timeout: Duration::from_secs(1),
+            client_timeout_epsilon: Duration::ZERO,
+            ..Default::default()
+        };
+        let client = ClickHouseClient::new(url, "default", None, "default", config);
+        let layout = RowBinaryLayout::new(&[
+            ClickHouseTableColumn { name: "payload".to_owned(), type_name: "String".to_owned() },
+            ClickHouseTableColumn {
+                name: "cdc_operation".to_owned(),
+                type_name: "String".to_owned(),
+            },
+            ClickHouseTableColumn { name: "cdc_lsn".to_owned(), type_name: "UInt64".to_owned() },
+            ClickHouseTableColumn {
+                name: "cdc_tx_ordinal".to_owned(),
+                type_name: "UInt64".to_owned(),
+            },
+        ]);
+        // Random text keeps LZ4 from shrinking the body below the chunk size.
+        let mut rng = rand::rng();
+        let rows = (0..4096)
+            .map(|_| {
+                let mut bytes = vec![0u8; 4096];
+                rng.fill(&mut bytes[..]);
+                let text = bytes.iter().map(|byte| char::from(b'0' + byte % 64)).collect();
+                ClickHouseRow {
+                    cells: vec![Cell::String(text)],
+                    cdc: CdcColumns::MergeTree {
+                        operation: "INSERT",
+                        commit_lsn: 1,
+                        tx_ordinal: 1,
+                    },
+                }
+            })
+            .collect();
+
+        // WHEN: the rows are inserted as one statement.
+        let started = Instant::now();
+        let error = client
+            .insert_rows("events", rows, &layout, u64::MAX, None, "cdc")
+            .await
+            .unwrap_err()
+            .error;
+
+        // THEN: the statement times out near the budget instead of finishing
+        // the ~2 s upload.
+        assert_eq!(error.kind(), ErrorKind::DestinationTimeout);
+        assert!(started.elapsed() < Duration::from_secs(3));
+        server.abort();
+    }
 
     /// Redaction preserves retry and layout classification without retaining
     /// row values.
