@@ -64,7 +64,7 @@ const BIGQUERY_SEQUENCE_ORDINAL_SECOND: u64 = 1;
 /// remain distinct with this shared baseline; retries of one key contain the
 /// same snapshot values. Copy batch IDs and row offsets do not add ordering
 /// information because copy partitions read disjoint rows from one snapshot.
-const BIGQUERY_COPY_SEQUENCE_NUMBER: &str = "0/0/0";
+pub(super) const BIGQUERY_COPY_SEQUENCE_NUMBER: &str = "0/0/0";
 
 /// BigQuery-reserved column prefixes, compared case-insensitively.
 const BIGQUERY_RESERVED_COLUMN_PREFIXES: [&str; 9] = [
@@ -1807,7 +1807,7 @@ fn ensure_bigquery_full_row_matches_schema(
 }
 
 /// Builds a BigQuery CDC upsert row after checking the source row width.
-fn bigquery_upsert_row(
+pub(super) fn bigquery_upsert_row(
     replicated_table_schema: &ReplicatedTableSchema,
     mut table_row: TableRow,
     sequence_number: String,
