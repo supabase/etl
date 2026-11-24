@@ -1809,15 +1809,20 @@ fn ensure_bigquery_full_row_matches_schema(
 /// Builds a BigQuery CDC upsert row after checking the source row width.
 pub(super) fn bigquery_upsert_row(
     replicated_table_schema: &ReplicatedTableSchema,
-    mut table_row: TableRow,
+    table_row: TableRow,
     sequence_number: String,
 ) -> EtlResult<BigQueryTableRow> {
     ensure_bigquery_full_row_matches_schema(replicated_table_schema, &table_row)?;
 
-    table_row.values_mut().push(BigQueryOperationType::Upsert.into_cell());
-    table_row.values_mut().push(Cell::String(sequence_number));
+    let source_column_count = table_row.values().len();
+    let source_cells =
+        table_row.into_values().into_iter().enumerate().map(|(index, cell)| (index + 1, cell));
 
-    BigQueryTableRow::try_from(table_row)
+    // Feed the CDC cells separately so the decoded row's vector does not grow.
+    BigQueryTableRow::try_from_tagged_cells(source_cells.chain([
+        (source_column_count + 1, BigQueryOperationType::Upsert.into_cell()),
+        (source_column_count + 2, Cell::String(sequence_number)),
+    ]))
 }
 
 /// Builds one or two BigQuery CDC rows for an update.
@@ -3377,6 +3382,36 @@ mod tests {
         assert_eq!(
             bigquery_sequence_number(event_position, u64::MAX),
             "ffffffffffffffff/ffffffffffffffff/ffffffffffffffff"
+        );
+    }
+
+    #[test]
+    fn bigquery_upsert_row_preserves_tags_after_null_cell() {
+        let schema = ReplicatedTableSchema::all(Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "users".to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
+                ColumnSchema::new("age".to_owned(), Type::INT4, -1, 3, false),
+            ],
+        )));
+
+        let row = bigquery_upsert_row(
+            &schema,
+            TableRow::new(vec![Cell::I32(42), Cell::Null, Cell::I32(7)]),
+            BIGQUERY_COPY_SEQUENCE_NUMBER.to_owned(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            row.encode_to_vec(),
+            expected_row_bytes(vec![
+                (1, Cell::I32(42)),
+                (3, Cell::I32(7)),
+                (4, Cell::String("UPSERT".to_owned())),
+                (5, Cell::String("0/0/0".to_owned())),
+            ]),
         );
     }
 
