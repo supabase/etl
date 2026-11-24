@@ -123,17 +123,17 @@ mod tests {
         schema::TableId,
     };
 
+    fn reserve_slot(semaphore: &Arc<Semaphore>) -> TableSyncSlot {
+        let permit = Arc::clone(semaphore).try_acquire_owned().unwrap();
+        TableSyncSlot::new(&"1".into(), TableId::new(1), permit).unwrap()
+    }
+
     /// Unreleased and unobservable resources retain capacity until an absence
     /// observation succeeds, including after a query timeout.
     #[tokio::test(start_paused = true)]
     async fn release_requires_observed_absence() {
         let semaphore = Arc::new(Semaphore::new(1));
-        let mut slot = TableSyncSlot::new(
-            &"1".into(),
-            TableId::new(1),
-            Arc::clone(&semaphore).acquire_owned().await.unwrap(),
-        )
-        .unwrap();
+        let mut slot = reserve_slot(&semaphore);
         slot.creation_started(1);
         let (queries, mut observations) =
             mpsc::unbounded_channel::<oneshot::Sender<EtlResult<bool>>>();
@@ -171,12 +171,7 @@ mod tests {
     #[tokio::test]
     async fn forced_shutdown_closes_admission_for_unconfirmed_release() {
         let semaphore = Arc::new(Semaphore::new(1));
-        let mut slot = TableSyncSlot::new(
-            &"1".into(),
-            TableId::new(1),
-            Arc::clone(&semaphore).acquire_owned().await.unwrap(),
-        )
-        .unwrap();
+        let mut slot = reserve_slot(&semaphore);
         slot.creation_started(1);
         let (started, mut observed) = mpsc::unbounded_channel();
         let task = tokio::spawn(async move {
@@ -206,21 +201,11 @@ mod tests {
     #[tokio::test]
     async fn abandoned_creation_fails_closed() {
         let semaphore = Arc::new(Semaphore::new(1));
-        let slot = TableSyncSlot::new(
-            &"1".into(),
-            TableId::new(1),
-            Arc::clone(&semaphore).acquire_owned().await.unwrap(),
-        )
-        .unwrap();
+        let slot = reserve_slot(&semaphore);
         drop(slot);
         assert!(!semaphore.is_closed());
 
-        let mut slot = TableSyncSlot::new(
-            &"1".into(),
-            TableId::new(1),
-            Arc::clone(&semaphore).acquire_owned().await.unwrap(),
-        )
-        .unwrap();
+        let mut slot = reserve_slot(&semaphore);
         slot.creation_started(1);
         drop(slot);
         assert!(semaphore.is_closed());

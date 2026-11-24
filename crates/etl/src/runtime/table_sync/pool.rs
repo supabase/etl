@@ -282,46 +282,34 @@ mod tests {
         store::TableState,
     };
 
-    /// Fatal failures stop intake and remain observable by a late supervisor,
-    /// without requiring the apply worker or pool drain to finish first.
+    /// Errors and panics stop intake and reach a late supervisor before pool
+    /// drain.
     #[tokio::test]
     async fn fatal_failure_reaches_supervision_before_pool_drain() {
-        let shutdown = CancellationToken::new();
-        let pool = TableSyncWorkerPool::new(shutdown.clone());
-        let table_id = TableId::new(1);
-        pool.spawn(table_id, TableSyncWorkerState::new(table_id, TableState::Init), async {
-            Err(etl_error!(ErrorKind::SourceQueryFailed, "Test persistence failure"))
-        })
-        .await;
+        for expected in [ErrorKind::SourceQueryFailed, ErrorKind::TableSyncWorkerPanic] {
+            let shutdown = CancellationToken::new();
+            let pool = TableSyncWorkerPool::new(shutdown.clone());
+            let table_id = TableId::new(1);
+            pool.spawn(
+                table_id,
+                TableSyncWorkerState::new(table_id, TableState::Init),
+                async move {
+                    if expected == ErrorKind::TableSyncWorkerPanic {
+                        panic!("Test supervision panic");
+                    }
+                    Err(etl_error!(ErrorKind::SourceQueryFailed, "Test persistence failure"))
+                },
+            )
+            .await;
 
-        tokio::time::timeout(Duration::from_secs(1), shutdown.cancelled()).await.unwrap();
-        let error = pool.wait_for_failure().await;
-        assert_eq!(error.kind(), ErrorKind::SourceQueryFailed);
-        assert_eq!(pool.workers_join_set.lock().await.len(), 1);
-        assert_eq!(
-            pool.wait_all(&CancellationToken::new()).await.unwrap_err().kind(),
-            error.kind()
-        );
-    }
-
-    /// Panics outside the recoverable attempt path are fatal supervision
-    /// failures too, including when they abandon an unconfirmed slot lease.
-    #[tokio::test]
-    async fn supervision_panic_stops_intake() {
-        let shutdown = CancellationToken::new();
-        let pool = TableSyncWorkerPool::new(shutdown.clone());
-        let table_id = TableId::new(1);
-        pool.spawn(table_id, TableSyncWorkerState::new(table_id, TableState::Init), async {
-            panic!("Test supervision panic");
-        })
-        .await;
-
-        tokio::time::timeout(Duration::from_secs(1), shutdown.cancelled()).await.unwrap();
-        assert_eq!(pool.wait_for_failure().await.kind(), ErrorKind::TableSyncWorkerPanic);
-        assert_eq!(
-            pool.wait_all(&CancellationToken::new()).await.unwrap_err().kind(),
-            ErrorKind::TableSyncWorkerPanic
-        );
+            tokio::time::timeout(Duration::from_secs(1), shutdown.cancelled()).await.unwrap();
+            assert_eq!(pool.wait_for_failure().await.kind(), expected);
+            assert_eq!(pool.workers_join_set.lock().await.len(), 1);
+            assert_eq!(
+                pool.wait_all(&CancellationToken::new()).await.unwrap_err().kind(),
+                expected
+            );
+        }
     }
 
     /// The escalation path joins every cancelled worker and preserves genuine

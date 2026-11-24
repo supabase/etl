@@ -2,7 +2,7 @@
 
 use std::{
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicI64, Ordering},
     },
     time::Duration,
@@ -259,17 +259,12 @@ async fn sync_connection_loss_retries_copy_from_fresh_snapshot() {
     let destination = TestDestinationWrapper::wrap(memory.clone());
     let copy = destination.hold_next(FaultyOp::WriteTableRows).await;
     let retry_drop = destination.hold_next(FaultyOp::DropTableForCopy).await;
-    // Capture the error at publication because rollback removes it from the
-    // store before the retry starts.
-    let observed_error = Arc::new(Mutex::new(None));
-    let captured_error = Arc::clone(&observed_error);
+    // Rollback removes the error, so match it when it is published.
     let errored = store
-        .notify_on_table_state(table_id, move |state| {
-            let TableState::Errored { source_err, retry_policy, .. } = state else {
-                return false;
-            };
-            *captured_error.lock().unwrap() = Some((source_err.kind(), retry_policy.clone()));
-            true
+        .notify_on_table_state(table_id, |state| {
+            matches!(state, TableState::Errored {
+                source_err, retry_policy: TableRetryPolicy::TimedRetry { .. }, ..
+            } if source_err.kind() == ErrorKind::ReplicationSlotNotFound)
         })
         .await;
     let synced = store.notify_on_table_sync_complete(table_id).await;
@@ -327,10 +322,6 @@ async fn sync_connection_loss_retries_copy_from_fresh_snapshot() {
 
     errored.notified().await;
     copy.release_ok();
-
-    let (error_kind, retry_policy) = observed_error.lock().unwrap().take().unwrap();
-    assert_eq!(error_kind, ErrorKind::ReplicationSlotNotFound);
-    assert!(matches!(retry_policy, TableRetryPolicy::TimedRetry { .. }));
 
     retry_drop.wait_reached().await;
 
@@ -483,7 +474,8 @@ async fn error_persistence_failure_preempts_graceful_drain() {
         .await
         .unwrap();
     let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+    let memory = MemoryDestination::new(store.clone());
+    let destination = TestDestinationWrapper::wrap(memory.clone());
     let copy = destination.hold_next(FaultyOp::WriteTableRows).await;
     let first_synced = store.notify_on_table_sync_complete(first_id).await;
     let second_synced = store.notify_on_table_sync_complete(second_id).await;
@@ -526,8 +518,21 @@ async fn error_persistence_failure_preempts_graceful_drain() {
 
     write.wait_reached().await;
     let client = database.client.as_ref().unwrap();
-    let insert_lsn: tokio_postgres::types::PgLsn =
-        client.query_one("select pg_current_wal_lsn()", &[]).await.unwrap().get(0);
+    // Other sessions can advance the server's WAL while this response is held.
+    let held_commit_lsn = memory
+        .events()
+        .await
+        .into_iter()
+        .find_map(|event| match event {
+            Event::Insert(insert)
+                if insert.replicated_table_schema.id() == healthy_id
+                    && insert.table_row.values().last() == Some(&Cell::I32(1)) =>
+            {
+                Some(insert.commit_lsn)
+            }
+            _ => None,
+        })
+        .expect("the held write must contain the second insert");
     assert_eq!(
         store.get_table_state(healthy_id).await.unwrap().unwrap().as_type(),
         TableStateType::Ready
@@ -591,6 +596,6 @@ async fn error_persistence_failure_preempts_graceful_drain() {
         store.get_table_state(failed_id).await.unwrap().unwrap().as_type(),
         TableStateType::DataSync
     );
-    assert!(confirmed < insert_lsn);
-    assert!(checkpoint.is_none_or(|checkpoint| checkpoint < insert_lsn));
+    assert!(confirmed <= held_commit_lsn);
+    assert!(checkpoint.is_none_or(|checkpoint| checkpoint <= held_commit_lsn));
 }
