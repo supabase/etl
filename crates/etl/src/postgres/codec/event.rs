@@ -540,6 +540,9 @@ pub(crate) enum RelationSchemaMismatchKind {
     /// A column type agrees, but its modifier differs, so destination length
     /// or precision metadata is stale.
     TypeModifier,
+    /// Default replica identity flags different key columns than the stored
+    /// primary key, so key-based destinations would match rows on a stale key.
+    PrimaryKey,
 }
 
 impl RelationSchemaMismatchKind {
@@ -551,14 +554,16 @@ impl RelationSchemaMismatchKind {
             Self::TextCompatibleType => "text_compatible_type",
             Self::Type => "type",
             Self::TypeModifier => "type_modifier",
+            Self::PrimaryKey => "primary_key",
         }
     }
 
     /// Returns whether decoding with the stored schema would put values in
-    /// the wrong columns or decode them with the wrong type.
+    /// the wrong columns, decode them with the wrong type, or match rows on
+    /// the wrong key.
     pub(crate) fn misaligns_values(self) -> bool {
         match self {
-            Self::ColumnCount | Self::NameOrder | Self::Type => true,
+            Self::ColumnCount | Self::NameOrder | Self::Type | Self::PrimaryKey => true,
             Self::TextCompatibleType | Self::TypeModifier => false,
         }
     }
@@ -593,7 +598,7 @@ pub(crate) fn decodes_as_same_text(left: &Type, right: &Type) -> bool {
 }
 
 /// Returns how a relation message disagrees with the decoder's column order,
-/// types, and type modifiers, if it does.
+/// types, type modifiers, and primary key, if it does.
 ///
 /// Masks are built by name, but tuples are decoded by position. A stored
 /// snapshot that is stale relative to the relation, for example after a
@@ -602,9 +607,9 @@ pub(crate) fn decodes_as_same_text(left: &Type, right: &Type) -> bool {
 /// wrong type. Types are compared after the same OID mapping used for stored
 /// schemas, so types ETL decodes as text still agree.
 ///
-/// Every column is checked: the first disagreement that misaligns values is
-/// reported, even after an earlier harmless one, and otherwise the first
-/// harmless disagreement.
+/// Every column is checked: the first positional disagreement that misaligns
+/// values is reported, then a primary-key disagreement, and otherwise the
+/// first harmless disagreement.
 fn detect_relation_schema_mismatch(
     relation_body: &protocol::RelationBody,
     replicated_table_schema: &ReplicatedTableSchema,
@@ -665,7 +670,57 @@ fn detect_relation_schema_mismatch(
         first_harmless.get_or_insert(mismatch);
     }
 
+    if let Some(mismatch) = detect_primary_key_mismatch(relation_body, replicated_table_schema)? {
+        return Ok(Some(mismatch));
+    }
+
     Ok(first_harmless)
+}
+
+/// Returns a mismatch when default replica identity flags different columns
+/// than the stored primary key.
+///
+/// Under `REPLICA IDENTITY DEFAULT`, pgoutput flags the table's usable
+/// primary-key columns among those it sends, so flagged columns must equal
+/// the replicated stored key. A relation flagging nothing proves nothing: a
+/// deferrable key, an invalid partitioned primary index before PostgreSQL 18,
+/// and legacy snapshots that stored a parent's key all send no flags while a
+/// stored key exists. Other modes do not describe the primary key.
+fn detect_primary_key_mismatch(
+    relation_body: &protocol::RelationBody,
+    replicated_table_schema: &ReplicatedTableSchema,
+) -> EtlResult<Option<RelationSchemaMismatch>> {
+    if !matches!(relation_body.replica_identity(), protocol::ReplicaIdentity::Default) {
+        return Ok(None);
+    }
+
+    let mut relation_key = Vec::new();
+    for column in relation_body.columns() {
+        if column.flags() & 1 == 1 {
+            relation_key.push(column.name()?);
+        }
+    }
+    if relation_key.is_empty() {
+        return Ok(None);
+    }
+    relation_key.sort_unstable();
+    let mut stored_key: Vec<&str> = replicated_table_schema
+        .column_schemas()
+        .filter(|column| column.primary_key())
+        .map(|column| column.name.as_str())
+        .collect();
+    stored_key.sort_unstable();
+    if relation_key == stored_key {
+        return Ok(None);
+    }
+
+    Ok(Some(RelationSchemaMismatch {
+        kind: RelationSchemaMismatchKind::PrimaryKey,
+        detail: format!(
+            "relation identifies rows by {relation_key:?}, but the stored schema's primary key is \
+             {stored_key:?}"
+        ),
+    }))
 }
 
 /// Builds the positional row decoder for a relation message from a stored

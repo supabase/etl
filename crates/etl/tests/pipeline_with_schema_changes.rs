@@ -1471,3 +1471,59 @@ async fn uncaptured_column_swap_stops_replication_before_writing_rows() {
         assert_eq!(inserted_rows, 0, "widen: {widen_earlier_column}");
     }
 }
+
+/// A primary-key change whose snapshot was never captured stops replication
+/// before key-based destinations deduplicate rows on the old key.
+#[tokio::test(flavor = "multi_thread")]
+async fn uncaptured_primary_key_change_stops_replication_before_writing_rows() {
+    init_test_tracing();
+
+    // GIVEN: a synced pipeline replicating a table keyed on `id`.
+    let (database, table_name, table_id, _store, destination, pipeline, _pipeline_id, _pub) =
+        create_database_and_sync_done_pipeline_with_table(
+            "uncaptured_key",
+            &[("region", "text not null")],
+        )
+        .await;
+    let table = table_name.as_quoted_identifier();
+    let client = database.client.as_ref().unwrap();
+    let primary_key: String = client
+        .query_one(
+            "select conname::text from pg_catalog.pg_constraint where conrelid = \
+             $1::text::regclass and contype = 'p'",
+            &[&table],
+        )
+        .await
+        .unwrap()
+        .get(0);
+
+    // WHEN: the key becomes `(id, region)` while DDL capture fails open, then
+    // two rows that share an `id` are inserted.
+    client
+        .batch_execute(&format!(
+            "alter function etl.describe_table_publication_columns(oid, text) rename to \
+             describe_table_publication_columns_moved;
+             alter table {table} drop constraint {}, add primary key (id, region);
+             alter function etl.describe_table_publication_columns_moved(oid, text) rename to \
+             describe_table_publication_columns;
+             insert into {table} (id, region) values (1, 'eu'), (1, 'us')",
+            quote_identifier(&primary_key)
+        ))
+        .await
+        .unwrap();
+
+    // THEN: replication fails with CorruptedTableSchema before writing either
+    // row.
+    let error = wait_for_pipeline_error(&pipeline).await;
+
+    assert_eq!(error.kind(), ErrorKind::CorruptedTableSchema);
+    let inserted_rows = destination
+        .get_events()
+        .await
+        .into_iter()
+        .filter(|event| {
+            matches!(event, Event::Insert(insert) if insert.replicated_table_schema.id() == table_id)
+        })
+        .count();
+    assert_eq!(inserted_rows, 0);
+}

@@ -5146,6 +5146,8 @@ mod tests {
             relation_columns: Vec<(String, Type, bool)>,
             /// Stored snapshot columns in `attnum` order.
             stored_columns: Vec<(String, Type)>,
+            /// Stored primary-key column names in key order.
+            stored_primary_key: Vec<String>,
         }
 
         /// Generates the current source table and how the stored snapshot is
@@ -5173,7 +5175,7 @@ mod tests {
                         // pgoutput sends only published columns, flags every
                         // sent column under `FULL`, and flags none under
                         // `NOTHING`.
-                        let relation_columns = current
+                        let relation_columns: Vec<(String, Type, bool)> = current
                             .iter()
                             .enumerate()
                             .filter(|(index, _)| published[*index])
@@ -5220,7 +5222,24 @@ mod tests {
                             }
                         }
 
-                        RelationCase { replica_identity, relation_columns, stored_columns }
+                        // A current snapshot records the key pgoutput flags
+                        // under default identity.
+                        let stored_primary_key = if replica_identity == b'd' {
+                            relation_columns
+                                .iter()
+                                .filter(|(_, _, flagged)| *flagged)
+                                .map(|(name, _, _)| name.clone())
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
+
+                        RelationCase {
+                            replica_identity,
+                            relation_columns,
+                            stored_columns,
+                            stored_primary_key,
+                        }
                     },
                 )
         }
@@ -5280,7 +5299,13 @@ mod tests {
                     .enumerate()
                     .map(|(index, (name, typ))| {
                         let attnum = i32::try_from(index + 1).unwrap();
+                        let key_position = case
+                            .stored_primary_key
+                            .iter()
+                            .position(|key| key == name)
+                            .map(|position| i32::try_from(position + 1).unwrap());
                         ColumnSchema::new(name.clone(), typ.clone(), -1, attnum, true)
+                            .with_primary_key_ordinal_position(key_position)
                     })
                     .collect(),
             ))
@@ -5355,6 +5380,7 @@ mod tests {
                     .iter()
                     .map(|(name, typ)| ((*name).to_owned(), typ.clone()))
                     .collect(),
+                stored_primary_key: Vec::new(),
             }
         }
 
@@ -5390,6 +5416,52 @@ mod tests {
             );
 
             assert_eq!(mismatch_kind(&case), Some(RelationSchemaMismatchKind::NameOrder));
+        }
+
+        /// A primary key changed without a captured snapshot would leave
+        /// key-based destinations deduplicating on the old key.
+        #[test]
+        fn relation_with_changed_primary_key_is_detected() {
+            // GIVEN: a stored snapshot keyed on `id` alone.
+            let mut case = published_case(
+                &[("id", Type::INT4), ("region", Type::TEXT)],
+                &[("id", Type::INT4), ("region", Type::TEXT)],
+            );
+            case.stored_primary_key = vec!["id".to_owned()];
+
+            // WHEN: the relation flags `(id, region)` as its default identity.
+            for column in &mut case.relation_columns {
+                column.2 = true;
+            }
+
+            // THEN: the key change is reported as misaligning.
+            assert_eq!(mismatch_kind(&case), Some(RelationSchemaMismatchKind::PrimaryKey));
+        }
+
+        /// Default identity flags agree with the stored key; a relation that
+        /// flags no key and full identity's flags never imply a key change.
+        #[test]
+        fn relation_key_flags_match_only_default_identity_primary_keys() {
+            // GIVEN: matching columns where only `id` is the stored key.
+            let mut case = published_case(
+                &[("id", Type::INT4), ("region", Type::TEXT)],
+                &[("id", Type::INT4), ("region", Type::TEXT)],
+            );
+            case.stored_primary_key = vec!["id".to_owned()];
+
+            // WHEN/THEN: no flags, as for a deferrable or invalid key, agree.
+            assert_eq!(mismatch_kind(&case), None);
+
+            // WHEN/THEN: default identity flagging the stored key agrees.
+            case.relation_columns[0].2 = true;
+            assert_eq!(mismatch_kind(&case), None);
+
+            // WHEN/THEN: full identity flags every column without a mismatch.
+            case.replica_identity = b'f';
+            for column in &mut case.relation_columns {
+                column.2 = true;
+            }
+            assert_eq!(mismatch_kind(&case), None);
         }
 
         /// A stale integer type would reject or misrepresent later row values.

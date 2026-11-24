@@ -80,8 +80,9 @@ ETL role itself; tables changed that way may need resynchronization.
 Capture never blocks customer DDL. A capture error raises a warning and lets
 the DDL commit without a snapshot. ETL does not learn that a snapshot is
 missing until a later relation disagrees with the stored schema: unknown
-columns, a different column order, or a different type stop replication before
-the affected rows are written, and the table needs resynchronization.
+columns, a different column order, a different type, or, under default replica
+identity, a different primary key stop replication before the affected rows are
+written, and the table needs resynchronization.
 Text-compatible type and modifier changes are only reported by
 `etl_relation_schema_mismatches_total`. Messages are emitted outside the
 exception block, because a subtransaction XID would change their decoded order

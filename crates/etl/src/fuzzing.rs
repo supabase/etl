@@ -4,7 +4,7 @@ use std::{collections::HashSet, str::FromStr, sync::Arc};
 
 use bytes::Bytes;
 use etl_postgres::{numeric::PgNumeric, type_utils::convert_type_oid_to_type};
-use postgres_replication::protocol::{LogicalReplicationMessage, TupleData};
+use postgres_replication::protocol::{LogicalReplicationMessage, ReplicaIdentity, TupleData};
 use serde_json::json;
 use tokio_postgres::types::{PgLsn, Type};
 
@@ -523,10 +523,11 @@ pub fn check_pgoutput_tuple_decoding(data: &[u8]) {
 /// decoder keeps exactly the stored columns the relation names, in stored
 /// order; identity columns are replicated; the schema change identity builds a
 /// mask for every mode Postgres sends, covering only replicated columns;
-/// mismatch detection reports nothing exactly when names and mapped types
-/// agree position by position, reports a value-misaligning kind exactly when
-/// any position misaligns values, and reports `name_order` exactly when the
-/// first such position is a name; a decoded insert has one value per replicated
+/// mismatch detection reports nothing exactly when names, mapped types, and
+/// default-identity keys agree, reports a value-misaligning kind exactly when
+/// any position misaligns values or the key differs, and reports `name_order`
+/// exactly when the first such position is a name; a decoded insert has one
+/// value per replicated
 /// column. That panic is the fuzz target's finding signal.
 pub fn check_pgoutput_relation_materialization(data: &[u8]) {
     let mut input = FuzzBytes { data };
@@ -624,8 +625,29 @@ pub fn check_pgoutput_relation_materialization(data: &[u8]) {
             )
         })
         .collect();
+    // Under default identity, flagged relation columns must equal the
+    // replicated stored primary key; a relation flagging nothing is unchecked.
+    let key_mismatch = matches!(relation.replica_identity(), ReplicaIdentity::Default) && {
+        let mut relation_key: Vec<&str> = relation
+            .columns()
+            .iter()
+            .filter(|column| column.flags() & 1 == 1)
+            .map(|column| column.name().expect("relation names parsed above"))
+            .collect();
+        relation_key.sort_unstable();
+        let mut stored_key: Vec<&str> = replicated_table_schema
+            .column_schemas()
+            .filter(|column| column.primary_key())
+            .map(|column| column.name.as_str())
+            .collect();
+        stored_key.sort_unstable();
+        !relation_key.is_empty() && relation_key != stored_key
+    };
     match mismatch.map(|mismatch| mismatch.kind()) {
-        None => assert_eq!(decoder_columns, relation_columns),
+        None => {
+            assert_eq!(decoder_columns, relation_columns);
+            assert!(!key_mismatch);
+        }
         Some(RelationSchemaMismatchKind::ColumnCount) => {
             assert_ne!(decoder_columns.len(), relation_columns.len());
         }
@@ -643,21 +665,26 @@ pub fn check_pgoutput_relation_materialization(data: &[u8]) {
                             && !codec::decodes_as_same_text(&decoder_column.1, &relation_column.1))
                 });
             // Detection scans every column, so a harmless earlier difference
-            // cannot hide a later misaligned one.
-            assert_eq!(kind.misaligns_values(), first_misaligned.is_some());
-            let (decoder_column, relation_column) = first_misaligned
-                .or(disagreements.first())
-                .expect("a reported mismatch has a disagreeing position");
-            assert_eq!(
-                kind == RelationSchemaMismatchKind::NameOrder,
-                decoder_column.0 != relation_column.0
-            );
-            assert_eq!(
-                kind == RelationSchemaMismatchKind::TypeModifier,
-                decoder_column.0 == relation_column.0
-                    && decoder_column.1 == relation_column.1
-                    && decoder_column.2 != relation_column.2
-            );
+            // cannot hide a later misaligned one, and a key change outranks
+            // harmless differences.
+            assert_eq!(kind.misaligns_values(), first_misaligned.is_some() || key_mismatch);
+            if kind == RelationSchemaMismatchKind::PrimaryKey {
+                assert!(first_misaligned.is_none() && key_mismatch);
+            } else {
+                let (decoder_column, relation_column) = first_misaligned
+                    .or(disagreements.first())
+                    .expect("a reported mismatch has a disagreeing position");
+                assert_eq!(
+                    kind == RelationSchemaMismatchKind::NameOrder,
+                    decoder_column.0 != relation_column.0
+                );
+                assert_eq!(
+                    kind == RelationSchemaMismatchKind::TypeModifier,
+                    decoder_column.0 == relation_column.0
+                        && decoder_column.1 == relation_column.1
+                        && decoder_column.2 != relation_column.2
+                );
+            }
         }
     }
 
