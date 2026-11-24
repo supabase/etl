@@ -433,6 +433,9 @@ impl Drop for DuckLakeDedicatedConnectionState {
         };
 
         if let Some(connection) = connection {
+            // After this method returns, dropping self.connection drops the
+            // PooledConnection. r2d2 checks broken when that checkout is
+            // returned.
             connection.broken |= broken;
         }
     }
