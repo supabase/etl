@@ -24,7 +24,7 @@ use etl::{
     },
     error::EtlResult,
     event::Event,
-    schema::ReplicatedTableSchema,
+    schema::{ReplicatedTableSchema, TableId},
     test_utils::notifying_store::NotifyingStore,
 };
 use etl_config::{
@@ -486,6 +486,10 @@ where
         self.inner.shutdown().await
     }
 
+    async fn abort_table_copy(&self, table_id: TableId) {
+        self.inner.abort_table_copy(table_id).await;
+    }
+
     async fn drop_table_for_copy(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
@@ -857,6 +861,20 @@ impl Destination for BenchDestination {
             Self::DuckLake(destination) => destination.shutdown().await,
             #[cfg(feature = "snowflake")]
             Self::Snowflake(destination) => destination.shutdown().await,
+        }
+    }
+
+    async fn abort_table_copy(&self, table_id: TableId) {
+        match self {
+            Self::Null(destination) => destination.abort_table_copy(table_id).await,
+            #[cfg(feature = "bigquery")]
+            Self::BigQuery(destination) => destination.abort_table_copy(table_id).await,
+            #[cfg(feature = "clickhouse")]
+            Self::ClickHouse(destination) => destination.abort_table_copy(table_id).await,
+            #[cfg(feature = "ducklake")]
+            Self::DuckLake(destination) => destination.abort_table_copy(table_id).await,
+            #[cfg(feature = "snowflake")]
+            Self::Snowflake(destination) => destination.abort_table_copy(table_id).await,
         }
     }
 

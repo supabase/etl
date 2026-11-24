@@ -412,16 +412,44 @@ pub(super) struct ManagedDuckLakeConnection {
 #[derive(Clone)]
 pub(super) struct DuckLakeDedicatedConnection {
     pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
-    /// Exclusive access is intentional because DuckDB connections,
-    /// transactions, and connection-local temporary tables cannot be used by
-    /// concurrent operations in the same copy session.
-    connection: Arc<Mutex<Option<r2d2::PooledConnection<DuckLakeConnectionManager>>>>,
+    state: Arc<DuckLakeDedicatedConnectionState>,
+}
+
+/// Owns a dedicated checkout until the last user releases it.
+#[derive(Default)]
+struct DuckLakeDedicatedConnectionState {
+    /// Serializes access to the session's transactions and temporary tables.
+    connection: Mutex<Option<r2d2::PooledConnection<DuckLakeConnectionManager>>>,
+    /// Whether the checkout must be destroyed with its temporary rows.
+    discard: AtomicBool,
+}
+
+impl Drop for DuckLakeDedicatedConnectionState {
+    fn drop(&mut self) {
+        let discard = *self.discard.get_mut();
+        let (connection, broken) = match self.connection.get_mut() {
+            Ok(connection) => (connection, discard),
+            Err(poisoned) => (poisoned.into_inner(), true),
+        };
+
+        if let Some(connection) = connection {
+            // After this method returns, dropping self.connection drops the
+            // PooledConnection. r2d2 checks broken when that checkout is
+            // returned.
+            connection.broken |= broken;
+        }
+    }
 }
 
 impl DuckLakeDedicatedConnection {
     /// Creates a lazy dedicated session backed by one DuckLake pool.
     pub(super) fn new(pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>) -> Self {
-        Self { pool, connection: Arc::new(Mutex::new(None)) }
+        Self { pool, state: Arc::default() }
+    }
+
+    /// Evicts the checkout when its last native or async owner releases it.
+    pub(super) fn discard(&self) {
+        self.state.discard.store(true, Ordering::Relaxed);
     }
 }
 
@@ -490,7 +518,7 @@ impl DuckLakeConnectionProvider for DuckLakeDedicatedConnection {
     where
         F: FnOnce(&mut ManagedDuckLakeConnection) -> EtlResult<R>,
     {
-        let mut connection = self.connection.lock().map_err(|_| {
+        let mut connection = self.state.connection.lock().map_err(|_| {
             etl_error!(ErrorKind::InvalidState, "DuckLake dedicated connection mutex was poisoned")
         })?;
 
@@ -1055,7 +1083,8 @@ where
         + Send
         + 'static,
 {
-    run_duckdb_blocking_with_provider_and_context(pool, blocking_slots, timeout, operation).await
+    run_duckdb_blocking_with_provider_and_context(pool, blocking_slots, timeout, (), operation)
+        .await
 }
 
 /// Runs one operation on a connection pinned to a multi-call DuckLake session.
@@ -1068,6 +1097,7 @@ where
 pub(super) async fn run_duckdb_dedicated_blocking_with_context<R, F>(
     session: DuckLakeDedicatedConnection,
     blocking_slots: Arc<Semaphore>,
+    lifetime_guard: impl Send + 'static,
     operation: F,
 ) -> EtlResult<R>
 where
@@ -1080,6 +1110,7 @@ where
         session,
         blocking_slots,
         FOREGROUND_QUERY_TIMEOUT,
+        lifetime_guard,
         operation,
     )
     .await
@@ -1096,9 +1127,13 @@ where
     R: Send + 'static,
     F: FnOnce(&duckdb::Connection) -> EtlResult<R> + Send + 'static,
 {
-    run_duckdb_blocking_with_provider_and_context(pool, blocking_slots, timeout, move |conn, _| {
-        operation(conn)
-    })
+    run_duckdb_blocking_with_provider_and_context(
+        pool,
+        blocking_slots,
+        timeout,
+        (),
+        move |conn, _| operation(conn),
+    )
     .await
 }
 
@@ -1161,6 +1196,7 @@ async fn run_duckdb_blocking_with_provider_and_context<P, R, F>(
     provider: P,
     blocking_slots: Arc<Semaphore>,
     timeout: Duration,
+    lifetime_guard: impl Send + 'static,
     operation: F,
 ) -> EtlResult<R>
 where
@@ -1185,9 +1221,10 @@ where
         "wait for ducklake blocking slot"
     );
 
-    let work = DuckLakeBlockingGuard::new((provider, operation), permit);
+    // The lifetime guard outlives native work and release of the checkout.
+    let work = DuckLakeBlockingGuard::new((provider, operation, lifetime_guard), permit);
     run_supervised_duckdb_blocking(deadline, timeout, move |watchdog| {
-        work.run(|(provider, operation)| {
+        work.run(|(provider, operation, _lifetime_guard)| {
             provider.with_connection(deadline, timeout, move |pooled_conn| {
                 if pooled_conn.broken {
                     return Err(etl_error!(
@@ -1602,7 +1639,7 @@ mod tests {
         let (started_tx, started_rx) = oneshot::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let (interrupted_tx, interrupted_rx) = oneshot::channel();
-        let task = tokio::spawn(run_duckdb_blocking_with_provider_and_context(
+        let task = tokio::spawn(run_duckdb_blocking_with_timeout_and_context(
             Arc::clone(&pool),
             Arc::clone(&slots),
             Duration::from_secs(1),

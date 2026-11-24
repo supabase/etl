@@ -1,15 +1,20 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    panic::{AssertUnwindSafe, resume_unwind},
+    sync::Arc,
+    time::Duration,
+};
 
 use tokio_util::sync::CancellationToken;
 
 mod copy;
 mod monitor;
 
-pub(crate) use copy::{TableCopyResult, table_copy};
+use copy::{TableCopyAttempt, TableCopyResult, table_copy};
 use etl_config::shared::PipelineConfig;
 use etl_postgres::slots::EtlReplicationSlot;
 #[cfg(feature = "failpoints")]
 use fail::fail_point;
+use futures::FutureExt;
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, info, warn};
 
@@ -23,7 +28,7 @@ use crate::{
     bail,
     destination::{
         Destination, DestinationTableMetadata, DestinationWriteStatus, DropTableForCopyResult,
-        PipelineDestination, UpdateRowRequirement, WriteTableRowsResult,
+        PipelineDestination, TableCopyAttemptId, UpdateRowRequirement, WriteTableRowsResult,
     },
     error::{ErrorKind, EtlResult},
     etl_error,
@@ -360,92 +365,111 @@ where
                 ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask);
             warn_if_partial_updates_rejected::<D>(&replicated_table_schema);
 
-            let mut total_table_copy_rows = 0_u64;
-            let mut total_table_copy_duration_secs = 0.0;
-            let mut table_copy_barrier_required = false;
+            let copy_attempt = Arc::new(TableCopyAttempt::new(TableCopyAttemptId::generate()));
+            let copy_result = AssertUnwindSafe(async {
+                let mut total_table_copy_rows = 0_u64;
+                let mut total_table_copy_duration_secs = 0.0;
+                let mut table_copy_barrier_required = false;
 
-            // We check if the table should be copied, or we can skip it.
-            if config.table_sync_copy.should_copy_table(table_id.into_inner()) {
-                let result = table_copy(
-                    &activity_handle,
-                    &replication_transaction,
-                    table_id,
-                    replicated_table_schema.clone(),
-                    Some(&config.publication_name),
-                    slot_name.clone(),
-                    config.max_copy_connections_per_table,
-                    replication_lag_monitor.clone(),
-                    Duration::from_millis(config.table_sync_monitor_refresh_interval_ms.get()),
-                    config.batch.clone(),
-                    shutdown_token.clone(),
-                    destination.clone(),
-                    memory_monitor.clone(),
-                    batch_memory_governor.clone(),
-                )
-                .await?;
+                // We check if the table should be copied, or we can skip it.
+                if config.table_sync_copy.should_copy_table(table_id.into_inner()) {
+                    let result = table_copy(
+                        &activity_handle,
+                        &replication_transaction,
+                        table_id,
+                        replicated_table_schema.clone(),
+                        Some(&config.publication_name),
+                        slot_name.clone(),
+                        config.max_copy_connections_per_table,
+                        replication_lag_monitor.clone(),
+                        Duration::from_millis(config.table_sync_monitor_refresh_interval_ms.get()),
+                        config.batch.clone(),
+                        shutdown_token.clone(),
+                        destination.clone(),
+                        memory_monitor.clone(),
+                        batch_memory_governor.clone(),
+                        Arc::clone(&copy_attempt),
+                    )
+                    .await?;
 
-                match result {
-                    TableCopyResult::Completed {
-                        total_rows,
-                        total_duration_secs,
-                        barrier_required,
-                    } => {
-                        total_table_copy_rows = total_rows;
-                        total_table_copy_duration_secs = total_duration_secs;
-                        table_copy_barrier_required = barrier_required;
+                    match result {
+                        TableCopyResult::Completed {
+                            total_rows,
+                            total_duration_secs,
+                            barrier_required,
+                        } => {
+                            total_table_copy_rows = total_rows;
+                            total_table_copy_duration_secs = total_duration_secs;
+                            table_copy_barrier_required = barrier_required;
+                        }
+                        TableCopyResult::Shutdown => {
+                            info!(
+                                table_id = table_id.0,
+                                "table copy interrupted by shutdown, terminating table sync"
+                            );
+
+                            return Ok(None);
+                        }
                     }
-                    TableCopyResult::Shutdown => {
-                        info!(
-                            table_id = table_id.0,
-                            "table copy interrupted by shutdown, terminating table sync"
-                        );
+                } else {
+                    info!(table_id = table_id.0, "skipping table copy");
+                }
 
-                        return Ok(TableSyncResult::Stopped);
+                // We commit the transaction before starting the apply loop,
+                // otherwise it will fail since no transactions can be running
+                // while replication is started.
+                replication_transaction.commit().await?;
+
+                // If no table rows were written, call the method nonetheless to
+                // kickstart table creation. Additionally, if any copy write was
+                // only accepted (and not durably committed), the empty write is
+                // also the terminal table-wide durability barrier.
+                if total_table_copy_rows == 0 || table_copy_barrier_required {
+                    let (flush_result, pending_flush_result) = WriteTableRowsResult::new(());
+                    // The copy is still incomplete, so both the method call and
+                    // its result wait can be interrupted. Restart drops the
+                    // partial destination table and copies
+                    // it again from a fresh snapshot.
+                    let ShutdownResult::Ok(write_status) = with_shutdown!(
+                        async {
+                            destination
+                                .write_table_rows(
+                                    &replicated_table_schema,
+                                    None,
+                                    Vec::new(),
+                                    flush_result,
+                                )
+                                .await?;
+                            pending_flush_result.await.into_result()
+                        },
+                        shutdown_token,
+                    ) else {
+                        return Ok(None);
+                    };
+
+                    match write_status? {
+                        DestinationWriteStatus::Durable => activity_handle.ping(),
+                        DestinationWriteStatus::Accepted => bail!(
+                            ErrorKind::DestinationError,
+                            "Table copy durability barrier did not confirm durability"
+                        ),
                     }
                 }
-            } else {
-                info!(table_id = table_id.0, "skipping table copy");
+
+                Ok(Some((total_table_copy_rows, total_table_copy_duration_secs)))
+            })
+            .catch_unwind()
+            .await;
+
+            if !matches!(copy_result, Ok(Ok(Some(_)))) {
+                copy_attempt.abort(&destination, table_id).await;
             }
 
-            // We commit the transaction before starting the apply loop,
-            // otherwise it will fail since no transactions can be running while
-            // replication is started.
-            replication_transaction.commit().await?;
-
-            // If no table rows were written, call the method nonetheless to
-            // kickstart table creation. Additionally, if any copy write was
-            // only accepted (and not durably committed), the empty write is
-            // also the terminal table-wide durability barrier.
-            if total_table_copy_rows == 0 || table_copy_barrier_required {
-                let (flush_result, pending_flush_result) = WriteTableRowsResult::new(());
-                // The copy is still incomplete, so both the method call and
-                // its result wait can be interrupted. Restart drops the partial
-                // destination table and copies it again from a fresh snapshot.
-                let ShutdownResult::Ok(write_status) = with_shutdown!(
-                    async {
-                        destination
-                            .write_table_rows(
-                                &replicated_table_schema,
-                                None,
-                                Vec::new(),
-                                flush_result,
-                            )
-                            .await?;
-                        pending_flush_result.await.into_result()
-                    },
-                    shutdown_token,
-                ) else {
-                    return Ok(TableSyncResult::Stopped);
-                };
-
-                match write_status? {
-                    DestinationWriteStatus::Durable => activity_handle.ping(),
-                    DestinationWriteStatus::Accepted => bail!(
-                        ErrorKind::DestinationError,
-                        "Table copy durability barrier did not confirm durability"
-                    ),
-                }
-            }
+            let Some((total_table_copy_rows, total_table_copy_duration_secs)) =
+                copy_result.unwrap_or_else(|payload| resume_unwind(payload))?
+            else {
+                return Ok(TableSyncResult::Stopped);
+            };
 
             info!(
                 table_id = table_id.0,
