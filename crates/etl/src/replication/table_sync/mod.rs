@@ -266,7 +266,13 @@ where
             // We try to delete the slot if it already exists, since we might be
             // starting a table copy after a previous one was reset or didn't
             // complete successfully.
-            replication_client.delete_slot_if_exists(&slot_name).await?;
+            let ShutdownResult::Ok(deleted) = with_shutdown!(
+                replication_client.delete_table_sync_slot_if_exists(&slot_name),
+                shutdown_token,
+            ) else {
+                return Ok(TableSyncResult::Stopped);
+            };
+            deleted?;
 
             // Prepare durable table-copy state only after the destination drop
             // succeeds.

@@ -40,12 +40,13 @@ use crate::{
 
 /// Maximum time to wait for a replication slot deletion to complete.
 ///
-/// Slot deletion uses `WAIT`, which can block until the slot is no longer in
-/// use. After a lost connection, the old walsender keeps the slot active
+/// After a lost connection, the old walsender can keep the slot active
 /// until `wal_sender_timeout` expires, so this bound must outlast PostgreSQL's
 /// default timeout or the deletion fails before the slot is released.
 const DELETE_SLOT_TIMEOUT: Duration = Duration::from_secs(90);
 const _: () = assert!(DELETE_SLOT_TIMEOUT.as_secs() >= DEFAULT_WAL_SENDER_TIMEOUT.as_secs() + 30);
+/// How often table sync checks whether the previous session released its slot.
+const SYNC_SLOT_RECHECK_INTERVAL: Duration = Duration::from_secs(5);
 /// Bounds DNS, socket establishment, TLS negotiation, and authentication
 /// together.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -736,11 +737,34 @@ impl PgReplicationClient {
     /// A missing slot is already deleted. Other failures preserve the source
     /// error, and deletion waits are bounded by [`DELETE_SLOT_TIMEOUT`].
     pub async fn delete_slot_if_exists(&self, slot_name: &str) -> EtlResult<()> {
+        self.drop_slot_if_exists(slot_name, true).await
+    }
+
+    /// Gives the previous sync session time to exit without leaving a
+    /// server-side WAIT command that could drop a later attempt's slot.
+    pub(crate) async fn delete_table_sync_slot_if_exists(&self, slot_name: &str) -> EtlResult<()> {
+        let deadline = tokio::time::Instant::now() + DELETE_SLOT_TIMEOUT;
+        loop {
+            let Err(error) = self.drop_slot_if_exists(slot_name, false).await else {
+                return Ok(());
+            };
+
+            let now = tokio::time::Instant::now();
+            if error.kind() != ErrorKind::ReplicationSlotInUse || now >= deadline {
+                return Err(error);
+            }
+
+            tokio::time::sleep_until(deadline.min(now + SYNC_SLOT_RECHECK_INTERVAL)).await;
+        }
+    }
+
+    async fn drop_slot_if_exists(&self, slot_name: &str, wait: bool) -> EtlResult<()> {
         debug!(slot_name, "deleting replication slot");
 
         // PostgreSQL requires uppercase keywords in replication protocol
         // commands.
-        let query = format!(r#"DROP_REPLICATION_SLOT {} WAIT;"#, quote_identifier(slot_name));
+        let wait_clause = if wait { " WAIT" } else { "" };
+        let query = format!("DROP_REPLICATION_SLOT {}{wait_clause};", quote_identifier(slot_name));
 
         let Ok(delete_result) =
             tokio::time::timeout(DELETE_SLOT_TIMEOUT, self.client.simple_query(&query)).await
@@ -766,6 +790,15 @@ impl PgReplicationClient {
                     info!(slot_name, "replication slot not found, skipping deletion");
 
                     return Ok(());
+                }
+
+                if !wait && err.code() == Some(&SqlState::OBJECT_IN_USE) {
+                    return Err(etl_error!(
+                        ErrorKind::ReplicationSlotInUse,
+                        "Replication slot is in use",
+                        slot_name.to_owned()
+                    )
+                    .with_source(err));
                 }
 
                 Err(err.into())

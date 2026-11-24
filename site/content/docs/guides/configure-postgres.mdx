@@ -72,6 +72,11 @@ that limit is reached. Slot disappearance does not identify which cause occurred
 If ETL instead observes an existing slot with `wal_status = 'lost'`, it reports
 a manually retryable table error.
 
+If a previous session still holds the table-sync slot when a copy starts,
+ETL gives it 90 seconds to release the slot. A release during that window
+lets the same attempt proceed. If the slot is still busy at the end, the
+table uses its configured retry policy.
+
 ETL keeps a table-sync worker's concurrency capacity reserved until it observes
 that both the creating backend and the slot are gone. Delayed session teardown
 or an unavailable source can therefore delay new copies, without replacing
@@ -107,7 +112,7 @@ Wait for the previous run's table-sync sessions to end before restarting.
 `failover: true` requires permanent slots.
 
 After a host or network failure, PostgreSQL may keep the previous session's
-temporary slot until it detects the lost connection. ETL retries while that
+temporary apply slot until it detects the lost connection. ETL retries while that
 slot is still held. Set the retry window longer than PostgreSQL's
 [`wal_sender_timeout`](https://www.postgresql.org/docs/current/runtime-config-replication.html#GUC-WAL-SENDER-TIMEOUT),
 which defaults to 60 seconds. The example allows eight retries ten seconds

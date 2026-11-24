@@ -1,6 +1,9 @@
 //! Temporary-slot lifecycle and recovery boundaries.
 
-use std::time::{Duration, Instant};
+use std::{
+    error::Error,
+    time::{Duration, Instant},
+};
 
 use etl::{
     config::{IntoConnectOptions, ReplicationSlotConfig, ReplicationSlotPersistence},
@@ -9,7 +12,7 @@ use etl::{
     event::EventType,
     postgres::client::PgReplicationClient,
     schema::TableId,
-    store::{StateStore, TableState, TableStateType, WorkerType},
+    store::{StateStore, TableRetryPolicy, TableState, TableStateType, WorkerType},
     test_utils::{
         database::{WalsenderTermination, spawn_source_database, terminate_active_walsender},
         event::{EventCondition, group_events_by_type_and_table_id},
@@ -500,4 +503,101 @@ async fn temporary_pipeline_waits_for_an_existing_temporary_slot() {
         store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(),
         Some(old_checkpoint)
     );
+}
+
+/// A live owner is the barrier: only the test can release its temporary slot.
+async fn sync_with_held_slot(hold_past_grace: bool) {
+    let mut database = spawn_source_database().await;
+    let schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let users = schema.users_schema();
+    insert_users_data(&mut database, &users.name, 1..=1).await;
+    let pipeline_id = random_pipeline_id();
+    let slot_name: String =
+        EtlReplicationSlot::for_table_sync_worker(&pipeline_id, users.id).try_into().unwrap();
+    let mut owner = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    owner
+        .create_slot(
+            &slot_name,
+            &ReplicationSlotConfig {
+                persistence: ReplicationSlotPersistence::Temporary,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let store = NotifyingStore::new();
+    let destination = MemoryDestination::new(store.clone());
+    let mut pipeline = PipelineBuilder::new(
+        database.config.clone(),
+        pipeline_id.as_str(),
+        schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    )
+    .with_retry_config(1000, 1)
+    .build();
+    let (error_tx, mut errors) = tokio::sync::mpsc::unbounded_channel();
+    let started = Instant::now();
+    store
+        .notify_on_table_state(users.id, move |state| {
+            let TableState::Errored { source_err, retry_policy, .. } = state else {
+                return false;
+            };
+
+            error_tx.send((started.elapsed(), source_err.clone(), retry_policy.clone())).unwrap();
+            true
+        })
+        .await;
+    let synced = store.notify_on_table_sync_complete(users.id).await;
+
+    pipeline.start().await.unwrap();
+    if hold_past_grace {
+        let (elapsed, error, retry_policy) =
+            tokio::time::timeout(Duration::from_secs(120), errors.recv()).await.unwrap().unwrap();
+        assert!(elapsed >= Duration::from_secs(90));
+        assert_eq!(error.kind(), ErrorKind::ReplicationSlotInUse);
+        let postgres_error =
+            error.source().unwrap().downcast_ref::<tokio_postgres::Error>().unwrap();
+        assert_eq!(postgres_error.code(), Some(&tokio_postgres::error::SqlState::OBJECT_IN_USE));
+        assert!(matches!(retry_policy, TableRetryPolicy::TimedRetry { .. }));
+    } else {
+        // An idle walsender has already received the busy response to DROP.
+        wait_until("first sync-slot drop attempt", || async {
+            let row = database
+                .client
+                .as_ref()
+                .unwrap()
+                .query_one(
+                    "select exists (select 1 from pg_stat_activity where state = 'idle' and query \
+                     like 'DROP_REPLICATION_SLOT %' and strpos(query, $1) > 0)",
+                    &[&slot_name],
+                )
+                .await?;
+            Ok(row.get(0))
+        })
+        .await;
+    }
+    assert_eq!(slot_is_temporary(&database, &slot_name).await, Some(true));
+
+    drop(owner);
+    synced.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    if !hold_past_grace {
+        assert!(errors.try_recv().is_err(), "release during grace spent a table retry");
+    }
+    assert_eq!(destination.table_rows().await[&users.id].len(), 1);
+}
+
+/// Releasing the slot within the grace period must use no table retries.
+#[tokio::test(flavor = "multi_thread")]
+async fn held_sync_slot_released_within_grace_uses_no_table_retry() {
+    sync_with_held_slot(false).await;
+}
+
+/// A still-busy slot gets a timed retry only after the full grace period.
+#[tokio::test(flavor = "multi_thread")]
+async fn held_sync_slot_retries_after_the_full_grace_period() {
+    sync_with_held_slot(true).await;
 }
