@@ -699,9 +699,10 @@ pub struct ClickHouseClientConfig {
     pub schema_query_timeout: Duration,
     /// Server-side budget for DDL (CREATE / ALTER / DROP / RENAME / TRUNCATE).
     pub ddl_timeout: Duration,
-    /// Server-side budget for each network step of an INSERT statement:
-    /// sending one chunk of the body, or sending the last chunk and waiting
-    /// for ClickHouse to commit the statement.
+    /// Budget for one whole INSERT statement, from its first body chunk
+    /// through the commit. The client-side deadline enforces it; the
+    /// per-request `http_send_timeout` and `http_receive_timeout` it is also
+    /// sent as do not bound a streamed body.
     pub insert_timeout: Duration,
     /// Slack added to the server-side budget to derive the client-side
     /// `tokio::time::timeout`.
@@ -718,7 +719,7 @@ impl ClickHouseClientConfig {
     pub const DEFAULT_SCHEMA_QUERY_TIMEOUT: Duration = Duration::from_secs(16);
     /// Default server-side budget for DDL.
     pub const DEFAULT_DDL_TIMEOUT: Duration = Duration::from_secs(128);
-    /// Default server-side budget per INSERT statement.
+    /// Default budget per INSERT statement.
     pub const DEFAULT_INSERT_TIMEOUT: Duration = Duration::from_secs(256);
     /// Default slack between server-side and client-side budgets.
     pub const DEFAULT_CLIENT_TIMEOUT_EPSILON: Duration = Duration::from_secs(4);

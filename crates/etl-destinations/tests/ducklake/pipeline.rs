@@ -3,7 +3,10 @@
 //! These tests use a PostgreSQL-backed DuckLake catalog and verify the final
 //! table contents by querying DuckLake directly through DuckDB.
 
-use std::num::{NonZeroU16, NonZeroU64};
+use std::{
+    num::{NonZeroU16, NonZeroU64},
+    time::Duration,
+};
 
 use duckdb::Connection;
 #[cfg(feature = "test-utils")]
@@ -11,16 +14,19 @@ use etl::pipeline::PipelineId;
 use etl::{
     config::BatchConfig,
     event::EventType,
-    store::StateStore,
+    store::{StateStore, TableRetryPolicy, TableState, TableStateType},
     test_utils::{
         database::{spawn_source_database, test_table_name},
         event::EventCondition,
         notifying_store::NotifyingStore,
-        pipeline::{create_pipeline, create_pipeline_with_batch_config, random_pipeline_id},
+        pipeline::{
+            PipelineBuilder, create_pipeline, create_pipeline_with_batch_config, random_pipeline_id,
+        },
         test_destination_wrapper::TestDestinationWrapper,
         test_schema::{TableSelection, insert_mock_data, setup_test_database_schema},
     },
 };
+use etl_config::shared::DuckLakeCopyBufferConfig;
 use etl_destinations::ducklake::{
     DuckLakeDestination, DuckLakeTableName, table_name_to_ducklake_table_name,
 };
@@ -29,6 +35,7 @@ use etl_postgres::{below_version, tokio::test_utils::TableModification, version:
 use etl_telemetry::tracing::init_test_tracing;
 use pg_escape::{quote_identifier, quote_literal};
 use rust_decimal::Decimal;
+use tokio::time::timeout;
 use url::Url;
 
 use crate::support::ducklake::{
@@ -37,6 +44,102 @@ use crate::support::ducklake::{
 
 /// Row size that exceeds the test's preferred 8 MiB batch limit.
 const OVERSIZED_COPY_ROW_BYTES: i32 = 9_000_000;
+
+/// A source decode error must release staging before the pipeline reports it.
+#[tokio::test(flavor = "multi_thread")]
+async fn source_copy_failure_releases_ducklake_session() {
+    assert_failed_copy_releases_session(
+        "text[]",
+        "(array['valid']), (array[['two'], ['dimensions']])",
+        "multidimensional",
+    )
+    .await;
+}
+
+/// A rejected destination batch must release rows accepted earlier in the copy.
+#[tokio::test(flavor = "multi_thread")]
+async fn ducklake_copy_failure_releases_ducklake_session() {
+    assert_failed_copy_releases_session(
+        "text",
+        "('valid'), (repeat('x', 8192))",
+        "ducklake copy batch exceeds the configured buffer maximum",
+    )
+    .await;
+}
+
+/// Stages the first row, fails on the second, and checks that maintenance can
+/// acquire the session fence while the table waits for a manual retry.
+async fn assert_failed_copy_releases_session(
+    payload_type: &str,
+    source_values: &str,
+    expected_error: &str,
+) {
+    let database = spawn_source_database().await;
+    let table = test_table_name("failed_copy");
+    let table_id =
+        database.create_table(table.clone(), false, &[("payload", payload_type)]).await.unwrap();
+    let publication = "failed_copy_pub";
+    database.create_publication(publication, std::slice::from_ref(&table)).await.unwrap();
+    database
+        .run_sql(&format!("insert into {} values {source_values}", table.as_quoted_identifier()))
+        .await
+        .unwrap();
+
+    let lake = create_test_lake("failed_copy_session").await;
+    let store = NotifyingStore::new();
+    let destination = DuckLakeDestination::builder(
+        lake.catalog_url.clone(),
+        lake.data_url.clone(),
+        NonZeroU16::MIN,
+        store.clone(),
+    )
+    .copy_buffer(DuckLakeCopyBufferConfig {
+        enabled: true,
+        target_bytes: NonZeroU64::new(1024).unwrap(),
+        max_total_bytes: 4096,
+    })
+    .build()
+    .await
+    .unwrap();
+    let mut pipeline = PipelineBuilder::new(
+        database.config.clone(),
+        random_pipeline_id(),
+        publication.to_owned(),
+        store.clone(),
+        destination.clone(),
+    )
+    .with_batch_config(BatchConfig {
+        max_fill_ms: 1000,
+        memory_budget_ratio: 0.2,
+        max_bytes: NonZeroU64::MIN,
+    })
+    .with_max_copy_connections_per_table(1)
+    .build();
+    let errored = store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
+
+    pipeline.start().await.unwrap();
+
+    timeout(Duration::from_secs(30), errored.notified()).await.unwrap();
+    let Some(TableState::Errored { retry_policy, source_err, .. }) =
+        store.get_table_state(table_id).await.unwrap()
+    else {
+        panic!("expected a table error");
+    };
+    assert_eq!(retry_policy, TableRetryPolicy::ManualRetry);
+    assert!(source_err.to_string().to_ascii_lowercase().contains(expected_error));
+    assert!(destination.copy_buffer_peak_staged_bytes() > 0);
+    let pause = timeout(Duration::from_secs(5), destination.acquire_external_maintenance_pause())
+        .await
+        .unwrap();
+    drop(pause);
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let table_name = table_name_to_ducklake_table_name(&table).unwrap();
+    let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
+    assert_eq!(count_applied_batches(&conn, &table_name, "copy"), 0);
+    assert_eq!(count_applied_batches(&conn, &table_name, "copy_complete"), 0);
+}
 
 /// Expected row shape after adding columns during replication.
 #[derive(Debug, Eq, PartialEq)]

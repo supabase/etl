@@ -279,6 +279,11 @@ where
         apply_response_fault(fault, result).await
     }
 
+    async fn abort_table_copy(&self, table_id: TableId) {
+        let destination = self.inner.read().await.wrapped_destination.clone();
+        destination.abort_table_copy(table_id).await;
+    }
+
     async fn drop_table_for_copy(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,

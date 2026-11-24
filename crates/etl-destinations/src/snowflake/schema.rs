@@ -104,8 +104,8 @@ pub(super) fn validate_primary_key_identity(schema: &ReplicatedTableSchema) -> R
 
 /// Builds the column definitions string.
 ///
-/// Source columns are followed by the operation and sequence columns, and
-/// the nullable missing-column mask, matching upgraded legacy tables.
+/// Source columns are followed by the CDC operation, sequence number, and
+/// nullable missing-column mask.
 pub(crate) fn build_column_defs(columns: &[ColumnSchema]) -> String {
     let mut parts: Vec<String> = columns
         .iter()

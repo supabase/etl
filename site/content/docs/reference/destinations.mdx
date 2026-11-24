@@ -518,8 +518,9 @@ in this array. These IDs remain stable across renames; dropping a column does
 not make its ID available for reuse within the same table. They are not row
 indexes or Snowflake column positions. An explicitly supplied
 SQL NULL has no entry; it replaces the previous value. Complete records have an
-empty array. Changed large values and initial copy rows must fit the compressed
-request limit.
+empty array. A NULL mask in historical insert or update records also means the
+row was complete for its replicated schema at the time. Changed large values
+and initial copy rows must fit the compressed request limit.
 
 Query the automatically created `<physical_table>_CURRENT` view:
 
@@ -696,21 +697,6 @@ that another replicated table still uses.
   source data or a fresh copy.
 - Validate channel recovery, committed offsets, and account-specific resource
   limits before production use.
-
-### Existing destination tables
-
-For ETL-owned tables using the supported previous CDC format, ETL validates the
-column set and CDC metadata, adds the nullable `_cdc_missing_columns` ARRAY
-column, and validates the result before opening the write channel. Existing
-insert/update records have NULL metadata, interpreted as complete within their
-replicated schema at event time. Historical deletes remain deletion boundaries.
-The upgrade preserves stored history and replication offsets and requires no
-backfill.
-
-The configured Snowflake role must allow the ALTER. Unexpected schemas and
-metadata types remain errors. Customer-owned queries must support partial
-records before consuming them; automatic table upgrades do not update those
-queries. The materialization query requires `_cdc_missing_columns` to exist.
 
 ## Custom destinations and upstream support
 

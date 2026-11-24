@@ -8,7 +8,7 @@ use crate::{
     },
     error::EtlResult,
     event::Event,
-    schema::ReplicatedTableSchema,
+    schema::{ReplicatedTableSchema, TableId},
 };
 
 /// Whether a destination can apply updates whose new row omits values.
@@ -99,6 +99,18 @@ pub trait Destination {
         replicated_table_schema: &ReplicatedTableSchema,
         async_result: DropTableForCopyResult<()>,
     ) -> impl Future<Output = EtlResult<()>> + Send;
+
+    /// Releases resources retained by an abandoned initial table copy.
+    ///
+    /// ETL closes the attempt to further copy submissions before calling this
+    /// hook. Discard volatile staging and preserve already committed data and
+    /// replay markers for [`Destination::drop_table_for_copy`] to reset.
+    /// Work still running after cancellation must retain its ordering and
+    /// maintenance guards until it exits. This hook does not wait for that
+    /// work. The default implementation is a no-op.
+    fn abort_table_copy(&self, _table_id: TableId) -> impl Future<Output = ()> + Send {
+        async {}
+    }
 
     /// Writes a batch of table rows to the destination.
     ///

@@ -24,7 +24,7 @@ use crate::snowflake::common::{
     build_auth, companion_query, wait_for_replication_checkpoint, with_table_cleanup,
 };
 
-/// Builds the source schema shared by the history and migration tests.
+/// Builds the source schema for partial-update tests.
 fn table_schema(id: TableId, name: String) -> TableSchema {
     TableSchema::new(
         id,
@@ -741,11 +741,10 @@ async fn materialization_query_composite_keys_and_native_values() {
     .await;
 }
 
-/// Exercises both automatic legacy upgrade and restart after the ALTER already
-/// completed, retaining real channel offsets and historical NULL semantics.
+/// A cold write rejects a missing CDC mask and leaves the column absent.
 #[tokio::test]
 #[ignore = "requires Snowflake test credentials"]
-async fn legacy_format_upgrade_preserves_history_and_offsets() {
+async fn cold_open_rejects_missing_mask_column() {
     use etl::destination::Destination as _;
 
     let auth = build_auth();
@@ -755,205 +754,42 @@ async fn legacy_format_upgrade_preserves_history_and_offsets() {
         Arc::clone(&auth),
         reqwest::Client::new(),
     );
-    let name = format!("upgrade{}", uuid::Uuid::new_v4().simple());
+    let name = format!("invalid{}", uuid::Uuid::new_v4().simple());
     let physical = format!("PUBLIC_{name}").to_uppercase();
-    let table = table_schema(TableId::new(1174), name);
+    let table = table_schema(TableId::new(1175), name);
     let schema = ReplicatedTableSchema::all(Arc::new(table.clone()));
     let store = NotifyingStore::new();
     store.store_table_schema(table).await.unwrap();
-    let original =
-        Destination::new(Client::new(Arc::clone(&auth), 1174.to_string().into()), store.clone());
+
+    let pipeline_id = random_pipeline_id();
+    let original = Destination::new(
+        Client::new(Arc::clone(&auth), pipeline_id.as_str().into()),
+        store.clone(),
+    );
     with_table_cleanup(&sql, &[&physical], || async {
-        write_table_rows(
-            &original,
-            &schema,
-            vec![row(1, Cell::String("baseline".into()), 0), row(2, Cell::Null, 0)],
-        )
-        .await
-        .unwrap();
         write_table_rows(&original, &schema, vec![]).await.unwrap();
-        let full = Event::Update(UpdateEvent {
+        original.shutdown().await.unwrap();
+
+        sql.drop_column(&physical, "_cdc_missing_columns").await.unwrap();
+
+        let restarted = Destination::new(Client::new(auth, pipeline_id.into()), store);
+        let event = Event::Insert(InsertEvent {
             commit_lsn: 10_u64.into(),
             tx_ordinal: 1,
-            replicated_table_schema: schema.clone(),
-            updated_table_row: UpdatedTableRow::Full(row(
-                1,
-                Cell::String("before upgrade".into()),
-                1,
-            )),
-            old_table_row: Some(OldTableRow::Full(row(1, Cell::String("baseline".into()), 0))),
+            replicated_table_schema: schema,
+            table_row: row(1, Cell::Null, 1),
         });
-        let delete = Event::Delete(DeleteEvent {
-            commit_lsn: 10_u64.into(),
-            tx_ordinal: 2,
-            replicated_table_schema: schema.clone(),
-            old_table_row: Some(OldTableRow::Key(TableRow::new(vec![Cell::I32(2)]))),
-        });
-        let committed_events = vec![full, delete];
-        write_events(&original, WriteEventsDurability::RequireDurable, committed_events.clone())
+        let error = write_events(&restarted, WriteEventsDurability::RequireDurable, vec![event])
             .await
-            .unwrap();
-        let before = original.fetch_committed_offset(schema.id()).await.unwrap().unwrap();
-        original.shutdown().await.unwrap();
-        // All value-supplying events above are complete. Removing the mask
-        // here constructs the old physical format, including a key delete.
-        sql.drop_column(&physical, "_cdc_missing_columns").await.unwrap();
-        let metadata = store.get_destination_table_metadata(schema.id()).await.unwrap();
-        let upgraded = Destination::new(
-            Client::new(Arc::clone(&auth), 1174.to_string().into()),
-            store.clone(),
-        );
-        // Opening upgrades the table and skips both committed events.
-        write_events(&upgraded, WriteEventsDurability::RequireDurable, committed_events.clone())
-            .await
-            .unwrap();
-        assert_eq!(
-            upgraded.fetch_committed_offset(schema.id()).await.unwrap(),
-            Some(before.clone())
-        );
-        assert_eq!(store.get_destination_table_metadata(schema.id()).await.unwrap(), metadata);
-        upgraded.shutdown().await.unwrap();
-        // Reopen before new writes: the ARRAY column exists, historical masks
-        // are still NULL, and committed events must still be skipped.
-        let upgraded = Destination::new(
-            Client::new(Arc::clone(&auth), 1174.to_string().into()),
-            store.clone(),
-        );
-        write_events(&upgraded, WriteEventsDurability::RequireDurable, committed_events)
-            .await
-            .unwrap();
-        assert_eq!(upgraded.fetch_committed_offset(schema.id()).await.unwrap(), Some(before));
-        assert_eq!(store.get_destination_table_metadata(schema.id()).await.unwrap(), metadata);
-        let events = vec![
-            Event::Update(UpdateEvent {
-                commit_lsn: 20_u64.into(),
-                tx_ordinal: 1,
-                replicated_table_schema: schema.clone(),
-                updated_table_row: partial(1, 2),
-                old_table_row: None,
-            }),
-            Event::Insert(InsertEvent {
-                commit_lsn: 20_u64.into(),
-                tx_ordinal: 2,
-                replicated_table_schema: schema.clone(),
-                table_row: row(2, Cell::String("new lifetime".into()), 0),
-            }),
-            Event::Update(UpdateEvent {
-                commit_lsn: 20_u64.into(),
-                tx_ordinal: 3,
-                replicated_table_schema: schema.clone(),
-                updated_table_row: partial(2, 3),
-                old_table_row: None,
-            }),
-        ];
-        write_events(&upgraded, WriteEventsDurability::RequireDurable, events.clone())
-            .await
-            .unwrap();
-        let query = companion_query(&config, &physical);
-        let rows = query_rows(&sql, &format!("{query} order by \"id\"")).await.unwrap();
-        assert_eq!(rows.len(), 2);
-        assert_eq!(&rows[0][..3], &[json!("1"), json!("before upgrade"), json!("2")]);
-        assert_eq!(&rows[1][..3], &[json!("2"), json!("new lifetime"), json!("3")]);
-        upgraded.shutdown().await.unwrap();
-        let restarted = Destination::new(
-            Client::new(Arc::clone(&auth), 1174.to_string().into()),
-            store.clone(),
-        );
-        write_events(&restarted, WriteEventsDurability::RequireDurable, events).await.unwrap();
-        assert_eq!(query_rows(&sql, &format!("{query} order by \"id\"")).await.unwrap(), rows);
+            .unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::CorruptedTableSchema);
+
         let fqn = format!("\"{}\".\"{}\".\"{physical}\"", config.database(), config.schema());
-        assert_eq!(
-            query_rows(
-                &sql,
-                &format!("select count(*), count_if(\"_cdc_missing_columns\" is null) from {fqn}")
-            )
-            .await
-            .unwrap(),
-            vec![vec![json!("7"), json!("4")]]
-        );
+        let columns = query_rows(&sql, &format!("show columns in table {fqn}")).await.unwrap();
+        assert!(columns.iter().all(|column| column[2] != "_cdc_missing_columns"));
+
         restarted.shutdown().await.unwrap();
     })
     .await;
-}
-
-/// An almost-legacy table is not an automatic repair request.
-#[tokio::test]
-#[ignore = "requires Snowflake test credentials"]
-async fn legacy_upgrade_rejects_unrelated_schema_damage() {
-    use etl::destination::Destination as _;
-
-    let auth = build_auth();
-    let config = auth.config().clone_without_credentials();
-    let sql = SqlClient::new(
-        config.clone_without_credentials(),
-        Arc::clone(&auth),
-        reqwest::Client::new(),
-    );
-    for damage in ["extra", "missing", "wrong_mask"] {
-        let name = format!("invalid{}", uuid::Uuid::new_v4().simple());
-        let physical = format!("PUBLIC_{name}").to_uppercase();
-        let table = table_schema(TableId::new(1175), name);
-        let schema = ReplicatedTableSchema::all(Arc::new(table.clone()));
-        let store = NotifyingStore::new();
-        store.store_table_schema(table).await.unwrap();
-        let original = Destination::new(
-            Client::new(Arc::clone(&auth), 1175.to_string().into()),
-            store.clone(),
-        );
-        with_table_cleanup(&sql, &[&physical], || async {
-            // Rejection depends on column metadata; history preservation is
-            // tested above.
-            assert_eq!(
-                write_table_rows(&original, &schema, vec![]).await.unwrap(),
-                DestinationWriteStatus::Durable
-            );
-            original.shutdown().await.unwrap();
-            sql.drop_column(&physical, "_cdc_missing_columns").await.unwrap();
-            match damage {
-                "extra" => sql.add_column(&physical, "unexpected", "VARCHAR", None).await.unwrap(),
-                "missing" => sql.drop_column(&physical, "payload").await.unwrap(),
-                _ => sql
-                    .add_column(&physical, "_cdc_missing_columns", "VARCHAR", None)
-                    .await
-                    .unwrap(),
-            }
-            let restarted = Destination::new(
-                Client::new(Arc::clone(&auth), 1175.to_string().into()),
-                store.clone(),
-            );
-            let event = Event::Update(UpdateEvent {
-                commit_lsn: 10_u64.into(),
-                tx_ordinal: 1,
-                replicated_table_schema: schema.clone(),
-                updated_table_row: UpdatedTableRow::Full(row(1, Cell::Null, 1)),
-                old_table_row: None,
-            });
-            let error =
-                write_events(&restarted, WriteEventsDurability::RequireDurable, vec![event])
-                    .await
-                    .unwrap_err();
-            assert_eq!(
-                error.kind(),
-                if damage == "wrong_mask" {
-                    ErrorKind::DestinationLayoutUnsupported
-                } else {
-                    ErrorKind::CorruptedTableSchema
-                }
-            );
-            let fqn = format!("\"{}\".\"{}\".\"{physical}\"", config.database(), config.schema());
-            let columns = query_rows(&sql, &format!("show columns in table {fqn}")).await.unwrap();
-            let masks = columns
-                .iter()
-                .filter(|column| column[2] == "_cdc_missing_columns")
-                .collect::<Vec<_>>();
-            if damage == "wrong_mask" {
-                assert_eq!(masks.len(), 1);
-                assert_eq!(parse_json_cell(&masks[0][3])["type"], "TEXT");
-            } else {
-                assert!(masks.is_empty());
-            }
-            restarted.shutdown().await.unwrap();
-        })
-        .await;
-    }
 }
