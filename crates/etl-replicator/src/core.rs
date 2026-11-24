@@ -7,7 +7,7 @@ use etl::{
     store::PostgresStore,
     task::abort_and_join_result,
 };
-use etl_config::shared::{PgConnectionConfig, ReplicatorConfig, ReplicatorHealthConfig};
+use etl_config::shared::{PipelineConfig, ReplicatorConfig, ReplicatorHealthConfig};
 use etl_telemetry::listener::bind_listener;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, error};
@@ -15,9 +15,10 @@ use tracing::{debug, error};
 use crate::{
     core::shutdown::with_shutdown,
     error::ReplicatorResult,
-    error_notification::ErrorNotificationClient,
     error_reporting::ErrorReportingStateStore,
     health::{self, ReplicatorHealth},
+    management_api::ManagementApiClient,
+    source_repair::SourceRepair,
 };
 
 mod destinations;
@@ -87,16 +88,26 @@ fn spawn_health_server(
 /// Creates a [`PostgresStore`] instance for the given pipeline and connection
 /// configuration. The pipeline itself owns source migration startup.
 async fn init_replicator_store(
-    pipeline_id: PipelineId,
-    store_pg_connection_config: PgConnectionConfig,
-    notification_client: Option<ErrorNotificationClient>,
+    config: &PipelineConfig,
+    notification_client: Option<ManagementApiClient>,
+    source_repair: Option<&SourceRepair<'_>>,
 ) -> ReplicatorResult<ReplicatorStore> {
+    let pipeline_id = PipelineId::from(&config.id);
     debug!(%pipeline_id, "initializing replicator store");
 
-    Ok(ErrorReportingStateStore::new(
-        PostgresStore::new(pipeline_id, store_pg_connection_config).await?,
-        notification_client,
-    ))
+    let store_config = config.store_pg_connection();
+    let store = PostgresStore::new(pipeline_id, store_config.clone()).await;
+    // A separate metadata primary can fail while the replication source is
+    // healthy.
+    if let Err(error) = &store
+        && let Some(repair) = source_repair
+        && store_config.host == config.pg_connection.host
+        && store_config.hostaddr == config.pg_connection.hostaddr
+        && store_config.port == config.pg_connection.port
+    {
+        repair.startup(error).await;
+    }
+    Ok(ErrorReportingStateStore::new(store?, notification_client))
 }
 
 /// Starts the replicator service with the provided configuration.
@@ -105,7 +116,8 @@ async fn init_replicator_store(
 /// configuration, and starts the pipeline.
 pub(crate) async fn start_replicator_with_config(
     replicator_config: ReplicatorConfig,
-    notification_client: Option<ErrorNotificationClient>,
+    notification_client: Option<ManagementApiClient>,
+    source_repair: Option<&SourceRepair<'_>>,
 ) -> ReplicatorResult<()> {
     // Register before any asynchronous initialization so startup remains
     // cancellable.
@@ -117,13 +129,8 @@ pub(crate) async fn start_replicator_with_config(
     let replicator_result: ReplicatorResult<()> = async {
         // We initialize the store, using the optional store connection when the
         // replication connection points at a read replica.
-        let store_pg_connection_config = replicator_config.pipeline.store_pg_connection().clone();
         let Some(result) = with_shutdown!(
-            init_replicator_store(
-                PipelineId::from(&replicator_config.pipeline.id),
-                store_pg_connection_config,
-                notification_client
-            ),
+            init_replicator_store(&replicator_config.pipeline, notification_client, source_repair),
             shutdown_signal.wait(),
         ) else {
             return Ok(());
@@ -136,6 +143,7 @@ pub(crate) async fn start_replicator_with_config(
             replicator_store.clone(),
             &mut shutdown_signal,
             &replicator_health,
+            source_repair,
         )
         .await?;
 

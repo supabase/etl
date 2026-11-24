@@ -1539,6 +1539,7 @@ dependencies = [
  "etl-telemetry",
  "k8s-openapi",
  "metrics",
+ "rand 0.9.5",
  "reqwest 0.12.28",
  "rustls",
  "secrecy",

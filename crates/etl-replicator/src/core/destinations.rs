@@ -8,6 +8,7 @@ use crate::{
     core::{ReplicatorStore, shutdown::ShutdownSignal},
     error::ReplicatorResult,
     health::ReplicatorHealth,
+    source_repair::SourceRepair,
 };
 
 /// Starts the configured destination pipeline.
@@ -17,9 +18,10 @@ pub(super) async fn start(
     store: ReplicatorStore,
     shutdown_signal: &mut ShutdownSignal,
     replicator_health: &ReplicatorHealth,
+    source_repair: Option<&SourceRepair<'_>>,
 ) -> ReplicatorResult<()> {
     #[cfg(not(feature = "any-destination"))]
-    let _ = (&store, &shutdown_signal, &replicator_health);
+    let _ = (&store, &shutdown_signal, &replicator_health, source_repair);
 
     match replicator_config.destination.kind() {
         DestinationKind::BigQuery => {
@@ -29,6 +31,7 @@ pub(super) async fn start(
                     || bigquery::initialize(replicator_config, store),
                     shutdown_signal,
                     replicator_health,
+                    source_repair,
                 )
                 .await
             }
@@ -45,6 +48,7 @@ pub(super) async fn start(
                     || clickhouse::initialize(replicator_config, store),
                     shutdown_signal,
                     replicator_health,
+                    source_repair,
                 )
                 .await
             }
@@ -61,6 +65,7 @@ pub(super) async fn start(
                     || ducklake::initialize(replicator_config, store),
                     shutdown_signal,
                     replicator_health,
+                    source_repair,
                 )
                 .await
             }
@@ -77,6 +82,7 @@ pub(super) async fn start(
                     || std::future::ready(snowflake::initialize(replicator_config, store)),
                     shutdown_signal,
                     replicator_health,
+                    source_repair,
                 )
                 .await
             }

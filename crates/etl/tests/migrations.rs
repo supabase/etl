@@ -10,6 +10,7 @@ use etl::{
         BatchConfig, IntoConnectOptions, InvalidatedSlotBehavior, MemoryBackpressureConfig,
         PgConnectionConfig, PgConnectionOptions, PipelineConfig, TableSyncCopyConfig,
     },
+    error::ErrorKind,
     migrations::run_migrations,
     pipeline::Pipeline,
     postgres::{
@@ -238,12 +239,37 @@ async fn pipeline_start_runs_source_migrations_without_postgres_store_tables() {
     let destination = MemoryDestination::new(store.clone());
     let mut pipeline = Pipeline::new(pipeline_config(database.config.clone()), store, destination);
 
-    let result = pipeline.start().await;
-    assert!(result.is_err());
+    let error = pipeline.start().await.unwrap_err();
+    assert!(!error.is_source_network_failure());
 
     assert!(source_helper_exists(&database).await);
     assert!(!postgres_store_table_exists(&database).await);
     assert_eq!(applied_migration_versions(&database).await, source_migration_versions());
+}
+
+/// A reachable server rejecting startup credentials must keep its ordinary
+/// authentication error.
+#[tokio::test]
+async fn source_network_failure_excludes_rejected_credentials() {
+    let database = spawn_unmigrated_database().await;
+    let mut config = database.config.clone();
+    config.username = "nonexistent_source_test_role".to_owned();
+    config.password = Some("placeholder".into());
+
+    let migration = run_source_migrations(&config).await.unwrap_err();
+    assert_eq!(migration.kind(), ErrorKind::SourceConnectionFailed);
+    assert!(!migration.is_source_network_failure());
+    let store = PostgresStore::new("1", config.clone()).await.unwrap_err();
+    assert_eq!(store.kind(), ErrorKind::SourceError);
+    assert!(!store.is_source_network_failure());
+
+    let mut pipeline_config = pipeline_config(config);
+    pipeline_config.run_source_migrations = false;
+    let store = MemoryStore::new();
+    let mut pipeline = Pipeline::new(pipeline_config, store.clone(), MemoryDestination::new(store));
+    let error = pipeline.start().await.unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::SourceAuthenticationError);
+    assert!(!error.is_source_network_failure());
 }
 
 #[tokio::test(flavor = "multi_thread")]

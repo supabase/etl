@@ -12,7 +12,7 @@ use etl::{
 };
 use tracing::info;
 
-use crate::{error_notification::ErrorNotificationClient, sentry};
+use crate::{management_api::ManagementApiClient, sentry};
 
 /// State store decorator that reports persisted table replication errors.
 ///
@@ -25,7 +25,7 @@ use crate::{error_notification::ErrorNotificationClient, sentry};
 pub(crate) struct ErrorReportingStateStore<S> {
     inner: S,
     /// Client used for sending notifications.
-    notification_client: Option<Arc<ErrorNotificationClient>>,
+    notification_client: Option<Arc<ManagementApiClient>>,
     /// Owned error-reporting tasks shared by all store clones.
     reporting_tasks: TaskRegistry,
 }
@@ -41,7 +41,7 @@ struct ReportableTableError {
 
 impl<S> ErrorReportingStateStore<S> {
     /// Creates a reporting wrapper around `inner`.
-    pub(crate) fn new(inner: S, notification_client: Option<ErrorNotificationClient>) -> Self {
+    pub(crate) fn new(inner: S, notification_client: Option<ManagementApiClient>) -> Self {
         Self {
             inner,
             notification_client: notification_client.map(Arc::new),
