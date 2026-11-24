@@ -533,7 +533,8 @@ pub(crate) enum RelationSchemaMismatchKind {
     /// A different column name sits at the same position, so values decode
     /// into the wrong column.
     NameOrder,
-    /// A column type differs, but both types decode their text the same way.
+    /// A column type differs, but the stored type is a string type that keeps
+    /// any value's text unchanged.
     TextCompatibleType,
     /// A column type differs and values may decode differently.
     Type,
@@ -591,10 +592,16 @@ impl fmt::Display for RelationSchemaMismatch {
     }
 }
 
-/// Returns whether ETL's text codec decodes both types to the same value.
-pub(crate) fn decodes_as_same_text(left: &Type, right: &Type) -> bool {
+/// Returns whether decoding with `stored` keeps any relation value's text
+/// unchanged, whatever type the relation now reports.
+///
+/// Values arrive as text, and string types keep that text as-is. Types the
+/// stored schema could not map, such as built-ins an older client library did
+/// not know, are stored as text and stay lossless when the relation later
+/// maps them natively.
+pub(crate) fn decodes_relation_text_losslessly(stored: &Type) -> bool {
     const STRING_TYPES: [Type; 4] = [Type::TEXT, Type::VARCHAR, Type::BPCHAR, Type::NAME];
-    STRING_TYPES.contains(left) && STRING_TYPES.contains(right)
+    STRING_TYPES.contains(stored)
 }
 
 /// Returns how a relation message disagrees with the decoder's column order,
@@ -639,7 +646,7 @@ fn detect_relation_schema_mismatch(
         let kind = if name != decoder_column.name {
             RelationSchemaMismatchKind::NameOrder
         } else if typ != decoder_column.typ {
-            if decodes_as_same_text(&typ, &decoder_column.typ) {
+            if decodes_relation_text_losslessly(&decoder_column.typ) {
                 RelationSchemaMismatchKind::TextCompatibleType
             } else {
                 RelationSchemaMismatchKind::Type

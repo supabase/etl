@@ -83,7 +83,8 @@ missing until a later relation disagrees with the stored schema: unknown
 columns, a different column order, a different type, or, under default replica
 identity, a different primary key stop replication before the affected rows are
 written, and the table needs resynchronization.
-Text-compatible type and modifier changes are only reported by
+Type changes where the stored type is a string type, which keeps any value's
+text, and modifier changes are only reported by
 `etl_relation_schema_mismatches_total`. Messages are emitted outside the
 exception block, because a subtransaction XID would change their decoded order
 relative to DML in the same transaction. To turn capture

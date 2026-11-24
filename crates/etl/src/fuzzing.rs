@@ -662,7 +662,7 @@ pub fn check_pgoutput_relation_materialization(data: &[u8]) {
                 disagreements.iter().find(|(decoder_column, relation_column)| {
                     decoder_column.0 != relation_column.0
                         || (decoder_column.1 != relation_column.1
-                            && !codec::decodes_as_same_text(&decoder_column.1, &relation_column.1))
+                            && !codec::decodes_relation_text_losslessly(&decoder_column.1))
                 });
             // Detection scans every column, so a harmless earlier difference
             // cannot hide a later misaligned one, and a key change outranks

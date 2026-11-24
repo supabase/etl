@@ -499,8 +499,9 @@ default-identity primary key logs a warning and increments
 `etl_relation_schema_mismatches_total`. A different column count, column order,
 type, or primary key stops replication before the affected rows are written,
 because decoding would put values in the wrong columns or key-based
-destinations would match rows on a stale key; a text-compatible type or
-modifier change keeps decoding with the stored schema.
+destinations would match rows on a stale key. A type change where the stored
+type is a string type, which keeps any value's text, or a modifier change keeps
+decoding with the stored schema.
 A valid-looking subset still does not prove
 that the selected schema is correct, and custom source types retain their text
 fallback.

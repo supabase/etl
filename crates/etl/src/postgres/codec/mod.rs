@@ -10,7 +10,7 @@ pub(crate) use event::RelationSchemaMismatchKind;
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) use event::convert_tuple_to_row;
 #[cfg(feature = "fuzzing")]
-pub(crate) use event::decodes_as_same_text;
+pub(crate) use event::decodes_relation_text_losslessly;
 pub(crate) use event::{
     ColumnSchemaMessage, DDL_MESSAGE_PREFIX, IdentityMessage, SchemaChangeMessage,
     build_table_schema, delete_message_payload_bytes, insert_message_payload_bytes,

@@ -5481,6 +5481,25 @@ mod tests {
             assert_eq!(mismatch_kind(&case), Some(RelationSchemaMismatchKind::TextCompatibleType));
         }
 
+        /// A type the stored schema saved as text, for example one an older
+        /// client library did not know, keeps decoding losslessly when the
+        /// relation now maps it to a native type.
+        #[test]
+        fn relation_with_native_type_for_stored_text_keeps_decoding() {
+            // GIVEN: a stored snapshot that decodes `a` as text.
+            // WHEN: the relation maps `a` to a native type.
+            let case = published_case(&[("a", Type::INT8)], &[("a", Type::TEXT)]);
+
+            // THEN: the difference is harmless, so replication continues.
+            assert_eq!(mismatch_kind(&case), Some(RelationSchemaMismatchKind::TextCompatibleType));
+
+            // GIVEN/WHEN: the reverse, a native stored type receiving text.
+            let reverse = published_case(&[("a", Type::TEXT)], &[("a", Type::INT8)]);
+
+            // THEN: native decoding of arbitrary text still stops replication.
+            assert_eq!(mismatch_kind(&reverse), Some(RelationSchemaMismatchKind::Type));
+        }
+
         // A precision or length change keeps the type but leaves destination
         // metadata stale.
         #[test]
