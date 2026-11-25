@@ -22,7 +22,7 @@ use tokio_postgres::{
 use url::Url;
 use uuid::Uuid;
 
-const DUCKDB_EXTENSION_VERSION: &str = "2.0.0";
+const DUCKDB_EXTENSION_VERSION: &str = "2.0.1";
 const ICU_EXTENSION_FILE: &str = "icu.duckdb_extension";
 const DUCKLAKE_EXTENSION_FILE: &str = "ducklake.duckdb_extension";
 const POSTGRES_SCANNER_EXTENSION_FILE: &str = "postgres_scanner.duckdb_extension";

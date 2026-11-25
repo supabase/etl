@@ -6343,7 +6343,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         for root in candidate_roots {
-            let extension_dir = root.join("2.0.0").join(platform_dir);
+            let extension_dir = root.join("2.0.1").join(platform_dir);
             let ducklake_extension = extension_dir.join("ducklake.duckdb_extension");
             let postgres_scanner_extension = extension_dir.join(POSTGRES_SCANNER_EXTENSION_FILE);
 
