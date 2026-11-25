@@ -1175,6 +1175,91 @@ async fn schema_change_add_column() {
     );
 }
 
+/// Ordered and combined DDL retain historical values while native defaults
+/// follow the final source default, including removal.
+#[tokio::test(flavor = "multi_thread")]
+async fn ddl_defaults_preserve_existing_rows_and_future_defaults() {
+    init_test_tracing();
+
+    // GIVEN: a synced table with one existing row before any column additions.
+    let mut database = spawn_source_database().await;
+    let table_name = test_table_name("ordered_ddl_defaults");
+    let table_id =
+        database.create_table(table_name.clone(), true, &[("value", "integer")]).await.unwrap();
+    let table = table_name.as_quoted_identifier();
+    database.run_sql(&format!("insert into {table} default values")).await.unwrap();
+    let publication = "ordered_ddl_defaults_pub";
+    database.create_publication(publication, std::slice::from_ref(&table_name)).await.unwrap();
+    let lake = create_test_lake("ordered_ddl_defaults").await;
+    let store = NotifyingStore::new();
+    let destination = build_destination(&lake.catalog_url, &lake.data_url, store.clone()).await;
+    let mut pipeline = create_pipeline(
+        &database.config,
+        random_pipeline_id().as_str(),
+        publication.to_owned(),
+        store.clone(),
+        destination.clone(),
+    );
+    let synced = store.notify_on_table_sync_complete(table_id).await;
+
+    pipeline.start().await.unwrap();
+
+    synced.notified().await;
+
+    let applied = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
+        .await;
+
+    // WHEN: columns are added with default 1, altered to 2 or dropped, and a
+    // new row is inserted.
+    let transaction = database.begin_transaction().await;
+    for clauses in [
+        "add column ordered_value integer default 1",
+        "alter column ordered_value set default 2",
+        "add column combined_value integer default 1, alter column combined_value set default 2",
+        "add column dropped_default integer default 1",
+        "alter column dropped_default drop default",
+    ] {
+        transaction.run_sql(&format!("alter table {table} {clauses}")).await.unwrap();
+    }
+    transaction.run_sql(&format!("insert into {table} default values")).await.unwrap();
+    transaction.commit_transaction().await;
+
+    applied.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+    drop(destination);
+    checkpoint_lake(&lake.catalog_url, &lake.data_url);
+
+    // THEN: the pre-DDL row keeps 1 while replicated and native post-DDL
+    // inserts use the final default.
+    let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
+    let target =
+        qualified_lake_table_name(&table_name_to_ducklake_table_name(&table_name).unwrap());
+    conn.execute_batch(&format!("insert into {target} (id) values (3)")).unwrap();
+    let mut statement = conn
+        .prepare(&format!(
+            "select id, ordered_value, combined_value, dropped_default from {target} order by id"
+        ))
+        .unwrap();
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<i32>>(1)?,
+                row.get::<_, Option<i32>>(2)?,
+                row.get::<_, Option<i32>>(3)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        [(1, Some(1), Some(1), Some(1)), (2, Some(2), Some(2), None), (3, Some(2), Some(2), None),]
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn case_only_rename_keeps_canonical_ducklake_column() {
     init_test_tracing();

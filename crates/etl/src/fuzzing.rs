@@ -4,7 +4,7 @@ use std::{collections::HashSet, str::FromStr, sync::Arc};
 
 use bytes::Bytes;
 use etl_postgres::{numeric::PgNumeric, type_utils::convert_type_oid_to_type};
-use postgres_replication::protocol::{LogicalReplicationMessage, TupleData};
+use postgres_replication::protocol::{LogicalReplicationMessage, ReplicaIdentity, TupleData};
 use serde_json::json;
 use tokio_postgres::types::{PgLsn, Type};
 
@@ -267,7 +267,7 @@ fn fuzz_schema_change_message(input: &mut FuzzBytes<'_>) -> SchemaChangeMessage 
     let mut columns = Vec::with_capacity(column_count);
     let mut primary_key_attnums = Vec::new();
     let mut replica_identity_index_attnums = Vec::new();
-    for _ in 0..column_count {
+    for column_index in 0..column_count {
         // Postgres column names are unique, so a taken name moves on to the
         // next free one.
         let name_selector = usize::from(input.byte());
@@ -277,10 +277,12 @@ fn fuzz_schema_change_message(input: &mut FuzzBytes<'_>) -> SchemaChangeMessage 
             .expect("a stored schema has at most as many columns as names");
         used_names[name_index] = true;
         let type_oid = relation_fuzz_type_oid(input.byte());
-        // A zero step repeats the previous attnum, which Postgres never
-        // sends but the parser must survive.
+        // A zero step on subsequent columns repeats the previous attnum, which
+        // Postgres never sends but the parser must survive; the first column
+        // always starts at a positive attnum so identity keys remain valid.
         let attnum_step = input.byte();
-        attnum += if attnum_step == 0 { 0 } else { i32::from(attnum_step % 3) + 1 };
+        attnum +=
+            if column_index > 0 && attnum_step == 0 { 0 } else { i32::from(attnum_step % 3) + 1 };
         let typmod = i32::from(input.byte()) - 1;
         let flags = input.byte();
         if flags & 2 != 0 {
@@ -521,9 +523,11 @@ pub fn check_pgoutput_tuple_decoding(data: &[u8]) {
 /// decoder keeps exactly the stored columns the relation names, in stored
 /// order; identity columns are replicated; the schema change identity builds a
 /// mask for every mode Postgres sends, covering only replicated columns;
-/// mismatch detection reports nothing exactly when names and mapped types
-/// agree position by position, and reports `name_order` exactly when the first
-/// disagreement is a name; a decoded insert has one value per replicated
+/// mismatch detection reports nothing exactly when names, mapped types, and
+/// default-identity keys agree, reports a value-misaligning kind exactly when
+/// any position misaligns values or the key differs, and reports `name_order`
+/// exactly when the first such position is a name; a decoded insert has one
+/// value per replicated
 /// column. That panic is the fuzz target's finding signal.
 pub fn check_pgoutput_relation_materialization(data: &[u8]) {
     let mut input = FuzzBytes { data };
@@ -605,34 +609,82 @@ pub fn check_pgoutput_relation_materialization(data: &[u8]) {
             .all(|column| replicated_names.contains(column.name.as_str()))
     );
 
-    let decoder_columns: Vec<(&str, Option<Type>)> = replicated_table_schema
+    let decoder_columns: Vec<(&str, Type, i32)> = replicated_table_schema
         .column_schemas()
-        .map(|column| (column.name.as_str(), Some(column.typ.clone())))
+        .map(|column| (column.name.as_str(), column.typ.clone(), column.modifier))
         .collect();
-    let relation_columns: Vec<(&str, Option<Type>)> = relation
+    let relation_columns: Vec<(&str, Type, i32)> = relation
         .columns()
         .iter()
         .map(|column| {
             let name = column.name().expect("relation names parsed above");
-            (name, u32::try_from(column.type_id()).ok().map(convert_type_oid_to_type))
+            (
+                name,
+                convert_type_oid_to_type(column.type_id().cast_unsigned()),
+                column.type_modifier(),
+            )
         })
         .collect();
+    // Under default identity, flagged relation columns must equal the
+    // replicated stored primary key; a relation flagging nothing is unchecked.
+    let key_mismatch = matches!(relation.replica_identity(), ReplicaIdentity::Default) && {
+        let mut relation_key: Vec<&str> = relation
+            .columns()
+            .iter()
+            .filter(|column| column.flags() & 1 == 1)
+            .map(|column| column.name().expect("relation names parsed above"))
+            .collect();
+        relation_key.sort_unstable();
+        let mut stored_key: Vec<&str> = replicated_table_schema
+            .column_schemas()
+            .filter(|column| column.primary_key())
+            .map(|column| column.name.as_str())
+            .collect();
+        stored_key.sort_unstable();
+        !relation_key.is_empty() && relation_key != stored_key
+    };
     match mismatch.map(|mismatch| mismatch.kind()) {
-        None => assert_eq!(decoder_columns, relation_columns),
+        None => {
+            assert_eq!(decoder_columns, relation_columns);
+            assert!(!key_mismatch);
+        }
         Some(RelationSchemaMismatchKind::ColumnCount) => {
             assert_ne!(decoder_columns.len(), relation_columns.len());
         }
         Some(kind) => {
             assert_eq!(decoder_columns.len(), relation_columns.len());
-            let (decoder_column, relation_column) = decoder_columns
+            let disagreements = decoder_columns
                 .iter()
                 .zip(&relation_columns)
-                .find(|(decoder_column, relation_column)| decoder_column != relation_column)
-                .expect("a reported mismatch has a disagreeing position");
-            assert_eq!(
-                kind == RelationSchemaMismatchKind::NameOrder,
-                decoder_column.0 != relation_column.0
-            );
+                .filter(|(decoder_column, relation_column)| decoder_column != relation_column)
+                .collect::<Vec<_>>();
+            let first_misaligned =
+                disagreements.iter().find(|(decoder_column, relation_column)| {
+                    decoder_column.0 != relation_column.0
+                        || (decoder_column.1 != relation_column.1
+                            && !codec::decodes_relation_text_losslessly(&decoder_column.1))
+                });
+            // Detection scans every column, so a harmless earlier difference
+            // cannot hide a later misaligned one, and a key change outranks
+            // harmless differences.
+            assert_eq!(kind.misaligns_values(), first_misaligned.is_some() || key_mismatch);
+            if kind == RelationSchemaMismatchKind::PrimaryKey {
+                assert!(first_misaligned.is_none() && key_mismatch);
+            } else {
+                let (decoder_column, relation_column) = first_misaligned
+                    .or(disagreements.first())
+                    .expect("a reported mismatch has a disagreeing position");
+                assert_eq!(
+                    kind == RelationSchemaMismatchKind::NameOrder,
+                    decoder_column.0 != relation_column.0
+                );
+                assert_eq!(
+                    kind == RelationSchemaMismatchKind::TypeModifier,
+                    decoder_column.0 == relation_column.0
+                        && decoder_column.1 == relation_column.1
+                        && decoder_column.2 != relation_column.2
+                );
+            }
         }
     }
 
@@ -651,5 +703,23 @@ pub fn check_pgoutput_relation_materialization(data: &[u8]) {
         codec::parse_event_from_insert_message(replicated_table_schema, PgLsn::from(0), 0, &insert)
     {
         assert_eq!(event.table_row.values().len(), replicated_count);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::fuzzing::check_pgoutput_relation_materialization;
+
+    #[test]
+    fn relation_fuzz_oracle_handles_type_modifier_mismatch() {
+        // 1 column: name=0 ("a"), type=0 (INT4), attnum_step=1 (attnum=1),
+        // typmod=5 (stored=4 != relation=-1), flags=0; relreplident=0 ("d");
+        // relation: replident=0, count=1, name=0 ("a"), type=0 (INT4), flags=0.
+        check_pgoutput_relation_materialization(&[0, 0, 0, 1, 5, 0, 0, 0, 1, 0, 0, 0]);
+    }
+
+    #[test]
+    fn relation_fuzz_generator_keeps_first_column_attnum_positive() {
+        check_pgoutput_relation_materialization(&[0, 0, 0, 0, 0, 4, 2]);
     }
 }

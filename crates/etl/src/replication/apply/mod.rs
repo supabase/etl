@@ -2868,7 +2868,10 @@ where
     /// schema.
     ///
     /// Logs and counts a relation whose column order or types disagree with
-    /// the materialized decoder, then installs the decoder unchanged.
+    /// the materialized decoder. A disagreement that would misalign decoded
+    /// values fails before the decoder is installed, so no affected row is
+    /// written or acknowledged; text-compatible type and modifier
+    /// differences keep decoding with the stored schema.
     async fn materialize_relation_schema(
         &mut self,
         table_id: TableId,
@@ -2879,8 +2882,8 @@ where
 
         // Masks are built by name, but tuples decode by position in the
         // relation's `attnum` order, so a stale snapshot can share names but
-        // not order or types. Mismatches are only observed for now, so the
-        // rate is known before they stop replication (PIPE-1283).
+        // not order or types. Capture fails open, so a DDL statement can
+        // commit without the snapshot that would have prevented this.
         let (replicated_table_schema, mismatch) =
             replicated_table_schema_from_relation(table_schema, relation)?;
         if let Some(mismatch) = mismatch {
@@ -2890,8 +2893,7 @@ where
                 snapshot_id = %replicated_table_schema.inner().snapshot_id,
                 mismatch_kind,
                 mismatch = %mismatch,
-                "relation message does not match the stored table schema, decoding with the \
-                 stored schema"
+                "relation message does not match the stored table schema"
             );
             counter!(
                 ETL_RELATION_SCHEMA_MISMATCHES_TOTAL,
@@ -2899,6 +2901,18 @@ where
                 MISMATCH_KIND_LABEL => mismatch_kind,
             )
             .increment(1);
+
+            if mismatch.kind().misaligns_values() {
+                bail!(
+                    ErrorKind::CorruptedTableSchema,
+                    "Relation message does not match the stored table schema",
+                    format!(
+                        "Table {table_id} at snapshot {}: {mismatch}. A schema change was \
+                         probably not captured; resynchronize the table",
+                        replicated_table_schema.inner().snapshot_id
+                    )
+                );
+            }
         }
 
         self.table_decoding_states
@@ -5079,7 +5093,7 @@ mod tests {
         use proptest::{
             bool::weighted,
             collection::vec,
-            prop_assert, prop_assert_eq, prop_oneof,
+            prop_assert_eq, prop_oneof,
             strategy::{Just, Strategy},
             test_runner::TestCaseError,
         };
@@ -5132,6 +5146,8 @@ mod tests {
             relation_columns: Vec<(String, Type, bool)>,
             /// Stored snapshot columns in `attnum` order.
             stored_columns: Vec<(String, Type)>,
+            /// Stored primary-key column names in key order.
+            stored_primary_key: Vec<String>,
         }
 
         /// Generates the current source table and how the stored snapshot is
@@ -5159,7 +5175,7 @@ mod tests {
                         // pgoutput sends only published columns, flags every
                         // sent column under `FULL`, and flags none under
                         // `NOTHING`.
-                        let relation_columns = current
+                        let relation_columns: Vec<(String, Type, bool)> = current
                             .iter()
                             .enumerate()
                             .filter(|(index, _)| published[*index])
@@ -5206,19 +5222,39 @@ mod tests {
                             }
                         }
 
-                        RelationCase { replica_identity, relation_columns, stored_columns }
+                        // A current snapshot records the key pgoutput flags
+                        // under default identity.
+                        let stored_primary_key = if replica_identity == b'd' {
+                            relation_columns
+                                .iter()
+                                .filter(|(_, _, flagged)| *flagged)
+                                .map(|(name, _, _)| name.clone())
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
+
+                        RelationCase {
+                            replica_identity,
+                            relation_columns,
+                            stored_columns,
+                            stored_primary_key,
+                        }
                     },
                 )
         }
 
-        /// Generates staleness that keeps relation order and types aligned
-        /// with the snapshot whenever every relation name is known.
-        fn order_preserving_staleness() -> impl Strategy<Value = StaleSnapshot> {
+        /// Generates current snapshots and stale names, types, and columns.
+        fn snapshot_staleness() -> impl Strategy<Value = StaleSnapshot> {
             prop_oneof![
                 Just(StaleSnapshot::Current),
                 (0..MAX_COLUMNS).prop_map(StaleSnapshot::ColumnAdded),
                 (0..=MAX_COLUMNS, 0..COLUMN_TYPES.len()).prop_map(|(index, type_index)| {
                     StaleSnapshot::ColumnDropped(index, type_index)
+                }),
+                vec((0..MAX_COLUMNS, 0..MAX_COLUMNS), 1..=3).prop_map(StaleSnapshot::NamesPermuted),
+                (0..MAX_COLUMNS, 0..COLUMN_TYPES.len()).prop_map(|(index, type_index)| {
+                    StaleSnapshot::TypeChanged(index, type_index)
                 }),
             ]
         }
@@ -5236,7 +5272,7 @@ mod tests {
                 bytes.put_i8(i8::from(*flagged));
                 bytes.put_slice(name.as_bytes());
                 bytes.put_u8(0);
-                bytes.put_i32(i32::try_from(typ.oid()).unwrap());
+                bytes.put_u32(typ.oid());
                 bytes.put_i32(-1);
             }
             bytes.freeze()
@@ -5263,7 +5299,13 @@ mod tests {
                     .enumerate()
                     .map(|(index, (name, typ))| {
                         let attnum = i32::try_from(index + 1).unwrap();
+                        let key_position = case
+                            .stored_primary_key
+                            .iter()
+                            .position(|key| key == name)
+                            .map(|position| i32::try_from(position + 1).unwrap());
                         ColumnSchema::new(name.clone(), typ.clone(), -1, attnum, true)
+                            .with_primary_key_ordinal_position(key_position)
                     })
                     .collect(),
             ))
@@ -5288,6 +5330,9 @@ mod tests {
                 return Ok(());
             };
 
+            // Generated cases always use modifier -1; the dedicated
+            // `relation_with_changed_type_modifier_is_detected` test covers
+            // modifier mismatches.
             let decoder_columns: Vec<(String, u32)> = replicated_table_schema
                 .column_schemas()
                 .map(|column| (column.name.clone(), column.typ.oid()))
@@ -5295,9 +5340,7 @@ mod tests {
             let relation_columns: Vec<(String, u32)> = relation
                 .columns()
                 .iter()
-                .map(|column| {
-                    (column.name().unwrap().to_owned(), u32::try_from(column.type_id()).unwrap())
-                })
+                .map(|column| (column.name().unwrap().to_owned(), column.type_id().cast_unsigned()))
                 .collect();
             prop_assert_eq!(mismatch.is_some(), decoder_columns != relation_columns);
             if mismatch.is_some() {
@@ -5318,10 +5361,6 @@ mod tests {
                 .map(|column| column.name().unwrap())
                 .collect();
             prop_assert_eq!(decoder_identity, relation_identity);
-            prop_assert!(
-                replicated_table_schema.identity_column_schemas().len()
-                    == replicated_table_schema.identity_column_schemas().count()
-            );
 
             Ok(())
         }
@@ -5341,43 +5380,22 @@ mod tests {
                     .iter()
                     .map(|(name, typ)| ((*name).to_owned(), typ.clone()))
                     .collect(),
+                stored_primary_key: Vec::new(),
             }
         }
 
+        /// Current and stale snapshots are reported exactly when they misalign
+        /// tuple columns, and otherwise keep identity columns aligned.
         #[test]
         fn relation_materialization_agrees_with_relation_columns() {
             run_property(
                 "relation materialization agreement",
-                &relation_case(order_preserving_staleness()),
+                &relation_case(snapshot_staleness()),
                 check_relation_agreement,
             );
         }
 
-        #[test]
-        fn relation_materialization_detects_permuted_names() {
-            let swaps = vec((0..MAX_COLUMNS, 0..MAX_COLUMNS), 1..=3);
-            run_property(
-                "relation materialization with permuted names",
-                &relation_case(swaps.prop_map(StaleSnapshot::NamesPermuted)),
-                check_relation_agreement,
-            );
-        }
-
-        #[test]
-        fn relation_materialization_detects_changed_types() {
-            let type_change = (0..MAX_COLUMNS, 0..COLUMN_TYPES.len())
-                .prop_map(|(index, type_index)| StaleSnapshot::TypeChanged(index, type_index));
-            run_property(
-                "relation materialization with changed types",
-                &relation_case(type_change),
-                check_relation_agreement,
-            );
-        }
-
-        // Minimal counterexample: `alter table root rename a to tmp; rename b
-        // to a; rename tmp to b` reaches a partition leaf with no DDL message,
-        // so its stored snapshot still says (a, b) while the relation says
-        // (b, a). Rows would put source `b` into destination `a`.
+        /// A stale snapshot after a name swap would exchange the row's values.
         #[test]
         fn relation_with_swapped_column_names_is_detected() {
             let case = published_case(
@@ -5388,9 +5406,73 @@ mod tests {
             assert_eq!(mismatch_kind(&case), Some(RelationSchemaMismatchKind::NameOrder));
         }
 
-        // Minimal counterexample: `alter table root alter column a type int8`
-        // reaches a partition leaf with no DDL message, so its stored
-        // snapshot still decodes `a` as `int4`.
+        /// A harmless difference in an earlier column must not hide a later
+        /// swap that would exchange the row's values.
+        #[test]
+        fn swap_after_text_compatible_type_change_is_detected() {
+            let case = published_case(
+                &[("label", Type::TEXT), ("b", Type::INT4), ("a", Type::INT4)],
+                &[("label", Type::VARCHAR), ("a", Type::INT4), ("b", Type::INT4)],
+            );
+
+            assert_eq!(mismatch_kind(&case), Some(RelationSchemaMismatchKind::NameOrder));
+        }
+
+        /// A primary key changed without a captured snapshot would leave
+        /// key-based destinations deduplicating on the old key.
+        #[test]
+        fn relation_with_changed_primary_key_is_detected() {
+            // GIVEN: a stored snapshot keyed on `id` alone.
+            let mut case = published_case(
+                &[("id", Type::INT4), ("region", Type::TEXT)],
+                &[("id", Type::INT4), ("region", Type::TEXT)],
+            );
+            case.stored_primary_key = vec!["id".to_owned()];
+
+            // WHEN: the relation flags `(id, region)` as its default identity.
+            for column in &mut case.relation_columns {
+                column.2 = true;
+            }
+
+            // THEN: the key change is reported as misaligning.
+            assert_eq!(mismatch_kind(&case), Some(RelationSchemaMismatchKind::PrimaryKey));
+        }
+
+        /// Default identity flags agree with the stored key; a relation that
+        /// flags no key, as for a deferrable or invalid key, and the flags of
+        /// explicit-index or full identity never imply a key change.
+        #[test]
+        fn relation_key_flags_match_only_default_identity_primary_keys() {
+            // GIVEN: matching columns where only `id` is the stored key.
+            let mut case = published_case(
+                &[("id", Type::INT4), ("region", Type::TEXT)],
+                &[("id", Type::INT4), ("region", Type::TEXT)],
+            );
+            case.stored_primary_key = vec!["id".to_owned()];
+
+            // WHEN/THEN: no flags, as for a deferrable or invalid key, agree.
+            assert_eq!(mismatch_kind(&case), None);
+
+            // WHEN/THEN: default identity flagging the stored key agrees.
+            case.relation_columns[0].2 = true;
+            assert_eq!(mismatch_kind(&case), None);
+
+            // WHEN/THEN: explicit-index identity flags its own index, not
+            // necessarily the primary key, without a mismatch.
+            case.replica_identity = b'i';
+            case.relation_columns[0].2 = false;
+            case.relation_columns[1].2 = true;
+            assert_eq!(mismatch_kind(&case), None);
+
+            // WHEN/THEN: full identity flags every column without a mismatch.
+            case.replica_identity = b'f';
+            for column in &mut case.relation_columns {
+                column.2 = true;
+            }
+            assert_eq!(mismatch_kind(&case), None);
+        }
+
+        /// A stale integer type would reject or misrepresent later row values.
         #[test]
         fn relation_with_changed_column_type_is_detected() {
             let case = published_case(&[("a", Type::INT8)], &[("a", Type::INT4)]);
@@ -5405,6 +5487,47 @@ mod tests {
             let case = published_case(&[("a", Type::TEXT)], &[("a", Type::VARCHAR)]);
 
             assert_eq!(mismatch_kind(&case), Some(RelationSchemaMismatchKind::TextCompatibleType));
+        }
+
+        /// A type the stored schema saved as text, for example one an older
+        /// client library did not know, keeps decoding losslessly when the
+        /// relation now maps it to a native type.
+        #[test]
+        fn relation_with_native_type_for_stored_text_keeps_decoding() {
+            // GIVEN: a stored snapshot that decodes `a` as text.
+            // WHEN: the relation maps `a` to a native type.
+            let case = published_case(&[("a", Type::INT8)], &[("a", Type::TEXT)]);
+
+            // THEN: the difference is harmless, so replication continues.
+            assert_eq!(mismatch_kind(&case), Some(RelationSchemaMismatchKind::TextCompatibleType));
+
+            // GIVEN/WHEN: the reverse, a native stored type receiving text.
+            let reverse = published_case(&[("a", Type::TEXT)], &[("a", Type::INT8)]);
+
+            // THEN: native decoding of arbitrary text still stops replication.
+            assert_eq!(mismatch_kind(&reverse), Some(RelationSchemaMismatchKind::Type));
+        }
+
+        // A precision or length change keeps the type but leaves destination
+        // metadata stale.
+        #[test]
+        fn relation_with_changed_type_modifier_is_detected() {
+            // GIVEN: a relation whose varchar modifier (14) differs from the
+            // stored schema (-1).
+            let case = published_case(&[("a", Type::VARCHAR)], &[("a", Type::VARCHAR)]);
+            let mut bytes = encode_relation(&case).to_vec();
+            *bytes.last_chunk_mut::<4>().unwrap() = 14_i32.to_be_bytes();
+            let relation = parse_relation(&Bytes::from(bytes));
+
+            // WHEN: the relation is materialized against the stored schema.
+            let (_, mismatch) =
+                replicated_table_schema_from_relation(stored_schema(&case), &relation).unwrap();
+
+            // THEN: a TypeModifier mismatch is reported.
+            assert_eq!(
+                mismatch.map(|mismatch| mismatch.kind()),
+                Some(RelationSchemaMismatchKind::TypeModifier)
+            );
         }
 
         // pgoutput sends a domain's own OID, while the stored snapshot maps
@@ -5422,6 +5545,17 @@ mod tests {
                 &[("id", Type::INT8), ("p", domain)],
                 &[("id", Type::INT8), ("p", Type::TEXT)],
             );
+
+            assert_eq!(mismatch_kind(&case), None);
+        }
+
+        // OIDs wrap past `i32::MAX`, where the protocol's signed type ID is
+        // negative. Such a user-defined type must still map to `text`.
+        #[test]
+        fn relation_with_high_user_defined_type_oid_matches() {
+            let custom_type =
+                Type::new("custom".to_owned(), u32::MAX, Kind::Simple, "public".to_owned());
+            let case = published_case(&[("a", custom_type)], &[("a", Type::TEXT)]);
 
             assert_eq!(mismatch_kind(&case), None);
         }

@@ -124,8 +124,10 @@ expressions also come from that snapshot, but `pg_get_expr` deparses them using
 internal catalog lookups. The helper limitations below still apply.
 
 The initial schema and identity metadata are read together, and the publication
-column query uses the same slot snapshot. ETL builds the replication mask from
-those column names and intersects the identity columns with that mask. COPY
+column query uses the same slot snapshot. Copy and DDL capture load publication
+column numbers (`attnum`) and resolve them against that immutable schema. ETL
+builds the replication mask from those columns and intersects the identity
+columns with that mask. COPY
 chooses columns, filters, and physical partitions through direct catalog SQL
 instead of `pg_publication_tables` or `pg_partition_tree`. Concurrent publication
 or partition changes do not replace that snapshot-visible selection.
@@ -159,12 +161,56 @@ supported `ALTER TABLE` or publication column-list change:
 5. Destinations that support the transition apply any required DDL and record
    the new snapshot before writing following rows.
 
+Table DDL refreshes every published identity in the altered table's subtree:
+the table itself and its partitions or inheritance children, which recursive
+commands change without reporting them separately. Each snapshot reads that
+table's own schema, and a refresh can leave schema contents unchanged. Ancestors
+and siblings are not refreshed, because PostgreSQL rejects adding, dropping,
+renaming, or retyping a partition's columns. Partition attachment/removal still requires the lifecycle
+and resynchronization steps described below: snapshots cannot supply missing
+inserts or deletes. The trigger checks membership before loading a full schema. Publication-wide changes discover members and their partitions
+without loading column metadata for unrelated tables. Explicit publication
+filters use column numbers already recorded in the snapshot, avoiding repeated
+column-name lookups for each publication.
+
+Default expressions are deparsed without opening each described table. This
+avoids extra relation-lock waits on published members or partition siblings;
+the source DDL still takes its normal PostgreSQL locks. Catalog scans, snapshot
+size, and WAL work still grow with the affected schemas and publications.
+
+The message includes only metadata needed for decoding and routing. Submitted
+SQL and detailed command descriptions are omitted, reducing WAL size and avoiding
+copying unrelated row literals from queries containing both DDL and DML.
+
 `Relation` is an ordered notification, not a batch boundary. One `write_events()`
 call can contain several relation and row events, which must be processed in
 order. Reconnects and maintenance can resend an unchanged snapshot and mask;
 that identical pair needs no schema transition. Supported publication
 column-list changes use a newer snapshot even when the full table schema is
 unchanged.
+
+A single statement can assign different defaults to existing and future
+rows. For fast column additions, ETL captures PostgreSQL's stored missing value
+separately from the current default. For example, `ADD COLUMN score integer
+DEFAULT 1, ALTER COLUMN score SET DEFAULT 2` adds the destination column using
+`1` where the destination supports add-time defaults. DuckLake then installs
+`2` for future omitted-column inserts. ClickHouse and Snowflake retain the
+add-time default; subsequent replicated rows carry their source values
+explicitly. BigQuery leaves existing rows `NULL` and installs only the current
+default. Without a stored fast-add value, ETL cannot tell a column added without a
+default from one whose value a heap rewrite stored in every row, so both use the
+current default for existing rows. Partitioned tables store no missing values, so
+publishing through a partition root uses the current default. This applies to
+supported built-in scalar literals;
+arrays, custom types, heap rewrites, and volatile defaults retain the existing
+portability limitations. Publication-revealed columns still receive no
+historical backfill.
+
+The trigger also records each table's publication column filters, but ETL does
+not consume them yet; replication masks still come from `RELATION` metadata.
+Older payloads and stored schemas without captured missing values retain their
+previous default behavior. Updating the pipeline cannot recover historical
+information that those messages did not record.
 
 ETL captures an unprojected table-schema description instead of replaying raw
 PostgreSQL SQL. It matches columns by PostgreSQL `attnum`, so a rename keeps its
@@ -396,10 +442,15 @@ A concurrent change to an enum, type, function, or namespace can therefore
 produce a name or expression that disagrees with the captured catalog rows.
 The table's copy lock does not protect all of these shared objects.
 
+Copy and CDC share one column query. Decoding uses its type OIDs and modifiers;
+`format_type` output only supplies type names for default rendering. The
+broader legacy introspection helper remains available for older binaries, but
+is not used by the current decoder paths.
+
 COPY reads publication columns, row-filter definitions, and partition membership
-through snapshot-visible catalog SQL. Row-filter deparsing still uses
-`pg_get_expr`, and the DDL event trigger still discovers publication members
-through `pg_publication_tables`. Use a maintenance window for changes to shared
+through snapshot-visible catalog SQL. Copy and DDL capture share publication
+membership and column-filter rules. Row-filter deparsing still uses
+`pg_get_expr`. Use a maintenance window for changes to shared
 objects and unsupported publication settings.
 
 ### Concurrent DDL can outlive the capturing transaction's snapshot
@@ -417,28 +468,43 @@ Changing ETL's connection isolation does not change the trigger's visibility.
 DDL transaction will abort. See PostgreSQL's
 [transaction isolation rules](https://www.postgresql.org/docs/18/transaction-iso.html).
 
-### Separate trigger queries can mix committed states
+### Capture uses one catalog snapshot, without streaming locks
 
-The trigger reads table names, columns, and replica identity in separate SQL
-queries. Under `READ COMMITTED`, another transaction can commit between those
-queries. Each `STABLE` helper uses its calling query's snapshot, but separate
-calls from the `VOLATILE` trigger need not share one snapshot. See PostgreSQL's
+The trigger reads table names, columns, identity, and publication filters in one
+SQL statement through `STABLE` helpers. The shared publication helper reads MVCC
+catalog rows and does not expand unrelated tables through cache-based helpers.
+Copy uses the same publication and identity definitions under its retained locks
+and imported snapshot. See PostgreSQL's
 [function snapshot rules](https://www.postgresql.org/docs/18/xfunc-volatility.html).
+These reads already share a snapshot under `READ COMMITTED`; transaction-wide
+repeatability is not needed for that consistency. A fresh `REPEATABLE READ`
+transaction can also capture preceding committed DDL correctly if it has not
+already acquired an older snapshot. Serializing DDL statements alone does not
+ensure that freshness, and the trigger cannot choose a separate isolation level
+inside the customer's transaction.
 
-A table alteration holding `ACCESS EXCLUSIVE` prevents another transaction
-from changing that table during capture. A publication-level command might not
-hold equivalent protection on every table it captures. Its message can then
-combine an earlier column list with a newer replica identity. Serialize table
-and publication migrations affecting the same tables; `READ COMMITTED` alone
-does not prevent this race.
+Streaming capture adds no relation locks. Concurrent table, publication, or
+shared-object DDL remains unsupported; serialize these changes in short, fresh
+`READ COMMITTED` transactions. One statement snapshot reduces mixed-state
+capture but does not repair stale transaction snapshots or every internal
+PostgreSQL cache lookup.
 
 ### Relation metadata cannot distinguish every schema mismatch from filtering
 
 ETL combines stored schema snapshots with PostgreSQL `RELATION` messages to
 identify replicated columns. A column missing from a relation message can
-mean publication filtering or inconsistent schema history. Unknown columns
-can be rejected, but a valid-looking subset does not prove that the selected
-schema is correct.
+mean publication filtering or inconsistent schema history. ETL rejects unknown
+columns. Every mismatch in tuple order, decoded types, type modifiers, or the
+default-identity primary key logs a warning and increments
+`etl_relation_schema_mismatches_total`. A different column count, column order,
+type, or primary key stops replication before the affected rows are written,
+because decoding would put values in the wrong columns or key-based
+destinations would match rows on a stale key. A type change where the stored
+type is a string type, which keeps any value's text, or a modifier change keeps
+decoding with the stored schema.
+A valid-looking subset still does not prove
+that the selected schema is correct, and custom source types retain their text
+fallback.
 
 If schema history is inconsistent, resolve the source changes and
 resynchronize the affected table. Restarting the pipeline alone cannot repair
