@@ -514,7 +514,11 @@ impl PipelineConfig {
     pub const DEFAULT_TABLE_ERROR_RETRY_DELAY_MS: u64 = 10000;
 
     /// Default maximum number of retry attempts for table errors.
-    pub const DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS: NonZeroU16 = NonZeroU16::new(5).unwrap();
+    ///
+    /// With the default delay this retries for 80 seconds, longer than
+    /// PostgreSQL's default 60 second `wal_sender_timeout`, so a slot held by
+    /// a dead connection is released before retries run out.
+    pub const DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS: NonZeroU16 = NonZeroU16::new(8).unwrap();
 
     /// Maximum aggregate copy worker connections configured for one pipeline.
     ///

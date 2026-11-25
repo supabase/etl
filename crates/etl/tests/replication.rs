@@ -2210,6 +2210,32 @@ async fn start_logical_replication() {
     assert_eq!(counts.insert_count, 10);
 }
 
+/// A slot still held by another session is reported as in use, so workers
+/// retry until PostgreSQL releases it instead of failing for good.
+#[tokio::test(flavor = "multi_thread")]
+async fn start_logical_replication_on_an_active_slot_reports_slot_in_use() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+    database.create_table(test_table_name("table_1"), true, &[("age", "integer")]).await.unwrap();
+    database.create_publication("my_publication", &[test_table_name("table_1")]).await.unwrap();
+    let mut owner = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let slot_name = test_slot_name("my_slot");
+    let slot = owner.create_slot(&slot_name, &Default::default()).await.unwrap();
+    let (_owner_stream, _) = owner
+        .start_logical_replication("my_publication", &slot_name, slot.consistent_point, None)
+        .await
+        .unwrap();
+
+    let other = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let error = other
+        .start_logical_replication("my_publication", &slot_name, slot.consistent_point, None)
+        .await
+        .err()
+        .unwrap();
+
+    assert_eq!(error.kind(), ErrorKind::ReplicationSlotInUse);
+}
+
 /// Publication-wide capture work depends on the publication's members, not on
 /// how many unrelated tables exist in the database.
 #[tokio::test(flavor = "multi_thread")]

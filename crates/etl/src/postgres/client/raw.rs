@@ -29,7 +29,7 @@ use super::{
 };
 use crate::{
     bail,
-    config::{IntoConnectOptions, PgConnectionConfig, PgConnectionOptions},
+    config::{IntoConnectOptions, PgConnectionConfig, PgConnectionOptions, PipelineConfig},
     error::{ErrorKind, EtlResult},
     etl_error,
     pipeline::PipelineId,
@@ -46,6 +46,13 @@ use crate::{
 /// default timeout or the deletion fails before the slot is released.
 const DELETE_SLOT_TIMEOUT: Duration = Duration::from_secs(90);
 const _: () = assert!(DELETE_SLOT_TIMEOUT.as_secs() >= DEFAULT_WAL_SENDER_TIMEOUT.as_secs() + 30);
+// Default timed retries must outlast `wal_sender_timeout`, which frees a slot
+// still held by a dead connection.
+const _: () = assert!(
+    PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_DELAY_MS
+        * PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS.get() as u64
+        > DEFAULT_WAL_SENDER_TIMEOUT.as_millis() as u64
+);
 /// Bounds DNS, socket establishment, TLS negotiation, and authentication
 /// together.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -859,7 +866,20 @@ impl PgReplicationClient {
             options
         );
 
-        let copy_stream = self.client.copy_both_simple::<bytes::Bytes>(&query).await?;
+        let copy_stream = match self.client.copy_both_simple::<bytes::Bytes>(&query).await {
+            Ok(copy_stream) => copy_stream,
+            // After a lost connection, the old walsender keeps the slot active
+            // until `wal_sender_timeout` expires. Retry instead of failing.
+            Err(err) if err.code() == Some(&SqlState::OBJECT_IN_USE) => {
+                bail!(
+                    ErrorKind::ReplicationSlotInUse,
+                    "Replication slot is active for another session",
+                    format!("Waiting for replication slot '{slot_name}' to be released"),
+                    source: err
+                );
+            }
+            Err(err) => return Err(err.into()),
+        };
 
         Ok(ReplicationMessageStream::create(copy_stream, keep_alive_deadline_duration))
     }
