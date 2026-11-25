@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use ::sentry::ClientInitGuard;
+use ::sentry::{ClientInitGuard, ClientOptions, integrations::panic::PanicIntegration};
 use etl_config::{Environment, shared::ReplicatorConfig};
 use secrecy::ExposeSecret;
 use tracing::debug;
@@ -24,13 +24,13 @@ pub(crate) fn init(config: &ReplicatorConfig) -> ReplicatorResult<Option<ClientI
     let environment = Environment::load().map_err(ReplicatorError::config)?;
     let dsn = sentry_config.dsn.expose_secret().parse().map_err(ReplicatorError::config)?;
 
-    let guard = ::sentry::init(::sentry::ClientOptions {
-        dsn: Some(dsn),
-        environment: Some(environment.to_string().into()),
-        integrations: vec![Arc::new(::sentry::integrations::panic::PanicIntegration::new())],
-        attach_stacktrace: true,
-        ..Default::default()
-    });
+    let mut options = ClientOptions::new();
+    options.dsn = Some(dsn);
+    options.environment = Some(environment.to_string().into());
+    options.integrations = vec![Arc::new(PanicIntegration::new())];
+    options.attach_stacktrace = true;
+
+    let guard = ::sentry::init(options);
 
     sentry::configure_scope(|scope| {
         scope.set_tag("pipeline_id", &config.pipeline.id);
