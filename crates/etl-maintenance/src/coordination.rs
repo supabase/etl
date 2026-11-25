@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 use etl::error::EtlResult;
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "ducklake")]
 pub mod report;
 
 const DEFAULT_POLL_SECONDS: u64 = 5;

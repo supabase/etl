@@ -6,8 +6,6 @@ mod materialization;
 #[cfg(feature = "ducklake")]
 pub mod ducklake;
 
-#[cfg(feature = "ducklake")]
-pub use coordination::KubernetesExternalMaintenanceStore;
 pub use coordination::{
     ExternalMaintenanceOperationHistory, ExternalMaintenanceOperationPolicy,
     ExternalMaintenanceOperationRequest, ExternalMaintenanceOperationRun,
@@ -15,8 +13,9 @@ pub use coordination::{
     ExternalMaintenanceReplicatorState, ExternalMaintenanceReplicatorStatus,
     ExternalMaintenanceRequestOutcome, ExternalMaintenanceRun, ExternalMaintenanceState,
     ExternalMaintenanceStore, ExternalMaintenanceWatcherConfig, PostgresExternalMaintenanceStore,
-    report,
 };
+#[cfg(feature = "ducklake")]
+pub use coordination::{KubernetesExternalMaintenanceStore, report};
 pub use materialization::{
     DisabledMaintenanceMaterializer, DuckLakeMaintenanceMaterialization, DuckLakeMaintenancePolicy,
     MaintenanceIdentity, MaintenanceMaterializationError, MaintenanceMaterializer,
