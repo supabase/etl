@@ -94,8 +94,35 @@ impl BigQueryTableRow {
     pub(super) fn try_from_tagged_cells(
         tagged_cells: impl IntoIterator<Item = (usize, Cell)>,
     ) -> Result<Self, EtlError> {
+        Self::try_from_cells_with_tail(tagged_cells, |_| {})
+    }
+
+    /// Encodes CDC metadata after the source cells at tags based on the full
+    /// replicated schema width, including for sparse deletes.
+    pub(super) fn try_from_cdc_cells(
+        tagged_cells: impl IntoIterator<Item = (usize, Cell)>,
+        source_column_count: usize,
+        operation: &'static str,
+        sequence_number: String,
+    ) -> Result<Self, EtlError> {
+        Self::try_from_cells_with_tail(tagged_cells, move |row| {
+            let operation = bytes::Bytes::from_static(operation.as_bytes());
+            prost::encoding::bytes::encode((source_column_count + 1) as u32, &operation, row);
+            prost::encoding::string::encode(
+                (source_column_count + 2) as u32,
+                &sequence_number,
+                row,
+            );
+        })
+    }
+
+    /// Reuses thread-local buffers for source cells and any trailing fields.
+    fn try_from_cells_with_tail(
+        tagged_cells: impl IntoIterator<Item = (usize, Cell)>,
+        encode_tail: impl FnOnce(&mut Vec<u8>),
+    ) -> Result<Self, EtlError> {
         ENCODE_SCRATCH.with_borrow_mut(|scratch| {
-            let encoded = Self::encode(tagged_cells, scratch);
+            let encoded = Self::encode(tagged_cells, scratch, encode_tail);
             scratch.trim();
 
             encoded
@@ -106,6 +133,7 @@ impl BigQueryTableRow {
     fn encode(
         tagged_cells: impl IntoIterator<Item = (usize, Cell)>,
         scratch: &mut EncodeScratch,
+        encode_tail: impl FnOnce(&mut Vec<u8>),
     ) -> Result<Self, EtlError> {
         let EncodeScratch { row, text } = scratch;
         row.clear();
@@ -120,6 +148,8 @@ impl BigQueryTableRow {
                 )
             })?;
         }
+
+        encode_tail(row);
 
         Ok(BigQueryTableRow(row.as_slice().to_vec()))
     }

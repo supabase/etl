@@ -1,7 +1,6 @@
 use std::{error::Error as _, fmt, io, num::NonZeroU16};
 
 use etl::{
-    data::Cell,
     error::{ErrorKind, EtlError, EtlResult, Retryability},
     etl_error,
     pipeline::PipelineId,
@@ -292,16 +291,11 @@ pub(super) enum BigQueryOperationType {
 
 impl BigQueryOperationType {
     /// Returns the BigQuery CDC operation string.
-    fn as_str(&self) -> &'static str {
+    pub(super) fn as_str(&self) -> &'static str {
         match self {
             Self::Upsert => "UPSERT",
             Self::Delete => "DELETE",
         }
-    }
-
-    /// Converts the operation type into a [`Cell`] for streaming.
-    pub(super) fn into_cell(self) -> Cell {
-        Cell::String(self.as_str().to_owned())
     }
 }
 
