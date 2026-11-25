@@ -23,7 +23,7 @@ use etl::{
 };
 use futures::{TryStreamExt, stream};
 use tokio::time::timeout;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::{
     recovery::{ensure_destination_schema_matches_metadata, ensure_relation_schema_transition},
@@ -475,10 +475,11 @@ where
             // A failed catchup write fails its table sync, and ETL copies that
             // table again before streaming it. Its accepted rows can never be
             // required, so drop them before they reach later barriers.
-            self.client
-                .discard_pending_durability(tables.catchup_tables)
-                .await
-                .map_err(EtlError::from)?;
+            if let Err(err) = self.client.discard_pending_durability(tables.catchup_tables).await {
+                // Only broken accounting fails a discard. Return the write
+                // error, which explains the failed catchup.
+                error!(error = %err, "failed to discard pending rows of a failed catchup write");
+            }
         }
 
         result
