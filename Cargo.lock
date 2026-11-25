@@ -1237,8 +1237,9 @@ checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 
 [[package]]
 name = "duckdb"
-version = "1.20000.0"
-source = "git+https://github.com/duckdb/duckdb-rs?rev=e1b0940dfddd575c43fe4e2f070d47ee53d419cd#e1b0940dfddd575c43fe4e2f070d47ee53d419cd"
+version = "1.20001.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eb19e64a2117302336d7e1cc85156b04e7cc2e6fbd974df918cf3b90d35e9f05"
 dependencies = [
  "arrow",
  "cast",
@@ -2677,13 +2678,15 @@ checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "libduckdb-sys"
-version = "1.20000.0"
-source = "git+https://github.com/duckdb/duckdb-rs?rev=e1b0940dfddd575c43fe4e2f070d47ee53d419cd#e1b0940dfddd575c43fe4e2f070d47ee53d419cd"
+version = "1.20001.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1c27e11ec482b43f1e55c782835ec441b3f188a065bfa0d8962b1ba678711ed"
 dependencies = [
  "cc",
  "flate2",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "tar",
 ]
 

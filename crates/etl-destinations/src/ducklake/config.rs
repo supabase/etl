@@ -22,7 +22,7 @@ use crate::{ducklake::LAKE_CATALOG, retry::classified_error};
 
 const DUCKDB_EXTENSION_ROOT_ENV_VAR: &str = "ETL_DUCKDB_EXTENSION_ROOT";
 const CONTAINER_DUCKDB_EXTENSION_ROOT: &str = "/app/duckdb_extensions";
-const DUCKDB_EXTENSION_VERSION: &str = "2.0.0";
+const DUCKDB_EXTENSION_VERSION: &str = "2.0.1";
 const ICU_EXTENSION_FILE: &str = "icu.duckdb_extension";
 const DUCKLAKE_EXTENSION_FILE: &str = "ducklake.duckdb_extension";
 const HTTPFS_EXTENSION_FILE: &str = "httpfs.duckdb_extension";
@@ -806,7 +806,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(version, format!("v{DUCKDB_EXTENSION_VERSION}"));
-        assert_eq!(source_id, "d54cbbe3df");
+        assert_eq!(source_id, "8d78114e90");
     }
 
     /// Setup creates the current format but preserves existing catalog versions

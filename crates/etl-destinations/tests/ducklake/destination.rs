@@ -3593,8 +3593,9 @@ async fn write_events_reveals_publication_column_nullable_without_default() {
         .map_err(RedactedDuckDbError::from)
         .unwrap();
     assert_eq!(is_nullable, "YES");
-    // DuckLake exposes an omitted default as the implicit SQL default `NULL`.
-    assert_eq!(column_default.as_deref(), Some("NULL"));
+    // DuckDB 2.0.1 reports a column without a default as SQL NULL, not the
+    // string "NULL".
+    assert_eq!(column_default, None);
 }
 
 /// Applied metadata does not repair an externally modified DuckLake table, and
@@ -4181,7 +4182,9 @@ async fn startup_after_restart_recovers_publication_mask_expansion() {
         .map_err(RedactedDuckDbError::from)
         .unwrap();
     assert_eq!(is_nullable, "YES");
-    assert_eq!(column_default.as_deref(), Some("NULL"));
+    // DuckDB 2.0.1 reports a column without a default as SQL NULL, not the
+    // string "NULL".
+    assert_eq!(column_default, None);
 }
 
 /// Startup should recover when the target rename column already exists and a

@@ -78,9 +78,9 @@ clickhouse = { version = "0.14.0", default-features = false }
 config = { version = "0.14.0", default-features = false }
 configcat = { version = "0.1.3", default-features = false }
 const-oid = { version = "0.9.6", default-features = false }
-# Bundles DuckDB v2.0.0 (d54cbbe3df); no crates.io release yet.
+# Bundles DuckDB v2.0.1. The version encodes the engine release, so pin it exactly.
 # Keep the destination, maintenance, test, and extension-download pins in sync.
-duckdb = { git = "https://github.com/duckdb/duckdb-rs", rev = "e1b0940dfddd575c43fe4e2f070d47ee53d419cd", default-features = false }
+duckdb = { version = "=1.20001.0", default-features = false }
 etl = { path = "crates/etl", default-features = false }
 etl-config = { path = "crates/etl-config", default-features = false }
 etl-destinations = { path = "crates/etl-destinations", default-features = false }
