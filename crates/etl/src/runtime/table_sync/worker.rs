@@ -212,6 +212,12 @@ impl TableSyncWorkerState {
         Self { inner: Arc::new(Mutex::new(inner)) }
     }
 
+    /// Creates a worker state outside the pool for apply handoff tests.
+    #[cfg(test)]
+    pub(crate) fn new_for_test(table_id: TableId, table_state: TableState) -> Self {
+        Self::new(table_id, table_state)
+    }
+
     /// Locks the state for reading or changing it.
     ///
     /// Waiting for another worker's transition goes through
