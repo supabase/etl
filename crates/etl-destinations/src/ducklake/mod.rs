@@ -97,6 +97,11 @@ impl DuckLakeTableName {
         self.0.id()
     }
 
+    /// Returns a readable name for metric labels, not a durable key.
+    pub(super) fn metric_label(&self) -> String {
+        self.0.metric_label()
+    }
+
     /// Serializes this reference for durable destination metadata.
     pub fn to_metadata_id(&self) -> EtlResult<String> {
         serde_json::to_string(self).map_err(|source| {

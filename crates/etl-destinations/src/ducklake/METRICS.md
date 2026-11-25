@@ -17,7 +17,9 @@ The metrics fall into four groups:
   attached DuckLake catalog.
 
 Table-health metrics carry a `table` label because they are used to diagnose and
-trigger table-specific maintenance behavior.
+trigger table-specific maintenance behavior. Its value is `schema.table`, or
+`namespace.schema.table` for destinations with a table namespace. It is a
+readable name, not the table's durable replay key.
 
 ## Metric groups
 

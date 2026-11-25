@@ -3178,7 +3178,7 @@ impl DuckLakePendingInlineSizeSampler {
                     source: source
                 )
             })?;
-        Ok(record_pending_inline_data_sizes(inlined_bytes, &table_name.id()))
+        Ok(record_pending_inline_data_sizes(inlined_bytes, &table_name.metric_label()))
     }
 }
 
