@@ -1818,21 +1818,48 @@ mod tests {
         }
     }
 
-    /// Real apply workers use this adapter only to bypass empty-copy SQL setup.
-    /// All CDC dispatch, encoding, channel recovery, and shutdown remain real.
+    /// Holds a table's first copy write until the test releases it.
+    struct CopyGate {
+        /// Table whose first copy write is held.
+        table_id: TableId,
+        /// Whether the gate already held a write.
+        used: AtomicBool,
+        /// Signals that the held copy write started.
+        entered: tokio::sync::Notify,
+        /// Releases the held copy write.
+        release: tokio::sync::Notify,
+    }
+
+    impl CopyGate {
+        /// Creates a gate for `table_id`'s first copy write.
+        fn new(table_id: TableId) -> Self {
+            Self {
+                table_id,
+                used: AtomicBool::new(false),
+                entered: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+            }
+        }
+    }
+
+    /// Real workers use this adapter only to bypass empty-copy SQL setup and,
+    /// optionally, to hold one table's copy. All CDC dispatch, encoding,
+    /// channel recovery, and shutdown remain real.
     #[derive(Clone)]
-    struct ReplayPipelineDestination {
+    struct RecordingPipelineDestination {
         /// Production Snowflake destination using the controlled transport.
         destination: Destination<NotifyingStore, UnusedTokenProvider, RecordingStreamClient>,
         /// Shared channel state for empty-copy setup.
         client: Client<UnusedTokenProvider, RecordingStreamClient>,
         /// Pipeline metadata store.
         store: NotifyingStore,
+        /// Holds one table's copy after its channel opens, when set.
+        copy_gate: Option<Arc<CopyGate>>,
     }
 
-    impl etl::destination::Destination for ReplayPipelineDestination {
+    impl etl::destination::Destination for RecordingPipelineDestination {
         fn name() -> &'static str {
-            "snowflake-replay-test"
+            "snowflake-recording-test"
         }
 
         async fn shutdown(&self) -> etl::error::EtlResult<()> {
@@ -1863,6 +1890,13 @@ mod tests {
                 format!("table_{}", schema.id()),
             )
             .await;
+            if let Some(gate) = &self.copy_gate
+                && gate.table_id == schema.id()
+                && !gate.used.swap(true, Ordering::SeqCst)
+            {
+                gate.entered.notify_one();
+                gate.release.notified().await;
+            }
             result.send(Ok(DestinationWriteStatus::Durable));
             Ok(())
         }
@@ -1875,6 +1909,33 @@ mod tests {
         ) -> etl::error::EtlResult<()> {
             self.destination.write_events(events, durability, result).await
         }
+    }
+
+    /// Waits until `table` has received at least `rows` streamed rows.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the rows do not arrive within 30 seconds.
+    async fn wait_for_streamed_rows(stream: &RecordingStreamClient, table: &str, rows: usize) {
+        timeout(Duration::from_secs(30), async {
+            loop {
+                let appended = stream.appended.notified();
+                let streamed: usize = stream
+                    .requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|request| request.table == table)
+                    .map(|request| request.rows.len())
+                    .sum();
+                if streamed >= rows {
+                    return;
+                }
+                appended.await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     /// Runs real apply-worker replay or shutdown after 63 accepted requests.
@@ -1910,10 +1971,11 @@ mod tests {
         let stream = Arc::new(RecordingStreamClient::default());
         let client = recording_client(Arc::clone(&stream));
         let raw = Destination::new(client.clone(), store.clone());
-        let destination = ReplayPipelineDestination {
+        let destination = RecordingPipelineDestination {
             destination: raw,
             client: client.clone(),
             store: store.clone(),
+            copy_gate: None,
         };
         let pipeline_id = random_pipeline_id();
         let slot: String = EtlReplicationSlot::for_apply_worker(&pipeline_id).try_into().unwrap();
@@ -2088,6 +2150,139 @@ mod tests {
     #[ignore = "requires local PostgreSQL"]
     async fn postgres_shutdown_during_replay_without_drain() {
         assert_postgres_replay(true, Some(false), 0).await;
+    }
+
+    /// Rows Snowflake rejects during one table's catchup error that table
+    /// alone; the apply worker keeps confirming another table's changes.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires local PostgreSQL"]
+    async fn postgres_rejected_catchup_rows_do_not_stop_apply_worker() {
+        use etl::{
+            config::BatchConfig,
+            store::TableStateType,
+            test_utils::{
+                database::{
+                    spawn_source_database, test_table_name, wait_for_replication_slot_flush_lsn,
+                },
+                pipeline::{PipelineBuilder, random_pipeline_id},
+            },
+        };
+        use etl_postgres::slots::EtlReplicationSlot;
+
+        // GIVEN: an apply table and a catchup table in one publication, with
+        // the catchup table's copy held after its snapshot.
+        let database = spawn_source_database().await;
+        let apply_table = test_table_name("catchup_isolation_apply");
+        let catchup_table = test_table_name("catchup_isolation_catchup");
+        let apply_table_id = database
+            .create_table(apply_table.clone(), true, &[("value", "int4 not null")])
+            .await
+            .unwrap();
+        let catchup_table_id = database
+            .create_table(catchup_table.clone(), true, &[("value", "int4 not null")])
+            .await
+            .unwrap();
+        let publication = "catchup_isolation_publication";
+        database
+            .create_publication(publication, &[apply_table.clone(), catchup_table.clone()])
+            .await
+            .unwrap();
+        let store = NotifyingStore::new();
+        let stream = Arc::new(RecordingStreamClient::default());
+        let client = recording_client(Arc::clone(&stream));
+        let copy_gate = Arc::new(CopyGate::new(catchup_table_id));
+        let destination = RecordingPipelineDestination {
+            destination: Destination::new(client.clone(), store.clone()),
+            client,
+            store: store.clone(),
+            copy_gate: Some(Arc::clone(&copy_gate)),
+        };
+        let pipeline_id = random_pipeline_id();
+        let slot: String = EtlReplicationSlot::for_apply_worker(&pipeline_id).try_into().unwrap();
+        let mut pipeline = PipelineBuilder::new(
+            database.config.clone(),
+            pipeline_id,
+            publication.to_owned(),
+            store.clone(),
+            destination,
+        )
+        .with_batch_config(BatchConfig {
+            max_bytes: NonZeroU64::MIN,
+            max_fill_ms: 100,
+            memory_budget_ratio: 0.2,
+        })
+        .with_settle_durable_interval_ms(Some(1))
+        .with_retry_config(600_000, 1)
+        .build();
+        let apply_channel = format!("table_{apply_table_id}");
+        let catchup_channel = format!("table_{catchup_table_id}");
+        let apply_table_synced = store.notify_on_table_sync_complete(apply_table_id).await;
+        let catchup_table_errored =
+            store.notify_on_table_state_type(catchup_table_id, TableStateType::Errored).await;
+        let catchup_copy_held = copy_gate.entered.notified();
+
+        pipeline.start().await.unwrap();
+
+        apply_table_synced.notified().await;
+        catchup_copy_held.await;
+
+        // One transaction gives catchup a row to replay. Its apply-table row
+        // shows the apply worker has received the transaction, so catchup
+        // must cover it.
+        database
+            .run_sql(&format!(
+                "with apply_row as (insert into {} (value) values (1)) insert into {} (value) \
+                 values (1)",
+                apply_table.as_quoted_identifier(),
+                catchup_table.as_quoted_identifier(),
+            ))
+            .await
+            .unwrap();
+        wait_for_streamed_rows(&stream, &apply_channel, 1).await;
+
+        // WHEN: Snowflake rejects the catchup table's rows and catchup starts.
+        stream.statuses.lock().unwrap().get_mut(&catchup_channel).unwrap().rows_error_count = 1;
+        copy_gate.release.notify_one();
+
+        catchup_table_errored.notified().await;
+
+        // THEN: the apply worker streams and confirms the next apply-table
+        // change.
+        database
+            .run_sql(&format!(
+                "insert into {} (value) values (2)",
+                apply_table.as_quoted_identifier()
+            ))
+            .await
+            .unwrap();
+        wait_for_streamed_rows(&stream, &apply_channel, 2).await;
+        let last_apply_commit_lsn = stream
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .rfind(|request| request.table == apply_channel)
+            .unwrap()
+            .start
+            .decode()
+            .unwrap()
+            .0;
+        // A stalled apply worker never confirms, so fail well before the
+        // helper's 10-minute bound.
+        timeout(
+            Duration::from_secs(30),
+            wait_for_replication_slot_flush_lsn(
+                database.client.as_ref().unwrap(),
+                &slot,
+                last_apply_commit_lsn,
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(
+            stream.requests.lock().unwrap().iter().any(|request| request.table == catchup_channel)
+        );
+        timeout(Duration::from_secs(5), pipeline.shutdown_and_wait()).await.unwrap().unwrap();
     }
 
     /// Internal window drains can repeatedly leave an accepted tail even
