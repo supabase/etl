@@ -86,6 +86,14 @@ for initial sync and drop them after catch-up completes. By default, both use
 permanent PostgreSQL slots. Table-sync slots can remain after a failed or
 interrupted sync.
 
+After a host or network failure, PostgreSQL keeps the previous session's slot
+active until it detects the lost connection. ETL retries while that slot is
+still held. Keep the retry window, `table_error_retry_delay_ms` times
+`table_error_retry_max_attempts`, longer than PostgreSQL's
+[`wal_sender_timeout`](https://www.postgresql.org/docs/current/runtime-config-replication.html#GUC-WAL-SENDER-TIMEOUT),
+which defaults to 60 seconds. The defaults allow eight retries ten seconds
+apart.
+
 ### Temporary Slots
 
 For ephemeral pipelines, such as an in-memory cache rebuilt from Postgres on
@@ -96,8 +104,6 @@ pipeline:
   replication_slot:
     persistence:
       type: temporary
-  table_error_retry_delay_ms: 10000
-  table_error_retry_max_attempts: 8
 ```
 
 This applies to both apply-worker and table-sync slots. PostgreSQL drops them
@@ -109,15 +115,6 @@ snapshot. You can reuse the same store and destination. Losing the apply slot
 during a run stops the pipeline; starting it again resynchronizes its tables.
 Wait for the previous run's table-sync sessions to end before restarting.
 `failover: true` requires permanent slots.
-
-After a host or network failure, PostgreSQL may keep the previous session's
-slot active until it detects the lost connection. This applies to temporary
-and permanent slots. ETL retries while that slot is still held. Keep the retry
-window longer than PostgreSQL's
-[`wal_sender_timeout`](https://www.postgresql.org/docs/current/runtime-config-replication.html#GUC-WAL-SENDER-TIMEOUT),
-which defaults to 60 seconds. The default retry settings allow eight retries
-ten seconds apart. A clean session exit or an error in the session drops a
-temporary slot immediately.
 
 ### Viewing Replication Slots
 
