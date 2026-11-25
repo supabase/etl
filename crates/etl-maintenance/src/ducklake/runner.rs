@@ -10,7 +10,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant as StdInstant},
 };
 
 use etl::{
@@ -39,10 +39,13 @@ use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, trace, warn};
 use url::Url;
 
-use crate::ducklake::{
-    DataFileRewriteReason, DuckLakeMetadataPool, RedactedDuckDbError,
-    configure_parquet_settings_sql, duckdb_version_check_sql, namespace_version_check_sql,
-    namespaced_tables_query, table_namespace_filter,
+use crate::{
+    coordination::report::{InlineFlushSummaries, InlineFlushSummary},
+    ducklake::{
+        DataFileRewriteReason, DuckLakeMetadataPool, RedactedDuckDbError,
+        configure_parquet_settings_sql, duckdb_version_check_sql, namespace_version_check_sql,
+        namespaced_tables_query, table_namespace_filter,
+    },
 };
 
 const LAKE_CATALOG: &str = "lake";
@@ -1555,6 +1558,8 @@ pub struct CleanupOldFilesMaintenanceConfig {
 /// Structured outcome for one external maintenance run.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DuckLakeMaintenanceOutcome {
+    /// Bounded successful inline-flush observations for durable job reporting.
+    pub inline_flush_summaries: InlineFlushSummaries,
     /// Obsolete rows deleted from ETL replay helper tables.
     pub replay_helper_rows_deleted: u64,
     /// Files created while compacting ETL replay helper tables.
@@ -2057,15 +2062,24 @@ async fn run_inline_flush(
             "ducklake inline flush executing"
         );
         let table_name_for_query = table_name.clone();
-        let rows = duckdb
+        let observation = duckdb
             .run(move |conn| {
-                flush_table_inlined_data(
+                flush_table_inlined_data_summary(
                     conn,
                     &table_name_for_query.schema_path(),
                     table_name_for_query.table(),
                 )
             })
             .await?;
+        let rows = observation.rows;
+        let summary = if rows > 0 {
+            &mut outcome.inline_flush_summaries.flushed
+        } else {
+            &mut outcome.inline_flush_summaries.noop
+        };
+        summary.count = summary.count.saturating_add(observation.count);
+        summary.rows = summary.rows.saturating_add(rows);
+        summary.duration_seconds += observation.duration_seconds;
         outcome.inline_flush_tables = outcome.inline_flush_tables.saturating_add(1);
         outcome.inline_flush_rows = outcome.inline_flush_rows.saturating_add(rows);
         info!(
@@ -2462,14 +2476,13 @@ fn should_rewrite(metrics: &DuckLakeTableStorageMetrics, min_active_data_files: 
     .is_some()
 }
 
-/// Flushes inlined user data for one table.
-#[doc(hidden)]
-pub fn flush_table_inlined_data(
+/// Returns the same observation used by the existing inline-flush metrics.
+fn flush_table_inlined_data_summary(
     conn: &duckdb::Connection,
     schema_name: &str,
     table_name: &str,
-) -> EtlResult<u64> {
-    let flush_started = std::time::Instant::now();
+) -> EtlResult<InlineFlushSummary> {
+    let flush_started = StdInstant::now();
     let sql = format!(
         r#"SELECT COALESCE(SUM(rows_flushed), 0)
          FROM ducklake_flush_inlined_data({}, schema_name => {}, table_name => {});"#,
@@ -2492,11 +2505,12 @@ pub fn flush_table_inlined_data(
         RESULT_LABEL => flush_result,
     )
     .record(rows_flushed as f64);
+    let duration_seconds = flush_started.elapsed().as_secs_f64();
     histogram!(
         ETL_DUCKLAKE_INLINE_FLUSH_DURATION_SECONDS,
         RESULT_LABEL => flush_result,
     )
-    .record(flush_started.elapsed().as_secs_f64());
+    .record(duration_seconds);
 
     if rows_flushed > 0 {
         debug!(
@@ -2510,7 +2524,17 @@ pub fn flush_table_inlined_data(
             "ducklake inlined data already flushed"
         );
     }
-    Ok(rows_flushed)
+    Ok(InlineFlushSummary { count: 1, rows: rows_flushed, duration_seconds })
+}
+
+/// Flushes inlined user data for one table.
+#[doc(hidden)]
+pub fn flush_table_inlined_data(
+    conn: &duckdb::Connection,
+    schema_name: &str,
+    table_name: &str,
+) -> EtlResult<u64> {
+    flush_table_inlined_data_summary(conn, schema_name, table_name).map(|summary| summary.rows)
 }
 
 /// Calls DuckLake merge-adjacent-files for one table.
