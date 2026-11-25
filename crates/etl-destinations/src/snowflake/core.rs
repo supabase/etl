@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     time::Duration,
 };
 
@@ -18,7 +18,7 @@ use etl::{
         ColumnAlterationKind, ColumnSchema, IdentityMask, ReplicatedTableSchema, SchemaOperation,
         TableId,
     },
-    store::{DestinationStore, TableStateType, TableStates},
+    store::{DestinationStore, TableStates},
     task::TaskRegistry,
 };
 use futures::{TryStreamExt, stream};
@@ -39,8 +39,8 @@ use crate::{
         metrics::register_metrics,
         schema,
         streaming::{
-            Completed, DEFAULT_COMMIT_WAIT_TIMEOUT, OffsetToken, RestStreamClient, RowBatch,
-            RowBatchBuilder, SNOWPIPE_RETRY_POLICY, StreamClient,
+            Completed, DEFAULT_COMMIT_WAIT_TIMEOUT, OffsetToken, RestStreamClient, RowBatchBuilder,
+            SNOWPIPE_RETRY_POLICY, StreamClient,
         },
     },
     table_name::try_stringify_table_name,
@@ -49,46 +49,67 @@ use crate::{
 /// Bounds concurrent remote table/view checks before replication starts.
 const VIEW_STARTUP_CONCURRENCY: usize = 8;
 
-/// Returns whether `table_id` participates in the apply worker's deferred
-/// durability window.
+/// Returns whether the apply worker owns durability for `table_id`'s
+/// streaming rows.
 ///
-/// Tables still in table sync or errored are isolated from the apply worker's
-/// pending durability barriers. Missing state entries default to apply
-/// ownership so standalone destination tests without populated table states
-/// keep deferred-durability behavior.
+/// A table sync worker writes only its own table and makes those rows durable
+/// before storing [`etl::store::TableStateType::SyncDone`], so a table that
+/// has not completed sync never carries apply-worker debt. Errored tables stay
+/// outside the apply scope because a failed table sync can still have a write
+/// in flight. A table without a state row can only receive events from the
+/// apply worker.
+///
+/// Skipping a table that left the apply scope is safe because tables error
+/// only before completing sync (table sync workers stop at `SyncDone`, and the
+/// apply worker never marks tables errored). Such a table restarts its copy,
+/// and [`Client::detach_table_for_copy`] discards its pending rows, so no
+/// barrier confirms rows that replication still needs.
 fn is_apply_durability_table(table_states: &TableStates, table_id: TableId) -> bool {
     table_states.get(&table_id).is_none_or(|state| state.as_type().has_completed_table_sync())
 }
 
-/// Returns whether `table_id` has entered the errored table state.
-fn is_errored_table(table_states: &TableStates, table_id: TableId) -> bool {
-    table_states.get(&table_id).is_some_and(|state| state.as_type() == TableStateType::Errored)
+/// Tables whose accepted streaming rows one durability check covers.
+#[derive(Clone, Copy)]
+enum DurabilityScope<'a> {
+    /// One table driven by its table sync worker.
+    Table(TableId),
+    /// Every table the apply worker owns in a table-state snapshot.
+    Apply(&'a TableStates),
 }
 
-/// Tracks which table ownership classes an event batch touched so catchup
-/// workers and the apply worker scope durability waits independently.
+impl DurabilityScope<'_> {
+    /// Returns whether this scope covers `table_id`'s pending rows.
+    fn includes(self, table_id: TableId) -> bool {
+        match self {
+            Self::Table(scope_table_id) => scope_table_id == table_id,
+            Self::Apply(table_states) => is_apply_durability_table(table_states, table_id),
+        }
+    }
+}
+
+/// Tables an event batch touched, grouped by the worker that owns their
+/// durability.
 #[derive(Default)]
-struct BatchDurabilityScope {
-    /// Catchup-owned tables touched by this batch, in first-seen order.
-    catchup_tables: Vec<TableId>,
-    /// Deduplication set for `catchup_tables`.
-    catchup_table_set: HashSet<TableId>,
-    /// Whether this batch touched any apply-owned table.
+struct BatchTables {
+    /// Tables still driven by their table sync worker.
+    catchup_tables: BTreeSet<TableId>,
+    /// Whether the batch touched a table owned by the apply worker.
     touched_apply_table: bool,
 }
 
-impl BatchDurabilityScope {
-    /// Records `table_id` according to its table-sync state and returns whether
-    /// it belongs to the apply worker's deferred window.
-    fn record(&mut self, table_states: &TableStates, table_id: TableId) -> bool {
+impl BatchTables {
+    /// Records `table_id` and returns the durability scope of its writes.
+    fn record<'a>(
+        &mut self,
+        table_states: &'a TableStates,
+        table_id: TableId,
+    ) -> DurabilityScope<'a> {
         if is_apply_durability_table(table_states, table_id) {
             self.touched_apply_table = true;
-            true
+            DurabilityScope::Apply(table_states)
         } else {
-            if self.catchup_table_set.insert(table_id) {
-                self.catchup_tables.push(table_id);
-            }
-            false
+            self.catchup_tables.insert(table_id);
+            DurabilityScope::Table(table_id)
         }
     }
 }
@@ -435,38 +456,6 @@ where
         Ok(())
     }
 
-    /// Removes stale pending durability targets for tables that have entered
-    /// [`TableStateType::Errored`].
-    async fn prune_errored_pending_durability(&self, table_states: &TableStates) -> EtlResult<()> {
-        self.client
-            .discard_pending_durability_matching(|table_id| {
-                is_errored_table(table_states, table_id)
-            })
-            .await
-            .map_err(EtlError::from)
-    }
-
-    /// Sends one streaming batch using the pending durability scope matching
-    /// the table's worker ownership.
-    async fn send_scoped_streaming_batch(
-        &self,
-        table_states: &TableStates,
-        table_id: TableId,
-        is_apply_table: bool,
-        batch: RowBatch,
-    ) -> EtlResult<()> {
-        if is_apply_table {
-            self.client
-                .send_streaming_batch_scoped(table_id, batch, |id| {
-                    is_apply_durability_table(table_states, id)
-                })
-                .await
-        } else {
-            self.client.send_streaming_batch_scoped(table_id, batch, |id| id == table_id).await
-        }
-        .map_err(EtlError::from)
-    }
-
     /// Processes an event batch after its task was admitted into
     /// [`TaskRegistry`].
     ///
@@ -478,49 +467,71 @@ where
         events: Vec<Event>,
         durability: WriteEventsDurability,
     ) -> EtlResult<DestinationWriteStatus> {
-        let mut table_states = self.store.get_table_states().await?;
-        self.prune_errored_pending_durability(&table_states).await?;
+        let table_states = self.store.get_table_states().await?;
+        let mut tables = BatchTables::default();
+        let result =
+            self.write_admitted_events(events, durability, &table_states, &mut tables).await;
+        if result.is_err() && !tables.catchup_tables.is_empty() {
+            // A failed catchup write fails its table sync, and ETL copies that
+            // table again before streaming it. Its accepted rows can never be
+            // required, so drop them before they reach later barriers.
+            self.client
+                .discard_pending_durability(tables.catchup_tables)
+                .await
+                .map_err(EtlError::from)?;
+        }
 
+        result
+    }
+
+    /// Writes one event batch and reports the durability it reached.
+    ///
+    /// Every table the batch touches is recorded in `tables`, including tables
+    /// touched before an error.
+    async fn write_admitted_events(
+        &self,
+        events: Vec<Event>,
+        durability: WriteEventsDurability,
+        table_states: &TableStates,
+        tables: &mut BatchTables,
+    ) -> EtlResult<DestinationWriteStatus> {
         let mut iter = events.into_iter().peekable();
         // Schema and truncate side effects must close the apply pending
         // streaming window.
         let mut requires_durability_wait = false;
-        let mut scope = BatchDurabilityScope::default();
 
         while iter.peek().is_some() {
-            self.write_data_events(&mut iter, &table_states, &mut scope).await?;
+            self.write_data_events(&mut iter, table_states, tables).await?;
             requires_durability_wait |=
-                self.apply_relation_events(&mut iter, &table_states, &mut scope).await?;
+                self.apply_relation_events(&mut iter, table_states, tables).await?;
             requires_durability_wait |=
-                self.apply_truncate_events(&mut iter, &table_states, &mut scope).await?;
+                self.apply_truncate_events(&mut iter, table_states, tables).await?;
         }
 
-        // Catchup batches drain per table and return Durable because empty
-        // durability barriers carry no worker identity: deferring catchup
+        // Catchup tables drain before returning `Durable` because an empty
+        // durability barrier carries no worker identity: deferring catchup
         // durability across calls would either skip confirmation on handoff or
         // force apply barriers to wait on unrelated catchup tables.
-        for table_id in &scope.catchup_tables {
-            self.client.wait_for_table_durability(*table_id).await.map_err(EtlError::from)?;
+        for &table_id in &tables.catchup_tables {
+            self.client.wait_for_table_durability(table_id).await.map_err(EtlError::from)?;
         }
 
-        if !scope.catchup_tables.is_empty() && !scope.touched_apply_table {
+        if !tables.catchup_tables.is_empty() && !tables.touched_apply_table {
             return Ok(DestinationWriteStatus::Durable);
         }
 
-        table_states = self.store.get_table_states().await?;
-        self.prune_errored_pending_durability(&table_states).await?;
-        let is_apply = |table_id| is_apply_durability_table(&table_states, table_id);
-
+        // For the same reason, a table sync worker's commit-only batches and
+        // empty barriers fall into the apply scope. They can wait on, and fail
+        // with, an apply table until ETL identifies the calling worker.
+        let apply = DurabilityScope::Apply(table_states);
+        let include = |table_id| apply.includes(table_id);
         if requires_durability_wait
             || durability == WriteEventsDurability::RequireDurable
-            || self.client.pending_durability_limits_reached_matching(is_apply).await
+            || self.client.pending_durability_limits_reached(include).await
         {
-            self.client
-                .wait_for_pending_durability_matching(is_apply)
-                .await
-                .map_err(EtlError::from)?;
+            self.client.wait_for_pending_durability(include).await.map_err(EtlError::from)?;
             Ok(DestinationWriteStatus::Durable)
-        } else if self.client.pending_durability_is_empty_matching(is_apply).await {
+        } else if self.client.pending_durability_is_empty(include).await {
             Ok(DestinationWriteStatus::Durable)
         } else {
             Ok(DestinationWriteStatus::Accepted)
@@ -537,10 +548,10 @@ where
         &self,
         iter: &mut EventIter,
         table_states: &TableStates,
-        scope: &mut BatchDurabilityScope,
+        tables: &mut BatchTables,
     ) -> EtlResult<()> {
         for (table_id, events) in take_data_events(iter) {
-            let is_apply_table = scope.record(table_states, table_id);
+            let scope = tables.record(table_states, table_id);
             let mut builder = RowBatchBuilder::new(table_id);
             let mut columns = None;
             let mut channel = None;
@@ -559,14 +570,18 @@ where
                     _ => unreachable!("data groups contain only row events"),
                 };
                 for batch in completed {
-                    self.send_scoped_streaming_batch(table_states, table_id, is_apply_table, batch)
-                        .await?;
+                    self.client
+                        .send_streaming_batch(table_id, batch, |id| scope.includes(id))
+                        .await
+                        .map_err(EtlError::from)?;
                 }
             }
 
             for batch in builder.finish().map_err(EtlError::from)? {
-                self.send_scoped_streaming_batch(table_states, table_id, is_apply_table, batch)
-                    .await?;
+                self.client
+                    .send_streaming_batch(table_id, batch, |id| scope.includes(id))
+                    .await
+                    .map_err(EtlError::from)?;
             }
         }
         Ok(())
@@ -576,12 +591,12 @@ where
         &self,
         iter: &mut EventIter,
         table_states: &TableStates,
-        scope: &mut BatchDurabilityScope,
+        tables: &mut BatchTables,
     ) -> EtlResult<bool> {
         let mut applied_schema_change = false;
         while matches!(iter.peek(), Some(Event::Relation(_))) {
             if let Some(Event::Relation(rel)) = iter.next() {
-                scope.record(table_states, rel.replicated_table_schema.id());
+                tables.record(table_states, rel.replicated_table_schema.id());
                 applied_schema_change |=
                     self.handle_relation_event(&rel.replicated_table_schema).await?;
             }
@@ -593,13 +608,13 @@ where
         &self,
         iter: &mut EventIter,
         table_states: &TableStates,
-        scope: &mut BatchDurabilityScope,
+        tables: &mut BatchTables,
     ) -> EtlResult<bool> {
         let operations = take_truncate_operations(iter);
         let had_truncates = !operations.is_empty();
 
         for (schema, offset) in operations {
-            scope.record(table_states, schema.id());
+            tables.record(table_states, schema.id());
             self.prepare_table_for_writes(&schema).await?;
             self.client.truncate_table(schema.id(), &offset).await.map_err(EtlError::from)?;
         }
