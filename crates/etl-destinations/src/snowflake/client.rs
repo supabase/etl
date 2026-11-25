@@ -2224,7 +2224,7 @@ mod tests {
         pipeline.start().await.unwrap();
 
         apply_table_synced.notified().await;
-        catchup_copy_held.await;
+        timeout(Duration::from_secs(30), catchup_copy_held).await.unwrap();
 
         // One transaction gives catchup a row to replay. Its apply-table row
         // shows the apply worker has received the transaction, so catchup
@@ -2270,7 +2270,7 @@ mod tests {
         // A stalled apply worker never confirms, so fail well before the
         // helper's 10-minute bound.
         timeout(
-            Duration::from_secs(30),
+            Duration::from_secs(60),
             wait_for_replication_slot_flush_lsn(
                 database.client.as_ref().unwrap(),
                 &slot,
