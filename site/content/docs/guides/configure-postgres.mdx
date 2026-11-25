@@ -111,12 +111,13 @@ Wait for the previous run's table-sync sessions to end before restarting.
 `failover: true` requires permanent slots.
 
 After a host or network failure, PostgreSQL may keep the previous session's
-temporary slot until it detects the lost connection. ETL retries while that
-slot is still held. Set the retry window longer than PostgreSQL's
+slot active until it detects the lost connection. This applies to temporary
+and permanent slots. ETL retries while that slot is still held. Keep the retry
+window longer than PostgreSQL's
 [`wal_sender_timeout`](https://www.postgresql.org/docs/current/runtime-config-replication.html#GUC-WAL-SENDER-TIMEOUT),
-which defaults to 60 seconds. The example allows eight retries ten seconds
-apart; the default retry settings allow only five. A clean session exit or
-an error in the session drops the slot immediately.
+which defaults to 60 seconds. The default retry settings allow eight retries
+ten seconds apart. A clean session exit or an error in the session drops a
+temporary slot immediately.
 
 ### Viewing Replication Slots
 
