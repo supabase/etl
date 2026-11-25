@@ -3396,6 +3396,10 @@ where
         let persisted_checkpoint_lsn = self.persist_replication_checkpoint(current_lsn).await?;
         debug_assert!(persisted_checkpoint_lsn >= current_lsn);
 
+        if let WorkerContext::Apply(ctx) = &self.worker_context {
+            ctx.durability_monitor.checkpoint_persisted(persisted_checkpoint_lsn);
+        }
+
         // Update the feedback task without waiting for source keepalives;
         // intake may still be paused by backpressure. Publish only this
         // flush's captured commit, never a received or buffered successor.

@@ -252,15 +252,25 @@ where
     /// table sync workers (`table_error_retry_delay_ms` and
     /// `table_error_retry_max_attempts`) so retry behavior is coherent across
     /// worker types.
+    ///
+    /// The attempt limit counts consecutive attempts without progress. An
+    /// attempt that persisted a replication checkpoint before failing restarts
+    /// the count, so each later outage gets the full retry window. Attempts
+    /// that persist nothing keep counting, so retries stay bounded.
     async fn guarded_run_apply_worker(self) -> EtlResult<()> {
         let mut retry_attempts: u16 = 0;
         let mut entered_apply_loop = false;
 
         loop {
+            let checkpoint_before = self.durability_monitor.persisted_checkpoint();
             let result = self.run_apply_worker(&mut entered_apply_loop).await;
             match result {
                 Ok(()) => return Ok(()),
                 Err(err) => {
+                    if self.durability_monitor.persisted_checkpoint() > checkpoint_before {
+                        retry_attempts = 0;
+                    }
+
                     let should_shutdown = Self::handle_apply_worker_error(
                         self.config.as_ref(),
                         &self.shutdown_token,
