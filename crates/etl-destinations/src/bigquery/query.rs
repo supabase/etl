@@ -25,7 +25,7 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::{
-    bigquery::client::bq_error_to_etl_error,
+    bigquery::client::{REST_REQUEST_TIMEOUT, bq_error_to_etl_error},
     retry::{RetryPolicy, retry_with_backoff},
 };
 
@@ -47,6 +47,8 @@ const _: () = assert!(QUERY_TIMEOUT.as_secs() < QUERY_REQUEST_ID_DEDUP_WINDOW.as
 /// HTTP latency can exceed this hint. [`QUERY_TIMEOUT`] bounds local waiting
 /// without cancelling the remote job.
 const QUERY_WAIT_TIMEOUT_MS: i32 = 10_000;
+// The cast widens a positive constant; `From` is not usable in const context.
+const _: () = assert!(REST_REQUEST_TIMEOUT.as_millis() > QUERY_WAIT_TIMEOUT_MS as u128);
 
 /// Avoids rapid polling when BigQuery returns early with an incomplete job.
 const QUERY_POLL_INTERVAL: Duration = Duration::from_secs(1);
