@@ -135,8 +135,12 @@ impl<'a> SourceRepair<'a> {
         if status != StatusCode::OK {
             warn!(phase = phase.query(), %status, "managed source repair request declined");
             return if status.is_server_error()
-                || matches!(status, StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS)
-            {
+                || matches!(
+                    status,
+                    StatusCode::REQUEST_TIMEOUT
+                        | StatusCode::LOCKED
+                        | StatusCode::TOO_MANY_REQUESTS
+                ) {
                 Reply::Retry
             } else {
                 Reply::Stop
@@ -241,9 +245,9 @@ mod tests {
         stream.into_inner()
     }
 
-    async fn reply(mut socket: TcpStream, body: &str) -> TcpStream {
+    async fn reply(mut socket: TcpStream, status: StatusCode, body: &str) -> TcpStream {
         let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         );
         socket.write_all(response.as_bytes()).await.unwrap();
@@ -251,11 +255,17 @@ mod tests {
     }
 
     async fn acknowledge_save(listener: &TcpListener) {
-        reply(receive(listener, "save").await, r#"{"status":"source_saved"}"#).await;
+        reply(receive(listener, "save").await, StatusCode::OK, r#"{"status":"source_saved"}"#)
+            .await;
     }
 
     async fn acknowledge_rollout(listener: &TcpListener) -> TcpStream {
-        reply(receive(listener, "rollout").await, r#"{"status":"rollout_requested"}"#).await
+        reply(
+            receive(listener, "rollout").await,
+            StatusCode::OK,
+            r#"{"status":"rollout_requested"}"#,
+        )
+        .await
     }
 
     #[tokio::test]
@@ -272,13 +282,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retries_only_the_locked_phase() {
+        let (listener, api) = server().await;
+        let repair = reporter(&api);
+        let (confirmed, ()) = tokio::join!(repair.report(), async {
+            reply(receive(&listener, "save").await, StatusCode::LOCKED, "").await;
+            acknowledge_save(&listener).await;
+            reply(receive(&listener, "rollout").await, StatusCode::LOCKED, "").await;
+            acknowledge_rollout(&listener).await;
+        });
+        assert!(confirmed);
+    }
+
+    #[tokio::test]
     async fn rejects_wrong_or_oversized_save_acknowledgements() {
         let (listener, api) = server().await;
         let repair = reporter(&api);
         for body in [r#"{"status":"rollout_requested"}"#.to_owned(), " ".repeat(MAX_ACK_BYTES + 1)]
         {
             let (confirmed, ()) = tokio::join!(repair.report(), async {
-                reply(receive(&listener, "save").await, &body).await;
+                reply(receive(&listener, "save").await, StatusCode::OK, &body).await;
             });
             assert!(!confirmed);
         }
@@ -421,7 +444,7 @@ mod tests {
                 for _ in 0..10 {
                     failures.send(()).unwrap();
                 }
-                reply(save, r#"{"status":"source_saved"}"#).await;
+                reply(save, StatusCode::OK, r#"{"status":"source_saved"}"#).await;
                 acknowledge_rollout(&listener).await;
                 assert!(timeout(Duration::from_millis(100), listener.accept()).await.is_err());
                 failures.send(()).unwrap();
