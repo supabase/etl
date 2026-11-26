@@ -121,8 +121,8 @@ etl = { git = "https://github.com/supabase/etl", rev = "<commit-sha>" }
 
 # Cargo applies driver patches from the application workspace root.
 [patch.crates-io]
-sqlx-core = { git = "https://github.com/supabase/sqlx", rev = "ce568ad9091114be909747a2d906d93dfee2f098" }
-sqlx-postgres = { git = "https://github.com/supabase/sqlx", rev = "ce568ad9091114be909747a2d906d93dfee2f098" }
+sqlx-core = { git = "https://github.com/supabase/sqlx", rev = "108b38262c945e5c5b1f97665554e4d4e927c43b" }
+sqlx-postgres = { git = "https://github.com/supabase/sqlx", rev = "108b38262c945e5c5b1f97665554e4d4e927c43b" }
 ```
 
 [Build your first Rust pipeline](https://supabase.github.io/etl/guides/first-pipeline/) · [Implement a destination or store](https://supabase.github.io/etl/guides/custom-implementations/)

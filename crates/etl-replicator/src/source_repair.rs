@@ -282,6 +282,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn slow_save_can_finish_before_rollout() {
+        let (listener, api) = server().await;
+        let repair = reporter(&api);
+
+        let (confirmed, ()) = tokio::join!(repair.report(), async {
+            let socket = receive(&listener, "save").await;
+            pause();
+            advance(Duration::from_secs(11)).await;
+            tokio::time::resume();
+
+            reply(socket, StatusCode::OK, r#"{"status":"source_saved"}"#).await;
+            acknowledge_rollout(&listener).await;
+        });
+
+        assert!(confirmed);
+    }
+
+    #[tokio::test]
     async fn retries_only_the_locked_phase() {
         let (listener, api) = server().await;
         let repair = reporter(&api);

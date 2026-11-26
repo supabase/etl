@@ -1,11 +1,19 @@
 //! Classification at source connection establishment, before issuing queries.
 
-use std::{error::Error as _, io};
+use std::{error::Error as _, io, time::Duration};
 
-use sqlx::postgres::PgConnectOptions;
+use sqlx::{error::TcpConnectTimeout, postgres::PgConnectOptions};
+use tokio::time::timeout;
 use tokio_postgres::{Client, Config, Connection, Socket, config::Host, tls::MakeTlsConnect};
 
-use crate::error::{ErrorKind, EtlError, EtlResult};
+use crate::{
+    error::{ErrorKind, EtlError, EtlResult},
+    etl_error,
+};
+
+/// Bounds DNS, socket establishment, TLS negotiation, and authentication
+/// together.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Checks the socket errors that can indicate a stale or missing TCP address.
 fn unreachable(error: &io::Error) -> bool {
@@ -50,19 +58,36 @@ pub(super) async fn connect_replication<T: MakeTlsConnect<Socket>>(
     tls: T,
 ) -> EtlResult<(Client, Connection<Socket, T::Stream>)> {
     let mut connected = false;
-    let result = config.connect(ObserveConnectedSocket { connected: &mut connected, tls }).await;
-    result.map_err(|error| {
-        let hosts = config.get_hosts();
-        let tcp = !config.get_hostaddrs().is_empty()
+    let result = timeout(
+        CONNECT_TIMEOUT,
+        config.connect(ObserveConnectedSocket { connected: &mut connected, tls }),
+    )
+    .await;
+
+    let hosts = config.get_hosts();
+    let tcp_dial = !connected
+        && (!config.get_hostaddrs().is_empty()
             || (!hosts.is_empty()
-                && hosts.iter().all(|h| matches!(h, Host::Tcp(host) if !host.is_empty())));
-        // A later failed dial can mask an earlier authentication or TLS
-        // rejection.
-        let failed = !connected
-            && tcp
-            && error.source().and_then(|e| e.downcast_ref::<io::Error>()).is_some_and(unreachable);
-        EtlError::from(error).with_postgres_dial_failure(failed)
-    })
+                && hosts.iter().all(|h| matches!(h, Host::Tcp(host) if !host.is_empty()))));
+
+    match result {
+        Ok(Ok(connection)) => Ok(connection),
+        Ok(Err(error)) => {
+            // A later failed dial can mask an earlier authentication or TLS
+            // rejection.
+            let failed = tcp_dial
+                && error
+                    .source()
+                    .and_then(|e| e.downcast_ref::<io::Error>())
+                    .is_some_and(unreachable);
+            Err(EtlError::from(error).with_postgres_dial_failure(failed))
+        }
+        Err(elapsed) => {
+            Err(etl_error!(ErrorKind::SourceConnectionFailed, "Postgres connection timed out")
+                .with_source(elapsed)
+                .with_postgres_dial_failure(tcp_dial))
+        }
+    }
 }
 
 /// Preserves the migration's normal error handling for all other causes.
@@ -73,10 +98,8 @@ pub(super) fn migration_connect_error(
     description: &'static str,
 ) -> EtlError {
     let dial_error = match &error {
-        // The pinned SQLx driver uses this error for its per-address TCP deadline.
-        // A generic I/O timeout can also come from the TLS or startup exchange.
         sqlx::Error::Io(io) if io.kind() == io::ErrorKind::TimedOut => {
-            io.get_ref().is_some_and(|cause| cause.to_string() == "TCP connection timed out")
+            matches!(io.get_ref(), Some(cause) if cause.is::<TcpConnectTimeout>())
         }
         sqlx::Error::Io(io) => unreachable(io),
         _ => false,
@@ -90,6 +113,7 @@ pub(super) fn migration_connect_error(
 
 #[cfg(test)]
 mod tests {
+    use futures::FutureExt;
     use sqlx::{
         Connection, PgConnection,
         postgres::{PgConnectOptions, PgSslMode},
@@ -101,6 +125,46 @@ mod tests {
     use tokio_postgres::{Config, NoTls, config::SslMode};
 
     use super::*;
+
+    /// Occupying the resolver's blocking thread keeps the DNS lookup pending
+    /// without depending on a particular network or DNS server.
+    #[test]
+    fn stalled_hostname_lookup_is_a_dial_failure() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let (release, wait) = std::sync::mpsc::channel::<()>();
+            let (started, ready) = tokio::sync::oneshot::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                started.send(()).unwrap();
+                let _ = wait.recv();
+            });
+            ready.await.unwrap();
+
+            let mut config = Config::new();
+            config.host("localhost").user("test");
+
+            tokio::time::pause();
+            let connection = connect_replication(&config, NoTls);
+            tokio::pin!(connection);
+            assert!(connection.as_mut().now_or_never().is_none());
+            tokio::time::advance(Duration::from_secs(31)).await;
+            let result = connection.as_mut().now_or_never();
+
+            drop(release);
+            blocker.await.unwrap();
+
+            let Some(Err(error)) = result else {
+                panic!("expected the connection deadline to expire during DNS lookup");
+            };
+            assert_eq!(error.kind(), ErrorKind::SourceConnectionFailed);
+            assert!(error.is_postgres_dial_failure());
+        });
+    }
 
     /// Both drivers reached the server and received a rejection during TLS
     /// negotiation.
@@ -185,6 +249,7 @@ mod tests {
             sqlx::Error::PoolTimedOut,
             sqlx::Error::Io(io::ErrorKind::TimedOut.into()),
             sqlx::Error::Io(io::Error::new(io::ErrorKind::TimedOut, "Startup read timed out")),
+            sqlx::Error::Io(io::Error::new(io::ErrorKind::TimedOut, "TCP connection timed out")),
             sqlx::Error::Tls(io::Error::from(io::ErrorKind::TimedOut).into()),
             sqlx::Error::Io(io::ErrorKind::InvalidData.into()),
             sqlx::Error::Protocol("test protocol error".into()),
@@ -195,16 +260,6 @@ mod tests {
             assert_eq!(error.kind(), ErrorKind::SourceError);
             assert!(!error.is_postgres_dial_failure());
         }
-        let options = PgConnectOptions::new().host("localhost");
-        let dial_timeout = io::Error::new(io::ErrorKind::TimedOut, "TCP connection timed out");
-        let error = migration_connect_error(
-            &options,
-            dial_timeout.into(),
-            ErrorKind::SourceError,
-            "Test migration",
-        );
-        assert!(error.is_postgres_dial_failure());
-
         let socket = PgConnectOptions::new().host("/example/socket");
         let refused = sqlx::Error::Io(io::ErrorKind::ConnectionRefused.into());
         assert!(

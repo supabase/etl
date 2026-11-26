@@ -88,7 +88,6 @@ impl ManagementApiClient {
             .local_address(IpAddr::V6(Ipv6Addr::UNSPECIFIED))
             .no_proxy()
             .connect_timeout(Duration::from_secs(2))
-            .timeout(Duration::from_secs(10))
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
 
@@ -179,7 +178,7 @@ impl ManagementApiClient {
         &self,
         email: &EtlEmailRequest<'_>,
     ) -> Result<reqwest::Request, reqwest::Error> {
-        self.authenticated_request(self.post("emails").json(email))
+        self.authenticated_request(self.post("emails").timeout(Duration::from_secs(10)).json(email))
     }
 
     fn authenticated_request(
@@ -314,6 +313,7 @@ mod tests {
         let request = client.build_email_request(&email).expect("request should build");
 
         assert_eq!(request.method(), reqwest::Method::POST);
+        assert_eq!(request.timeout(), Some(&Duration::from_secs(10)));
         assert!(request.headers()["apikey"].is_sensitive());
         assert_eq!(
             request.url().as_str(),

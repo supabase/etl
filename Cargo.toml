@@ -151,8 +151,8 @@ zstd = { version = "0.14.3", default-features = false }
 # Keep the PostgreSQL driver and its shared core on the same fork revision.
 # Cargo patches apply only at the workspace root; downstream workspaces must repeat them.
 [patch.crates-io]
-sqlx-core = { git = "https://github.com/supabase/sqlx", rev = "ce568ad9091114be909747a2d906d93dfee2f098" }
-sqlx-postgres = { git = "https://github.com/supabase/sqlx", rev = "ce568ad9091114be909747a2d906d93dfee2f098" }
+sqlx-core = { git = "https://github.com/supabase/sqlx", rev = "108b38262c945e5c5b1f97665554e4d4e927c43b" }
+sqlx-postgres = { git = "https://github.com/supabase/sqlx", rev = "108b38262c945e5c5b1f97665554e4d4e927c43b" }
 
 [profile.dev.package.libduckdb-sys]
 # The published C++ extensions use release allocator bookkeeping. The bundled
