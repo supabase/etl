@@ -115,7 +115,12 @@ Query submission, completion polling, result pages, and retries share a
 ten-minute deadline. A pending response keeps the original job ID and location.
 Each poll requests a ten-second server wait; another incomplete response is
 followed by a one-second pause. The server wait is a hint: HTTP latency can
-exceed it, and it does not limit the remote job's lifetime.
+exceed it, and it does not limit the remote job's lifetime. Each REST request,
+including table and dataset lookups, has a ten-second connect timeout and a
+30-second overall timeout. A query request that exceeds either is retried
+under the policy below; a lookup that exceeds either fails with a retryable
+error. Authentication token requests and Storage Write appends are not covered
+by these limits.
 
 Transient HTTP failures allow up to 20 retries of the same request. Backoff
 starts at one second, doubles to a 32-second cap, and adds up to one second of
