@@ -4925,7 +4925,7 @@ dependencies = [
 [[package]]
 name = "sqlx-core"
 version = "0.9.1"
-source = "git+https://github.com/supabase/sqlx?rev=108b38262c945e5c5b1f97665554e4d4e927c43b#108b38262c945e5c5b1f97665554e4d4e927c43b"
+source = "git+https://github.com/supabase/sqlx?rev=ed1c63355ad7430f9bfba0f3ea5064d5f03ce2c9#ed1c63355ad7430f9bfba0f3ea5064d5f03ce2c9"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -5027,7 +5027,7 @@ dependencies = [
 [[package]]
 name = "sqlx-postgres"
 version = "0.9.1"
-source = "git+https://github.com/supabase/sqlx?rev=108b38262c945e5c5b1f97665554e4d4e927c43b#108b38262c945e5c5b1f97665554e4d4e927c43b"
+source = "git+https://github.com/supabase/sqlx?rev=ed1c63355ad7430f9bfba0f3ea5064d5f03ce2c9#ed1c63355ad7430f9bfba0f3ea5064d5f03ce2c9"
 dependencies = [
  "atoi 2.0.0",
  "base64 0.22.1",
