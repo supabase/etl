@@ -425,13 +425,23 @@ fn list_child_count(cell: &Cell, kind: ArrowColumnKind) -> Option<usize> {
 }
 
 /// Returns whether all copied rows can be represented by the Arrow kinds.
-/// A list schema supplies one child count per column.
+///
+/// # Panics
+///
+/// In debug builds, panics unless `child_capacities` has one entry per column
+/// for a schema with lists and is empty otherwise.
 fn copy_rows_match_arrow_kinds(
     column_kinds: &[ArrowColumnKind],
     table_rows: &[TableRow],
     child_capacities: &mut [usize],
     list_limit: usize,
 ) -> bool {
+    debug_assert_eq!(
+        child_capacities.len(),
+        if column_kinds.iter().any(|kind| kind.is_list()) { column_kinds.len() } else { 0 },
+        "Arrow copy child capacities must match the column kinds"
+    );
+
     table_rows.iter().all(|row| {
         if row.values().len() != column_kinds.len() {
             return false;

@@ -5526,7 +5526,6 @@ async fn copy_persists_primitive_arrays_across_arrow_chunks() {
         .collect();
 
     destination.write_table_rows_for_tests(&replicated, rows).await.unwrap();
-    destination.write_table_rows_for_tests(&replicated, Vec::new()).await.unwrap();
     destination.shutdown().await.unwrap();
 
     let conn =
@@ -6380,7 +6379,14 @@ async fn full_identity_delete_matches_stored_value_on_every_write_path() {
         ("json_key_order", PgType::JSONB, -1, json(r#"{"b":1,"a":2}"#)),
         ("json_unicode", PgType::JSONB, -1, json(r#"{"s":"é😀"}"#)),
     ];
-    // Any of these values sends its whole batch through SQL literals.
+    let float8_array_case = (
+        "float8_array",
+        PgType::FLOAT8_ARRAY,
+        -1,
+        Cell::Array(ArrayCell::F64(vec![Some(f64::NAN), None, Some(-0.0), Some(1e-30)])),
+    );
+
+    // Infinities and 24:00 force SQL literals for the entire COPY batch.
     let sql_literal_cases: Vec<DeleteCase> = vec![
         ("date_infinity", PgType::DATE, -1, Cell::Date(Date::PosInfinity)),
         ("timestamp_infinity", PgType::TIMESTAMP, -1, Cell::Timestamp(Timestamp::PosInfinity)),
@@ -6391,33 +6397,30 @@ async fn full_identity_delete_matches_stored_value_on_every_write_path() {
             Cell::TimestampTz(Timestamp::NegInfinity),
         ),
         ("time_end_of_day", PgType::TIME, -1, Cell::Time(PgTime::EndOfDay)),
-        (
-            "float8_array",
-            PgType::FLOAT8_ARRAY,
-            -1,
-            Cell::Array(ArrayCell::F64(vec![Some(f64::NAN), None, Some(-0.0), Some(1e-30)])),
-        ),
+        float8_array_case.clone(),
     ];
+    // COPY uses Arrow for this group, while the CDC inserts use SQL literals.
+    let arrow_array_cases = [float8_array_case];
 
     let mut surviving = Vec::new();
     for (table_id, table, cases) in [
-        (900, "full_identity_arrow", &arrow_cases),
-        (901, "full_identity_json", &json_cases),
-        (902, "full_identity_sql_literal", &sql_literal_cases),
+        (900, "full_identity_arrow", arrow_cases.as_slice()),
+        (901, "full_identity_json", json_cases.as_slice()),
+        (902, "full_identity_sql_literal", sql_literal_cases.as_slice()),
+        (903, "full_identity_arrow_array", &arrow_array_cases),
     ] {
-        surviving.extend(
-            surviving_full_identity_deletes(
-                &lake.catalog_url,
-                &lake.data_url,
-                table_id,
-                table,
-                cases,
-            )
-            .await,
-        );
+        let table_survivors = surviving_full_identity_deletes(
+            &lake.catalog_url,
+            &lake.data_url,
+            table_id,
+            table,
+            cases,
+        )
+        .await;
+        surviving.extend(table_survivors.into_iter().map(|(path, case)| (table, path, case)));
     }
 
-    assert!(surviving.is_empty(), "deletes left rows behind (path, case): {surviving:?}");
+    assert!(surviving.is_empty(), "deletes left rows behind (table, path, case): {surviving:?}");
 }
 
 /// Partition changes survive restart and preserve rows and historical files.
