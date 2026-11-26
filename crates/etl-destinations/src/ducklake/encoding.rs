@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use chrono::{NaiveDate, NaiveTime, Timelike};
+use chrono::{NaiveTime, Timelike};
 use duckdb::{
     arrow::{
         array::{
@@ -192,7 +192,7 @@ impl ArrowColumnValues {
             (Self::Utf8(values), Cell::Json(value)) => values.push(Some(value.to_string())),
             (Self::Date32(values), Cell::Null) => values.push(None),
             (Self::Date32(values), Cell::Date(Date::Value(value))) => {
-                values.push(Some(date_days_since_epoch(value, column_name)?));
+                values.push(Some(value.to_epoch_days()));
             }
             (Self::Time64Microsecond(values), Cell::Null) => values.push(None),
             (Self::Time64Microsecond(values), Cell::Time(PgTime::Value(value))) => {
@@ -355,18 +355,6 @@ fn copy_rows_to_arrow_record_batch(
 
     RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).map_err(|error| {
         classified_error(ErrorKind::ConversionError, "DuckLake Arrow copy conversion failed", error)
-    })
-}
-
-/// Converts a date to DuckDB's Arrow date representation.
-fn date_days_since_epoch(value: NaiveDate, column_name: &str) -> EtlResult<i32> {
-    let epoch_date = NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch date should be valid");
-    i32::try_from(value.signed_duration_since(epoch_date).num_days()).map_err(|_| {
-        etl_error!(
-            ErrorKind::ConversionError,
-            "DuckLake Arrow copy conversion failed",
-            format!("Column '{column_name}' contains a date outside DuckDB's supported range")
-        )
     })
 }
 
@@ -584,8 +572,6 @@ fn encode_hex(bytes: &[u8]) -> String {
 /// Converts a [`Cell`] to a [`duckdb::types::Value`] for use with parameterized
 /// INSERT statements.
 fn cell_to_value(cell: Cell) -> Value {
-    let epoch_date = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
-
     match cell {
         Cell::Null => Value::Null,
         Cell::Bool(b) => Value::Boolean(b),
@@ -598,9 +584,7 @@ fn cell_to_value(cell: Cell) -> Value {
         Cell::F64(f) => Value::Double(f),
         // NUMERIC stored as VARCHAR to avoid precision loss.
         Cell::Numeric(n) => Value::Text(n.to_string()),
-        Cell::Date(Date::Value(d)) => {
-            Value::Date32(d.signed_duration_since(epoch_date).num_days() as i32)
-        }
+        Cell::Date(Date::Value(d)) => Value::Date32(d.to_epoch_days()),
         Cell::Time(PgTime::Value(t)) => {
             Value::Time64(TimeUnit::Microsecond, time_micros_since_midnight(t))
         }
@@ -673,6 +657,7 @@ fn array_cell_to_value(arr: ArrayCell) -> Value {
 
 #[cfg(test)]
 pub(super) mod tests {
+    use chrono::NaiveDate;
     use etl::{
         data::{PgTime, Timestamp},
         schema::{
