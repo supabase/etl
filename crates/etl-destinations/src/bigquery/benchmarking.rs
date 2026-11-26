@@ -1,16 +1,18 @@
 //! Benchmark-only entrypoints for BigQuery hot paths.
 
-use etl::{data::TableRow, error::EtlResult};
+use etl::{data::TableRow, error::EtlResult, schema::ReplicatedTableSchema};
 use prost::Message;
 
-use crate::bigquery::encoding::BigQueryTableRow;
+use crate::bigquery::core::{BIGQUERY_COPY_SEQUENCE_NUMBER, bigquery_upsert_row};
 
-/// Encodes one copied row and appends its Protocol Buffer bytes to `output`.
-///
-/// This is the per-row work of a table-copy write: the row is encoded once
-/// into its own buffer, then appended to an append request.
-pub fn encode_table_row(table_row: TableRow, output: &mut Vec<u8>) -> EtlResult<()> {
-    BigQueryTableRow::try_from(table_row)?.encode_raw(output);
+/// Appends the Protocol Buffer bytes of one table-copy UPSERT to `output`.
+pub fn encode_table_row(
+    schema: &ReplicatedTableSchema,
+    table_row: TableRow,
+    output: &mut Vec<u8>,
+) -> EtlResult<()> {
+    bigquery_upsert_row(schema, table_row, BIGQUERY_COPY_SEQUENCE_NUMBER.to_owned())?
+        .encode_raw(output);
 
     Ok(())
 }

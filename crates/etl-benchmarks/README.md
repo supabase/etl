@@ -413,6 +413,10 @@ Destination scenarios are compiled only with the destination's feature:
 needs `--features clickhouse`, and `snowflake_row_encode` needs
 `--features snowflake`.
 
+The BigQuery row encoding scenario includes CDC field
+construction, so results from earlier versions are not
+directly comparable.
+
 The binary uses jemalloc, as the replicator does, and installs the Prometheus
 recorder so metric calls pay the real registry cost. Instruction counts come
 from `proc_pid_rusage` and are reported on macOS only. On other platforms the
