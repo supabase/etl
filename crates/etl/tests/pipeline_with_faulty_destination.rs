@@ -16,13 +16,14 @@ use etl::{
         database::{
             WalsenderTermination, replication_slot_state, spawn_source_database,
             terminate_active_walsender, terminate_walsender, wait_for_new_walsender,
+            wait_for_replication_slot_flush_lsn,
         },
         event::{EventCondition, group_events_by_type_and_table_id},
         faults::{FaultAction, FaultyOp},
         memory_destination::MemoryDestination,
         notify::DEFAULT_NOTIFY_TIMEOUT,
         notifying_store::NotifyingStore,
-        pipeline::{PipelineBuilder, create_pipeline, random_pipeline_id},
+        pipeline::{PipelineBuilder, create_pipeline, random_pipeline_id, wait_for_pipeline_error},
         property::{block_on, run_expensive_property},
         test_destination_wrapper::TestDestinationWrapper,
         test_schema::{TableSelection, insert_users_data, setup_test_database_schema},
@@ -824,6 +825,124 @@ async fn apply_disconnect_with_write_released_before_reconnect_recovers_without_
         "insert must survive with at most one replay, got {first_count} copies"
     );
     assert_eq!(final_lsns.iter().filter(|lsn| **lsn > first_commit_lsn).count(), 1);
+}
+
+/// Each outage after durable progress gets the full retry budget, so a
+/// long-running apply worker survives more outages than its attempt limit.
+#[tokio::test(flavor = "multi_thread")]
+async fn apply_worker_survives_more_outages_than_retry_attempts() {
+    init_test_tracing();
+
+    // GIVEN: a streaming pipeline allowed two timed retries
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let users = database_schema.users_schema();
+    let table_id = users.id;
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+    let pipeline_id = random_pipeline_id();
+    let apply_slot_name: String =
+        EtlReplicationSlot::for_apply_worker(&pipeline_id).try_into().unwrap();
+    let mut pipeline = PipelineBuilder::new(
+        database.config.clone(),
+        pipeline_id.as_str(),
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    )
+    .with_retry_config(1000, 2)
+    .build();
+
+    let sync_done = store.notify_on_table_sync_complete(table_id).await;
+
+    pipeline.start().await.unwrap();
+
+    sync_done.notified().await;
+
+    // WHEN: three outages each follow durable progress
+    let mut last_commit_lsn = PgLsn::from(0);
+    for outage in 1..=3 {
+        let client = database.client.as_ref().unwrap();
+        let terminated = terminate_active_walsender(client, &apply_slot_name).await.unwrap();
+        let WalsenderTermination::Terminated { pid } = terminated else {
+            panic!("apply walsender should be active before outage {outage}: {terminated:?}");
+        };
+
+        // THEN: the worker reconnects after every outage. One retry delay is
+        // 1 s, so a worker that stopped retrying shows up as no reconnect.
+        let reconnected =
+            wait_for_new_walsender(client, &apply_slot_name, pid, Duration::from_secs(30))
+                .await
+                .unwrap();
+        assert!(reconnected.is_some(), "apply worker did not reconnect after outage {outage}");
+
+        // Durable progress before the next outage.
+        let previous_commit_lsn = last_commit_lsn;
+        let inserted = destination
+            .notify_on_events(move |events| {
+                table_insert_commit_lsns(events, table_id)
+                    .last()
+                    .is_some_and(|lsn| *lsn > previous_commit_lsn)
+            })
+            .await;
+
+        insert_users_data(&mut database, &users.name, outage..=outage).await;
+
+        inserted.notified().await;
+        last_commit_lsn =
+            *table_insert_commit_lsns(&destination.get_events().await, table_id).last().unwrap();
+
+        // Feedback is sent only after the checkpoint is persisted.
+        let client = database.client.as_ref().unwrap();
+        wait_for_replication_slot_flush_lsn(client, &apply_slot_name, last_commit_lsn).await;
+    }
+
+    pipeline.shutdown_and_wait().await.unwrap();
+}
+
+/// Attempts that never persist a checkpoint still exhaust the retry limit.
+#[tokio::test(flavor = "multi_thread")]
+async fn apply_worker_stops_when_retries_make_no_progress() {
+    init_test_tracing();
+
+    // GIVEN: a streaming pipeline allowed two timed retries
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let users = database_schema.users_schema();
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+    let mut pipeline = PipelineBuilder::new(
+        database.config.clone(),
+        random_pipeline_id().as_str(),
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    )
+    .with_retry_config(1000, 2)
+    .build();
+
+    let sync_done = store.notify_on_table_sync_complete(users.id).await;
+
+    pipeline.start().await.unwrap();
+
+    sync_done.notified().await;
+
+    // WHEN: every write fails with a retryable error for the first attempt and
+    // both retries
+    for _ in 0..3 {
+        destination
+            .inject_fault(
+                FaultyOp::WriteEvents,
+                FaultAction::reject(ErrorKind::DestinationTimeout, "write timed out"),
+            )
+            .await;
+    }
+
+    insert_users_data(&mut database, &users.name, 1..=1).await;
+
+    // THEN: the worker stops instead of retrying forever
+    let error = wait_for_pipeline_error(&pipeline).await;
+    assert_eq!(error.kind(), ErrorKind::DestinationTimeout);
 }
 
 #[tokio::test(flavor = "multi_thread")]
