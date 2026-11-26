@@ -9,6 +9,7 @@ use crate::{
     config::{IntoConnectOptions, PgConnectionConfig, PgConnectionOptions},
     error::{ErrorKind, EtlResult},
     etl_error,
+    postgres::connect_error::migration_connect_error,
 };
 
 /// Application name for ETL migration connections.
@@ -33,14 +34,20 @@ static MIGRATION_OPTIONS: LazyLock<PgConnectionOptions> =
 /// cannot clash across databases.
 pub const ETL_SCHEMA_LOCK_ID: i64 = 0x6574_6c5f_7363_6865;
 
-/// Creates a PostgreSQL connection prepared for ETL migrations.
-async fn create_migration_connection(
+/// Connects before running any SQL so network failures have a precise origin.
+async fn connect(
     connection_config: &PgConnectionConfig,
-) -> Result<PgConnection, sqlx::Error> {
+    fallback: ErrorKind,
+    description: &'static str,
+) -> EtlResult<PgConnection> {
     let options: PgConnectOptions = connection_config.with_db(Some(&MIGRATION_OPTIONS));
+    PgConnection::connect_with(&options)
+        .await
+        .map_err(|err| migration_connect_error(&options, err, fallback, description))
+}
 
-    let mut conn = PgConnection::connect_with(&options).await?;
-
+/// Prepares a connection for ETL migrations.
+async fn prepare_connection(conn: &mut PgConnection) -> Result<(), sqlx::Error> {
     // Suppress routine DDL notices so startup logs stay focused on phase-level
     // events.
     conn.execute("set client_min_messages = warning;").await?;
@@ -60,17 +67,17 @@ async fn create_migration_connection(
     // table is created inside that schema instead of the public schema.
     conn.execute("set search_path = 'etl';").await?;
 
-    Ok(conn)
+    Ok(())
 }
 
 /// Returns whether the source database is currently a physical standby.
-async fn source_database_in_recovery(
-    connection_config: &PgConnectionConfig,
-) -> Result<bool, sqlx::Error> {
-    let options: PgConnectOptions = connection_config.with_db(Some(&MIGRATION_OPTIONS));
-    let mut conn = PgConnection::connect_with(&options).await?;
-
-    sqlx::query_scalar("select pg_is_in_recovery()").fetch_one(&mut conn).await
+async fn source_database_in_recovery(connection_config: &PgConnectionConfig) -> EtlResult<bool> {
+    const FAILURE: &str = "Failed to inspect source database recovery state";
+    let mut conn = connect(connection_config, ErrorKind::SourceConnectionFailed, FAILURE).await?;
+    sqlx::query_scalar("select pg_is_in_recovery()")
+        .fetch_one(&mut conn)
+        .await
+        .map_err(|err| etl_error!(ErrorKind::SourceConnectionFailed, FAILURE, source: err))
 }
 
 /// Returns the migrator for source-side replication helpers.
@@ -96,11 +103,18 @@ async fn run_migration_set(
     connection_config: &PgConnectionConfig,
     migrator: Migrator,
     label: &'static str,
-) -> Result<(), sqlx::Error> {
-    let mut conn = create_migration_connection(connection_config).await?;
+    failure: &'static str,
+) -> EtlResult<()> {
+    let mut conn = connect(connection_config, ErrorKind::SourceError, failure).await?;
+    let migration_error = |err| etl_error!(ErrorKind::SourceError, failure, source: err);
+    prepare_connection(&mut conn).await.map_err(migration_error)?;
 
     debug!(migration_set = label, "applying etl migrations");
-    migrator.run_direct(None, &mut conn, false).await?;
+    migrator
+        .run_direct(None, &mut conn, false)
+        .await
+        .map_err(sqlx::Error::from)
+        .map_err(migration_error)?;
     debug!(migration_set = label, "etl migrations successfully applied");
 
     Ok(())
@@ -119,13 +133,7 @@ async fn run_migration_set(
 /// This function is public for applications that want to preflight or pre-apply
 /// the source-side setup.
 pub async fn run_source_migrations(source_config: &PgConnectionConfig) -> EtlResult<()> {
-    let in_recovery = source_database_in_recovery(source_config).await.map_err(|err| {
-        etl_error!(
-            ErrorKind::SourceConnectionFailed,
-            "Failed to inspect source database recovery state",
-            source: err
-        )
-    })?;
+    let in_recovery = source_database_in_recovery(source_config).await?;
 
     if in_recovery {
         debug!("skipping etl source migrations on standby source database");
@@ -133,26 +141,26 @@ pub async fn run_source_migrations(source_config: &PgConnectionConfig) -> EtlRes
         return Ok(());
     }
 
-    run_migration_set(source_config, source_migrator(), "source")
-        .await
-        .map_err(|err| {
-            etl_error!(ErrorKind::SourceError, "Failed to run ETL source migrations", source: err)
-        })
+    run_migration_set(
+        source_config,
+        source_migrator(),
+        "source",
+        "Failed to run ETL source migrations",
+    )
+    .await
 }
 
 /// Runs migrations required only by [`crate::store::PostgresStore`].
 pub(crate) async fn run_postgres_store_migrations(
     source_config: &PgConnectionConfig,
 ) -> EtlResult<()> {
-    run_migration_set(source_config, postgres_store_migrator(), "postgres_store").await.map_err(
-        |err| {
-            etl_error!(
-                ErrorKind::SourceError,
-                "Failed to run Postgres store migrations",
-                source: err
-            )
-        },
+    run_migration_set(
+        source_config,
+        postgres_store_migrator(),
+        "postgres_store",
+        "Failed to run Postgres store migrations",
     )
+    .await
 }
 
 /// Applies store and source migrations without starting replication.
@@ -166,13 +174,7 @@ pub async fn run_migrations(
     source_config: &PgConnectionConfig,
     store_config: Option<&PgConnectionConfig>,
 ) -> EtlResult<()> {
-    let in_recovery = source_database_in_recovery(source_config).await.map_err(|err| {
-        etl_error!(
-            ErrorKind::SourceConnectionFailed,
-            "Failed to inspect source database recovery state",
-            source: err
-        )
-    })?;
+    let in_recovery = source_database_in_recovery(source_config).await?;
 
     if in_recovery {
         return Err(etl_error!(

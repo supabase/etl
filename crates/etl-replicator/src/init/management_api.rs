@@ -3,14 +3,14 @@ use secrecy::ExposeSecret;
 
 use crate::{
     error::{ReplicatorError, ReplicatorResult},
-    error_notification::ErrorNotificationClient,
+    management_api::ManagementApiClient,
 };
 
-/// Initializes optional error notifications, rejecting incomplete
+/// Initializes the optional managed API client, rejecting incomplete
 /// configuration.
 pub(crate) fn init(
     replicator_config: &ReplicatorConfig,
-) -> ReplicatorResult<Option<ErrorNotificationClient>> {
+) -> ReplicatorResult<Option<ManagementApiClient>> {
     let Some(supabase_config) = &replicator_config.supabase else {
         return Ok(None);
     };
@@ -34,7 +34,7 @@ pub(crate) fn init(
             })
         })?;
 
-    let client = ErrorNotificationClient::new(
+    let client = ManagementApiClient::new(
         api_url.clone(),
         api_key.clone(),
         supabase_config.project_ref.clone(),
@@ -53,12 +53,12 @@ mod tests {
     use secrecy::SecretString;
     use serde_json::json;
 
-    use crate::{error::ReplicatorError, init::error_notification::init};
+    use crate::{error::ReplicatorError, init::management_api::init};
 
     /// Only notification initialization requires credentials, not shared config
     /// validation.
     #[test]
-    fn validates_notification_credentials_only_when_initializing_notifications() {
+    fn validates_managed_credentials_only_when_initializing_the_client() {
         let mut config: ReplicatorConfig = serde_json::from_value(json!({
             "destination": {"ducklake": {
                 "catalog_url": "ducklake:postgres:host=example.com",

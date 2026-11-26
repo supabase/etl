@@ -453,6 +453,7 @@ async fn spawn_table_sync_worker<S, D>(
     let table_sync_worker = TableSyncWorker::new(
         ctx.pipeline_id.clone(),
         Arc::clone(&ctx.config),
+        ctx.source_network_failures.clone(),
         table_id,
         ctx.store.clone(),
         ctx.destination.clone(),

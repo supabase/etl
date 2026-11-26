@@ -319,6 +319,7 @@ async fn apply_retry_reselects_relation_snapshots_after_ambiguous_write() {
     let users_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
     let users_ready_notify =
         store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let source_network_failures = pipeline.subscribe_source_network_failures();
     pipeline.start().await.unwrap();
     users_sync_complete_notify.notified().await;
 
@@ -376,6 +377,7 @@ async fn apply_retry_reselects_relation_snapshots_after_ambiguous_write() {
         .is_some()
     );
     replayed_events_notify.notified().await;
+    assert!(!source_network_failures.has_changed().unwrap());
     pipeline.shutdown_and_wait().await.unwrap();
 
     let events = destination.get_events().await;
