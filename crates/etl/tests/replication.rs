@@ -1522,7 +1522,8 @@ async fn table_copy_stream_with_ctid_partition() {
         .await
         .unwrap();
 
-    let expected_rows = 100;
+    // Use enough heap pages to exercise all four CTID ranges.
+    let expected_rows = 4_096;
     database
         .insert_generate_series(test_table_name("table_1"), &["age"], 1, expected_rows, 1)
         .await
@@ -1541,13 +1542,12 @@ async fn table_copy_stream_with_ctid_partition() {
         .remove(&table_id)
         .unwrap();
     let partitions = estimate.plan_ctid_partitions(4).unwrap();
-    assert!(!partitions.is_empty(), "expected at least one partition for non-empty table");
-    assert!(partitions.len() <= 4, "planner should not exceed requested partitions");
+    assert_eq!(partitions.len(), 4);
 
     let snapshot_id = transaction.export_snapshot().await.unwrap();
     assert!(!snapshot_id.is_empty(), "snapshot id should not be empty");
 
-    let mut total_rows = 0;
+    let mut remaining_ages: HashSet<_> = (1..=expected_rows).collect();
     for planned_partition in partitions {
         let (partition, _) = planned_partition.into_parts();
         let mut child = transaction.fork_child().await.unwrap();
@@ -1564,16 +1564,18 @@ async fn table_copy_stream_with_ctid_partition() {
             .await
             .unwrap();
 
-        total_rows += count_stream_rows(stream).await;
+        pin!(stream);
+        while let Some(row) = stream.next().await {
+            let age = str::from_utf8(&row.unwrap()).unwrap().trim_end().parse::<i64>().unwrap();
+            assert!(remaining_ages.remove(&age), "unexpected or repeated age {age}");
+        }
+
         child_tx.commit().await.unwrap();
     }
 
     transaction.commit().await.unwrap();
 
-    assert_eq!(
-        total_rows, expected_rows as u64,
-        "total rows across all partitions should match inserted rows"
-    );
+    assert!(remaining_ages.is_empty(), "missing ages: {remaining_ages:?}");
 }
 
 /// Partitioned COPY quotes names without changing the row filter.
