@@ -7,8 +7,12 @@ use duckdb::{
             ArrayRef, BinaryArray, BooleanArray, Date32Array, Float32Array, Float64Array,
             Int16Array, Int32Array, Int64Array, StringArray, Time64MicrosecondArray,
             TimestampMicrosecondArray, UInt64Array,
+            builder::{
+                BooleanBuilder, Float32Builder, Float64Builder, Int16Builder, Int32Builder,
+                Int64Builder, ListBuilder, PrimitiveBuilder, UInt64Builder,
+            },
         },
-        datatypes::{DataType, Field, Schema, TimeUnit as ArrowTimeUnit},
+        datatypes::{ArrowPrimitiveType, DataType, Field, Schema, TimeUnit as ArrowTimeUnit},
         record_batch::RecordBatch,
     },
     types::{TimeUnit, Value},
@@ -52,17 +56,32 @@ pub(super) fn prepare_copy_rows(
     replicated_table_schema: &ReplicatedTableSchema,
     table_rows: Vec<TableRow>,
 ) -> EtlResult<PreparedRows> {
+    prepare_copy_rows_with_list_limit(replicated_table_schema, table_rows, i32::MAX as usize)
+}
+
+/// Prepares COPY rows with a maximum child offset for each Arrow list column.
+fn prepare_copy_rows_with_list_limit(
+    replicated_table_schema: &ReplicatedTableSchema,
+    table_rows: Vec<TableRow>,
+    list_limit: usize,
+) -> EtlResult<PreparedRows> {
     let Some(column_kinds) = arrow_column_kinds(replicated_table_schema) else {
         return Ok(prepare_rows(table_rows));
     };
 
-    if !copy_rows_match_arrow_kinds(&column_kinds, &table_rows) {
+    let mut child_capacities = if column_kinds.iter().any(|kind| kind.is_list()) {
+        vec![0; column_kinds.len()]
+    } else {
+        Vec::new()
+    };
+    if !copy_rows_match_arrow_kinds(&column_kinds, &table_rows, &mut child_capacities, list_limit) {
         return Ok(prepare_rows(table_rows));
     }
 
     Ok(PreparedRows::ArrowRecordBatch(copy_rows_to_arrow_record_batch(
         replicated_table_schema,
         column_kinds,
+        &child_capacities,
         table_rows,
     )?))
 }
@@ -99,9 +118,35 @@ enum ArrowColumnKind {
     TimestampMicrosecond,
     TimestampTzMicrosecond,
     Binary,
+    BoolArray,
+    I16Array,
+    I32Array,
+    I64Array,
+    U64Array,
+    F32Array,
+    F64Array,
+}
+
+/// Returns a list type with nullable elements, matching Arrow's list builder.
+fn list_data_type(child_type: DataType) -> DataType {
+    DataType::List(Arc::new(Field::new("item", child_type, true)))
 }
 
 impl ArrowColumnKind {
+    /// Returns whether this kind needs a child capacity.
+    fn is_list(self) -> bool {
+        matches!(
+            self,
+            Self::BoolArray
+                | Self::I16Array
+                | Self::I32Array
+                | Self::I64Array
+                | Self::U64Array
+                | Self::F32Array
+                | Self::F64Array
+        )
+    }
+
     /// Returns the Arrow type represented by this column kind.
     fn data_type(self) -> DataType {
         match self {
@@ -120,8 +165,23 @@ impl ArrowColumnKind {
                 DataType::Timestamp(ArrowTimeUnit::Microsecond, Some("+00:00".into()))
             }
             Self::Binary => DataType::Binary,
+            Self::BoolArray => list_data_type(DataType::Boolean),
+            Self::I16Array => list_data_type(DataType::Int16),
+            Self::I32Array => list_data_type(DataType::Int32),
+            Self::I64Array => list_data_type(DataType::Int64),
+            Self::U64Array => list_data_type(DataType::UInt64),
+            Self::F32Array => list_data_type(DataType::Float32),
+            Self::F64Array => list_data_type(DataType::Float64),
         }
     }
+}
+
+/// Reserves the validated parent and child counts for a numeric list.
+fn primitive_list<T: ArrowPrimitiveType>(
+    capacity: usize,
+    child_capacity: usize,
+) -> ListBuilder<PrimitiveBuilder<T>> {
+    ListBuilder::with_capacity(PrimitiveBuilder::with_capacity(child_capacity), capacity)
 }
 
 /// Mutable Arrow column data accumulated from copied rows.
@@ -139,11 +199,18 @@ enum ArrowColumnValues {
     TimestampMicrosecond(Vec<Option<i64>>),
     TimestampTzMicrosecond(Vec<Option<i64>>),
     Binary(Vec<Option<Vec<u8>>>),
+    BoolArray(ListBuilder<BooleanBuilder>),
+    I16Array(ListBuilder<Int16Builder>),
+    I32Array(ListBuilder<Int32Builder>),
+    I64Array(ListBuilder<Int64Builder>),
+    U64Array(ListBuilder<UInt64Builder>),
+    F32Array(ListBuilder<Float32Builder>),
+    F64Array(ListBuilder<Float64Builder>),
 }
 
 impl ArrowColumnValues {
     /// Creates an empty column value accumulator for one Arrow kind.
-    fn with_capacity(kind: ArrowColumnKind, capacity: usize) -> Self {
+    fn with_capacity(kind: ArrowColumnKind, capacity: usize, child_capacity: usize) -> Self {
         match kind {
             ArrowColumnKind::Bool => Self::Bool(Vec::with_capacity(capacity)),
             ArrowColumnKind::I16 => Self::I16(Vec::with_capacity(capacity)),
@@ -164,6 +231,16 @@ impl ArrowColumnValues {
                 Self::TimestampTzMicrosecond(Vec::with_capacity(capacity))
             }
             ArrowColumnKind::Binary => Self::Binary(Vec::with_capacity(capacity)),
+            ArrowColumnKind::BoolArray => Self::BoolArray(ListBuilder::with_capacity(
+                BooleanBuilder::with_capacity(child_capacity),
+                capacity,
+            )),
+            ArrowColumnKind::I16Array => Self::I16Array(primitive_list(capacity, child_capacity)),
+            ArrowColumnKind::I32Array => Self::I32Array(primitive_list(capacity, child_capacity)),
+            ArrowColumnKind::I64Array => Self::I64Array(primitive_list(capacity, child_capacity)),
+            ArrowColumnKind::U64Array => Self::U64Array(primitive_list(capacity, child_capacity)),
+            ArrowColumnKind::F32Array => Self::F32Array(primitive_list(capacity, child_capacity)),
+            ArrowColumnKind::F64Array => Self::F64Array(primitive_list(capacity, child_capacity)),
         }
     }
 
@@ -208,6 +285,48 @@ impl ArrowColumnValues {
             }
             (Self::Binary(values), Cell::Null) => values.push(None),
             (Self::Binary(values), Cell::Bytes(value)) => values.push(Some(value)),
+            (Self::BoolArray(builder), Cell::Null) => builder.append_null(),
+            (Self::BoolArray(builder), Cell::Array(ArrayCell::Bool(array))) => {
+                // BooleanBuilder::extend builds a temporary array for every
+                // list.
+                let values = builder.values();
+                for value in array {
+                    values.append_option(value);
+                }
+                builder.append(true);
+            }
+            (Self::I16Array(builder), Cell::Null) => builder.append_null(),
+            (Self::I16Array(builder), Cell::Array(ArrayCell::I16(array))) => {
+                builder.values().extend_from_iter_option(array);
+                builder.append(true);
+            }
+            (Self::I32Array(builder), Cell::Null) => builder.append_null(),
+            (Self::I32Array(builder), Cell::Array(ArrayCell::I32(array))) => {
+                builder.values().extend_from_iter_option(array);
+                builder.append(true);
+            }
+            (Self::I64Array(builder), Cell::Null) => builder.append_null(),
+            (Self::I64Array(builder), Cell::Array(ArrayCell::I64(array))) => {
+                builder.values().extend_from_iter_option(array);
+                builder.append(true);
+            }
+            (Self::U64Array(builder), Cell::Null) => builder.append_null(),
+            (Self::U64Array(builder), Cell::Array(ArrayCell::U32(array))) => {
+                builder
+                    .values()
+                    .extend_from_iter_option(array.into_iter().map(|value| value.map(u64::from)));
+                builder.append(true);
+            }
+            (Self::F32Array(builder), Cell::Null) => builder.append_null(),
+            (Self::F32Array(builder), Cell::Array(ArrayCell::F32(array))) => {
+                builder.values().extend_from_iter_option(array);
+                builder.append(true);
+            }
+            (Self::F64Array(builder), Cell::Null) => builder.append_null(),
+            (Self::F64Array(builder), Cell::Array(ArrayCell::F64(array))) => {
+                builder.values().extend_from_iter_option(array);
+                builder.append(true);
+            }
             _ => {
                 return Err(etl_error!(
                     ErrorKind::ConversionError,
@@ -240,6 +359,13 @@ impl ArrowColumnValues {
                 let values: Vec<Option<&[u8]>> = values.iter().map(Option::as_deref).collect();
                 Arc::new(BinaryArray::from_opt_vec(values))
             }
+            Self::BoolArray(mut builder) => Arc::new(builder.finish()),
+            Self::I16Array(mut builder) => Arc::new(builder.finish()),
+            Self::I32Array(mut builder) => Arc::new(builder.finish()),
+            Self::I64Array(mut builder) => Arc::new(builder.finish()),
+            Self::U64Array(mut builder) => Arc::new(builder.finish()),
+            Self::F32Array(mut builder) => Arc::new(builder.finish()),
+            Self::F64Array(mut builder) => Arc::new(builder.finish()),
         }
     }
 }
@@ -254,7 +380,16 @@ fn arrow_column_kinds(
 /// Returns the Arrow column kind for one replicated column.
 fn arrow_column_kind(column_schema: &ColumnSchema) -> Option<ArrowColumnKind> {
     if is_array_type(&column_schema.typ) {
-        return None;
+        return match column_schema.typ {
+            Type::BOOL_ARRAY => Some(ArrowColumnKind::BoolArray),
+            Type::INT2_ARRAY => Some(ArrowColumnKind::I16Array),
+            Type::INT4_ARRAY => Some(ArrowColumnKind::I32Array),
+            Type::INT8_ARRAY => Some(ArrowColumnKind::I64Array),
+            Type::OID_ARRAY => Some(ArrowColumnKind::U64Array),
+            Type::FLOAT4_ARRAY => Some(ArrowColumnKind::F32Array),
+            Type::FLOAT8_ARRAY => Some(ArrowColumnKind::F64Array),
+            _ => None,
+        };
     }
 
     match &column_schema.typ {
@@ -275,15 +410,51 @@ fn arrow_column_kind(column_schema: &ColumnSchema) -> Option<ArrowColumnKind> {
     }
 }
 
+/// Returns the child count for a compatible, non-NULL list cell.
+fn list_child_count(cell: &Cell, kind: ArrowColumnKind) -> Option<usize> {
+    match (kind, cell) {
+        (ArrowColumnKind::BoolArray, Cell::Array(ArrayCell::Bool(values))) => Some(values.len()),
+        (ArrowColumnKind::I16Array, Cell::Array(ArrayCell::I16(values))) => Some(values.len()),
+        (ArrowColumnKind::I32Array, Cell::Array(ArrayCell::I32(values))) => Some(values.len()),
+        (ArrowColumnKind::I64Array, Cell::Array(ArrayCell::I64(values))) => Some(values.len()),
+        (ArrowColumnKind::U64Array, Cell::Array(ArrayCell::U32(values))) => Some(values.len()),
+        (ArrowColumnKind::F32Array, Cell::Array(ArrayCell::F32(values))) => Some(values.len()),
+        (ArrowColumnKind::F64Array, Cell::Array(ArrayCell::F64(values))) => Some(values.len()),
+        _ => None,
+    }
+}
+
 /// Returns whether all copied rows can be represented by the Arrow kinds.
-fn copy_rows_match_arrow_kinds(column_kinds: &[ArrowColumnKind], table_rows: &[TableRow]) -> bool {
+/// A list schema supplies one child count per column.
+fn copy_rows_match_arrow_kinds(
+    column_kinds: &[ArrowColumnKind],
+    table_rows: &[TableRow],
+    child_capacities: &mut [usize],
+    list_limit: usize,
+) -> bool {
     table_rows.iter().all(|row| {
-        row.values().len() == column_kinds.len()
-            && row
-                .values()
-                .iter()
-                .zip(column_kinds.iter())
-                .all(|(cell, kind)| cell_matches_arrow_kind(cell, *kind))
+        if row.values().len() != column_kinds.len() {
+            return false;
+        }
+
+        let mut cells = row.values().iter().zip(column_kinds);
+        if child_capacities.is_empty() {
+            return cells.all(|(cell, kind)| cell_matches_arrow_kind(cell, *kind));
+        }
+
+        cells.zip(child_capacities.iter_mut()).all(|((cell, kind), capacity)| {
+            let Some(child_count) = list_child_count(cell, *kind) else {
+                return cell_matches_arrow_kind(cell, *kind);
+            };
+
+            // Child lengths never decrease, so every prefix of a validated list
+            // fits the signed 32-bit offset range used by ListBuilder.
+            let Some(total) = capacity.checked_add(child_count) else {
+                return false;
+            };
+            *capacity = total;
+            total <= list_limit
+        })
     })
 }
 
@@ -322,6 +493,7 @@ fn cell_matches_arrow_kind(cell: &Cell, kind: ArrowColumnKind) -> bool {
 fn copy_rows_to_arrow_record_batch(
     replicated_table_schema: &ReplicatedTableSchema,
     column_kinds: Vec<ArrowColumnKind>,
+    child_capacities: &[usize],
     table_rows: Vec<TableRow>,
 ) -> EtlResult<RecordBatch> {
     let row_count = table_rows.len();
@@ -340,7 +512,11 @@ fn copy_rows_to_arrow_record_batch(
     let mut column_values = column_kinds
         .iter()
         .copied()
-        .map(|kind| ArrowColumnValues::with_capacity(kind, row_count))
+        .enumerate()
+        .map(|(index, kind)| {
+            let child_capacity = child_capacities.get(index).copied().unwrap_or_default();
+            ArrowColumnValues::with_capacity(kind, row_count, child_capacity)
+        })
         .collect::<Vec<_>>();
 
     for row in table_rows {
@@ -658,6 +834,7 @@ fn array_cell_to_value(arr: ArrayCell) -> Value {
 #[cfg(test)]
 pub(super) mod tests {
     use chrono::NaiveDate;
+    use duckdb::arrow::array::{Array, ListArray};
     use etl::{
         data::{PgTime, Timestamp},
         schema::{
@@ -673,6 +850,37 @@ pub(super) mod tests {
             TableName::new("public".to_owned(), "users".to_owned()),
             columns,
         )))
+    }
+
+    fn copy_schema(columns: &[(&str, PgType, bool)]) -> ReplicatedTableSchema {
+        replicated_schema(
+            columns
+                .iter()
+                .enumerate()
+                .map(|(index, (name, typ, nullable))| {
+                    let ordinal = i32::try_from(index + 1).unwrap();
+                    ColumnSchema::new((*name).to_owned(), typ.clone(), -1, ordinal, *nullable)
+                })
+                .collect(),
+        )
+    }
+
+    fn arrow_batch(prepared: PreparedRows) -> RecordBatch {
+        let PreparedRows::ArrowRecordBatch(batch) = prepared else {
+            panic!("expected Arrow record batch");
+        };
+        batch
+    }
+
+    fn list_column(batch: &RecordBatch, index: usize) -> &ListArray {
+        batch.column(index).as_any().downcast_ref::<ListArray>().unwrap()
+    }
+
+    fn sql_literals(prepared: PreparedRows) -> Vec<String> {
+        let PreparedRows::SqlLiterals(rows) = prepared else {
+            panic!("expected SQL literal payload");
+        };
+        rows
     }
 
     #[test]
@@ -790,26 +998,261 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn prepare_copy_rows_falls_back_for_array_columns() {
-        let schema = replicated_schema(vec![
-            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false),
-            ColumnSchema::new("tags".to_owned(), PgType::INT4_ARRAY, -1, 2, true),
+    fn prepare_copy_rows_falls_back_for_unsupported_array_columns() {
+        let schema = copy_schema(&[
+            ("id", PgType::INT4, false),
+            ("items", PgType::INT4_ARRAY, true),
+            ("tags", PgType::TEXT_ARRAY, true),
         ]);
+
         let rows = vec![TableRow::new(vec![
             Cell::I32(1),
-            Cell::Array(ArrayCell::I32(vec![Some(1), None])),
+            Cell::Array(ArrayCell::I32(vec![Some(7), None])),
+            Cell::Array(ArrayCell::String(vec![Some("hello".to_owned()), None])),
         ])];
 
-        let prepared = prepare_copy_rows(&schema, rows).unwrap();
+        let expected = sql_literals(prepare_rows(rows.clone()));
+        let actual = sql_literals(prepare_copy_rows(&schema, rows).unwrap());
 
-        match prepared {
-            PreparedRows::SqlLiterals(rows) => {
-                assert_eq!(rows, vec!["(1, [1, NULL])"]);
-            }
-            PreparedRows::Appender(_) | PreparedRows::ArrowRecordBatch(_) => {
-                panic!("expected sql literal fallback")
-            }
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn prepare_copy_rows_uses_arrow_for_int4_arrays() {
+        let schema =
+            copy_schema(&[("id", PgType::INT4, false), ("values", PgType::INT4_ARRAY, true)]);
+
+        let rows = vec![
+            TableRow::new(vec![
+                Cell::I32(1),
+                Cell::Array(ArrayCell::I32(vec![Some(10), Some(20), Some(30)])),
+            ]),
+            TableRow::new(vec![Cell::I32(2), Cell::Array(ArrayCell::I32(vec![Some(40), None]))]),
+            TableRow::new(vec![Cell::I32(3), Cell::Array(ArrayCell::I32(vec![]))]),
+            TableRow::new(vec![Cell::I32(4), Cell::Null]),
+            TableRow::new(vec![Cell::I32(5), Cell::Array(ArrayCell::I32(vec![None, None]))]),
+            TableRow::new(vec![
+                Cell::I32(6),
+                Cell::Array(ArrayCell::I32(vec![Some(i32::MIN), Some(i32::MAX)])),
+            ]),
+        ];
+
+        let batch = arrow_batch(prepare_copy_rows(&schema, rows).unwrap());
+
+        assert_eq!(batch.num_rows(), 6);
+        assert_eq!(batch.num_columns(), 2);
+
+        let list = list_column(&batch, 1);
+
+        assert_eq!(list.value_offsets(), &[0, 3, 5, 5, 5, 7, 9]);
+
+        assert_eq!(list.null_count(), 1);
+
+        assert_eq!((0..list.len()).find(|&index| list.is_null(index)), Some(3));
+
+        let values = list.values().as_any().downcast_ref::<Int32Array>().unwrap();
+
+        let expected = Int32Array::from(vec![
+            Some(10),
+            Some(20),
+            Some(30),
+            Some(40),
+            None,
+            None,
+            None,
+            Some(i32::MIN),
+            Some(i32::MAX),
+        ]);
+
+        assert_eq!(values, &expected);
+    }
+
+    #[test]
+    fn primitive_array_copy_tracks_independent_offsets_and_validity() {
+        let schema = copy_schema(&[
+            ("id", PgType::INT4, false),
+            ("left", PgType::BOOL_ARRAY, true),
+            ("right", PgType::INT4_ARRAY, false),
+        ]);
+        let rows = vec![
+            TableRow::new(vec![
+                Cell::I32(1),
+                Cell::Null,
+                Cell::Array(ArrayCell::I32(vec![Some(i32::MIN), Some(i32::MAX)])),
+            ]),
+            TableRow::new(vec![
+                Cell::I32(2),
+                Cell::Array(ArrayCell::Bool(Vec::new())),
+                Cell::Array(ArrayCell::I32(Vec::new())),
+            ]),
+            TableRow::new(vec![
+                Cell::I32(3),
+                Cell::Array(ArrayCell::Bool(vec![None])),
+                Cell::Array(ArrayCell::I32(vec![Some(0)])),
+            ]),
+        ];
+
+        let kinds = arrow_column_kinds(&schema).unwrap();
+        let mut child_capacities = [0; 3];
+        assert!(copy_rows_match_arrow_kinds(&kinds, &rows, &mut child_capacities, 3));
+        assert_eq!(child_capacities, [0, 1, 3]);
+
+        // Three child values is exactly the limit for the right column. Each
+        // column has its own limit, so the combined four child values fit.
+        let batch = arrow_batch(prepare_copy_rows_with_list_limit(&schema, rows, 3).unwrap());
+        let left = list_column(&batch, 1);
+        let right = list_column(&batch, 2);
+
+        assert_eq!(left.value_offsets(), &[0, 0, 0, 1]);
+        assert!(left.is_null(0));
+        assert!(left.is_valid(1));
+        assert!(left.values().is_null(0));
+        assert_eq!(right.value_offsets(), &[0, 2, 2, 3]);
+        assert!(right.nulls().is_none());
+        assert!(right.values().nulls().is_none());
+        assert_eq!(
+            right.values().as_any().downcast_ref::<Int32Array>().unwrap().values(),
+            &[i32::MIN, i32::MAX, 0]
+        );
+    }
+
+    #[test]
+    fn primitive_array_copy_accepts_empty_children_and_checks_column_nullability() {
+        let rows = vec![
+            TableRow::new(vec![
+                Cell::Array(ArrayCell::I32(Vec::new())),
+                Cell::Array(ArrayCell::Bool(Vec::new())),
+            ]),
+            TableRow::new(vec![Cell::Null, Cell::Null]),
+        ];
+        let schema = |nullable| {
+            copy_schema(&[
+                ("items", PgType::INT4_ARRAY, nullable),
+                ("flags", PgType::BOOL_ARRAY, true),
+            ])
+        };
+
+        let batch = arrow_batch(prepare_copy_rows(&schema(true), rows.clone()).unwrap());
+
+        for column in batch.columns() {
+            let list = column.as_any().downcast_ref::<ListArray>().unwrap();
+            assert_eq!(list.value_offsets(), &[0, 0, 0]);
+            assert!(list.is_valid(0));
+            assert!(list.is_null(1));
+            assert!(list.values().is_empty());
+            assert!(list.values().nulls().is_none());
         }
+        assert!(prepare_copy_rows(&schema(false), rows).is_err());
+    }
+
+    #[test]
+    fn primitive_array_copy_falls_back_before_consuming_rows_on_offset_overflow() {
+        let schema = copy_schema(&[
+            ("id", PgType::INT4, false),
+            ("items", PgType::INT4_ARRAY, true),
+            ("oids", PgType::OID_ARRAY, true),
+        ]);
+        let rows = vec![
+            TableRow::new(vec![
+                Cell::I32(1),
+                Cell::Array(ArrayCell::I32(vec![Some(7), None])),
+                Cell::Array(ArrayCell::U32(vec![Some(0), None])),
+            ]),
+            TableRow::new(vec![
+                Cell::I32(2),
+                Cell::Null,
+                Cell::Array(ArrayCell::U32(vec![Some(u32::MAX)])),
+            ]),
+        ];
+        let expected = sql_literals(prepare_rows(rows.clone()));
+
+        let actual = sql_literals(prepare_copy_rows_with_list_limit(&schema, rows, 2).unwrap());
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn prepare_copy_rows_uses_arrow_for_all_primitive_array_columns() {
+        let arrays = [
+            (
+                PgType::BOOL_ARRAY,
+                DataType::Boolean,
+                ArrayCell::Bool(vec![Some(false), None, Some(true)]),
+            ),
+            (
+                PgType::INT2_ARRAY,
+                DataType::Int16,
+                ArrayCell::I16(vec![Some(i16::MIN), None, Some(i16::MAX)]),
+            ),
+            (
+                PgType::INT4_ARRAY,
+                DataType::Int32,
+                ArrayCell::I32(vec![Some(i32::MIN), None, Some(i32::MAX)]),
+            ),
+            (
+                PgType::INT8_ARRAY,
+                DataType::Int64,
+                ArrayCell::I64(vec![Some(i64::MIN), None, Some(i64::MAX)]),
+            ),
+            (
+                PgType::OID_ARRAY,
+                DataType::UInt64,
+                ArrayCell::U32(vec![Some(0), None, Some(u32::MAX)]),
+            ),
+            (
+                PgType::FLOAT4_ARRAY,
+                DataType::Float32,
+                ArrayCell::F32(vec![Some(1.5), None, Some(-1.5)]),
+            ),
+            (
+                PgType::FLOAT8_ARRAY,
+                DataType::Float64,
+                ArrayCell::F64(vec![Some(0.5), None, Some(-0.5)]),
+            ),
+        ];
+        let columns =
+            std::iter::once(ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false))
+                .chain(arrays.iter().enumerate().map(|(index, (typ, _, _))| {
+                    ColumnSchema::new(
+                        format!("v{index}"),
+                        typ.clone(),
+                        -1,
+                        index as i32 + 2,
+                        index % 2 == 0,
+                    )
+                }))
+                .collect();
+        let row = std::iter::once(Cell::I32(1))
+            .chain(arrays.iter().map(|(_, _, array)| Cell::Array(array.clone())))
+            .collect();
+
+        let batch = arrow_batch(
+            prepare_copy_rows(&replicated_schema(columns), vec![TableRow::new(row)]).unwrap(),
+        );
+        let schema = batch.schema();
+
+        for (index, (typ, data_type, _)) in arrays.iter().enumerate() {
+            let column = schema.field(index + 1);
+            let DataType::List(child) = column.data_type() else {
+                panic!("expected list for {typ}");
+            };
+            assert_eq!(column.is_nullable(), index % 2 == 0);
+            assert_eq!(child.data_type(), data_type);
+            assert!(child.is_nullable());
+            let list = list_column(&batch, index + 1);
+            assert_eq!(list.value_offsets(), &[0, 3]);
+            assert!(list.values().is_null(1));
+        }
+        let oids = list_column(&batch, 5);
+        assert_eq!(
+            oids.values()
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![Some(0), None, Some(u64::from(u32::MAX))],
+        );
     }
 
     #[test]
@@ -834,6 +1277,7 @@ pub(super) mod tests {
             }
         }
     }
+
     #[test]
     fn special_temporal_values_use_sql_literals_for_copy_and_cdc() {
         let schema = replicated_schema(vec![
@@ -1488,6 +1932,24 @@ pub(super) mod tests {
                 ),
                 EncoderPath::Copy => prepare_copy_rows(schema, rows).unwrap(),
             };
+            if matches!(path, EncoderPath::Copy) && is_array_type(&case.typ) {
+                let expected_arrow = matches!(
+                    case.typ,
+                    PgType::BOOL_ARRAY
+                        | PgType::INT2_ARRAY
+                        | PgType::INT4_ARRAY
+                        | PgType::INT8_ARRAY
+                        | PgType::OID_ARRAY
+                        | PgType::FLOAT4_ARRAY
+                        | PgType::FLOAT8_ARRAY
+                );
+                prop_assert_eq!(
+                    matches!(prepared_rows, PreparedRows::ArrowRecordBatch(_)),
+                    expected_arrow,
+                    "unexpected COPY payload for {:?}",
+                    case.typ
+                );
+            }
             load_prepared_rows(conn, &table_name, &prepared_rows).map_err(|error| {
                 TestCaseError::fail(format!("{path:?} write of {:?} failed: {error}", case.typ))
             })?;
@@ -1584,6 +2046,96 @@ pub(super) mod tests {
                 ]))],
             };
             check_encoders_agree(&case).unwrap();
+        }
+
+        fn assert_array_encoders_agree(typ: PgType, cells: Vec<Cell>) {
+            check_encoders_agree(&EncoderCase { typ, modifier: -1, cells }).unwrap();
+        }
+
+        #[test]
+        fn floating_point_array_copy_preserves_bits() {
+            let cases = [
+                (
+                    PgType::FLOAT4_ARRAY,
+                    ArrayCell::F32(vec![
+                        Some(0.0),
+                        Some(-0.0),
+                        Some(f32::INFINITY),
+                        Some(f32::NEG_INFINITY),
+                        Some(f32::from_bits(0x7fc0_0001)),
+                        Some(f32::from_bits(1)),
+                        Some(-f32::from_bits(1)),
+                        Some(f32::MIN_POSITIVE),
+                        Some(f32::MAX),
+                        None,
+                        Some(f32::MIN),
+                        Some(0.1),
+                    ]),
+                ),
+                (
+                    PgType::FLOAT8_ARRAY,
+                    ArrayCell::F64(vec![
+                        Some(0.0),
+                        Some(-0.0),
+                        Some(f64::INFINITY),
+                        Some(f64::NEG_INFINITY),
+                        Some(f64::from_bits(0x7ff8_0000_0000_0001)),
+                        Some(f64::from_bits(1)),
+                        Some(-f64::from_bits(1)),
+                        Some(f64::MIN_POSITIVE),
+                        Some(f64::MAX),
+                        None,
+                        Some(f64::MIN),
+                        Some(0.1 + 0.2),
+                    ]),
+                ),
+            ];
+
+            for (typ, values) in cases {
+                assert_array_encoders_agree(typ, vec![Cell::Array(values), Cell::Null]);
+            }
+        }
+
+        #[test]
+        fn bool_array_copy_preserves_values_and_validity_across_bitmap_bytes() {
+            assert_array_encoders_agree(
+                PgType::BOOL_ARRAY,
+                vec![
+                    Cell::Array(ArrayCell::Bool(vec![Some(true), None, Some(false)])),
+                    Cell::Null,
+                    Cell::Array(ArrayCell::Bool(vec![])),
+                    Cell::Array(ArrayCell::Bool(vec![
+                        None,
+                        Some(false),
+                        Some(true),
+                        Some(true),
+                        None,
+                        Some(true),
+                        Some(false),
+                        None,
+                        Some(true),
+                        None,
+                        Some(false),
+                        Some(true),
+                    ])),
+                    Cell::Array(ArrayCell::Bool(vec![None, None])),
+                ],
+            );
+        }
+
+        #[test]
+        fn int4_array_copy_preserves_values() {
+            assert_array_encoders_agree(
+                PgType::INT4_ARRAY,
+                vec![
+                    Cell::Array(ArrayCell::I32(vec![Some(1), Some(2), Some(3)])),
+                    Cell::Array(ArrayCell::I32(vec![])),
+                    Cell::Null,
+                    Cell::Array(ArrayCell::I32(vec![Some(1), None, Some(3)])),
+                    Cell::Array(ArrayCell::I32(vec![None, None])),
+                    Cell::Array(ArrayCell::I32(vec![Some(i32::MIN), Some(i32::MAX)])),
+                ],
+            );
         }
     }
 }
