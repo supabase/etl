@@ -125,17 +125,6 @@ pub(crate) fn ensure_finite_temporals(cells: &[Cell]) -> EtlResult<()> {
     if finite { Ok(()) } else { Err(infinite_temporal_error()) }
 }
 
-/// Converts a [`NaiveDate`] to a ClickHouse `Date32` day offset (signed days
-/// from 1970-01-01).
-fn date_to_date32_days(d: NaiveDate) -> i32 {
-    i32::try_from(d.signed_duration_since(unix_epoch()).num_days())
-        .expect("chrono date offset should fit in the Date32 wire integer")
-}
-
-fn unix_epoch() -> NaiveDate {
-    NaiveDate::from_ymd_opt(1970, 1, 1).expect("valid date")
-}
-
 /// Encodes `v` as LEB128 for ClickHouse string/array lengths.
 pub(crate) fn rb_varint(mut v: usize, buf: &mut Vec<u8>) {
     loop {
@@ -187,7 +176,7 @@ fn rb_date(value: &Date<NaiveDate>, buf: &mut Vec<u8>) -> EtlResult<()> {
     let Date::Value(date) = value else {
         return Err(infinite_temporal_error());
     };
-    buf.extend_from_slice(&date_to_date32_days(*date).to_le_bytes());
+    buf.extend_from_slice(&date.to_epoch_days().to_le_bytes());
 
     Ok(())
 }
@@ -493,12 +482,12 @@ mod tests {
 
     #[test]
     fn dates_outside_the_clickhouse_domain_are_not_validated() {
+        let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
         for date in [
             NaiveDate::from_ymd_opt(1899, 12, 31).unwrap(),
             NaiveDate::from_ymd_opt(2300, 1, 1).unwrap(),
         ] {
-            let expected =
-                i32::try_from(date.signed_duration_since(unix_epoch()).num_days()).unwrap();
+            let expected = i32::try_from(date.signed_duration_since(epoch).num_days()).unwrap();
 
             let bytes = encode(&Cell::Date(Date::Value(date)), ColumnEncoding::Required).unwrap();
 
