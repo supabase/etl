@@ -171,6 +171,29 @@ impl TruncateAttemptIdentity<'_> {
     }
 }
 
+/// Accepted-but-not-durable streaming work inside one durability scope.
+struct PendingWindow {
+    /// Accepted row batches.
+    row_batches: usize,
+    /// Accepted compressed bytes.
+    bytes: usize,
+}
+
+impl PendingWindow {
+    /// Returns whether the window has reached its configured limit.
+    fn limits_reached(&self) -> bool {
+        self.row_batches >= STREAMING_PENDING_MAX_ROW_BATCHES
+            || self.bytes >= STREAMING_PENDING_MAX_BYTES
+    }
+
+    /// Returns whether adding one row batch would exceed a nonempty window.
+    fn would_exceed_limits(&self, batch_bytes: usize) -> bool {
+        self.row_batches > 0
+            && (self.limits_reached()
+                || self.bytes.saturating_add(batch_bytes) > STREAMING_PENDING_MAX_BYTES)
+    }
+}
+
 /// Global accepted-but-not-durable Snowflake streaming state.
 #[derive(Debug, Default)]
 struct PendingDurabilityState {
@@ -204,26 +227,24 @@ impl PendingDurabilityState {
         Ok(())
     }
 
-    /// Returns whether the pending window has reached its configured limit.
-    fn limits_reached(&self) -> bool {
-        self.row_batches >= STREAMING_PENDING_MAX_ROW_BATCHES
-            || self.bytes >= STREAMING_PENDING_MAX_BYTES
+    /// Sums the pending work of tables matched by `include`.
+    ///
+    /// Every target counts at least one row batch, so only an empty window
+    /// has zero row batches.
+    fn window(&self, include: impl Fn(TableId) -> bool) -> PendingWindow {
+        self.targets.iter().filter(|(table_id, _)| include(**table_id)).fold(
+            PendingWindow { row_batches: 0, bytes: 0 },
+            |window, (_, target)| PendingWindow {
+                row_batches: window.row_batches.saturating_add(target.row_batches),
+                bytes: window.bytes.saturating_add(target.bytes),
+            },
+        )
     }
 
-    /// Returns whether adding one row batch would exceed the pending window.
-    fn would_exceed_limits(&self, batch_bytes: usize) -> bool {
-        if self.is_empty() {
-            return false;
-        }
-
-        self.limits_reached()
-            || self.row_batches.saturating_add(1) > STREAMING_PENDING_MAX_ROW_BATCHES
-            || self.bytes.saturating_add(batch_bytes) > STREAMING_PENDING_MAX_BYTES
-    }
-
-    /// Returns whether there is no accepted-but-not-durable streaming work.
-    fn is_empty(&self) -> bool {
-        self.targets.is_empty()
+    /// Returns whether no table matched by `include` has accepted-but-not-
+    /// durable work.
+    fn is_empty(&self, include: impl Fn(TableId) -> bool) -> bool {
+        !self.targets.keys().any(|table_id| include(*table_id))
     }
 
     /// Returns whether one table still has accepted-but-not-durable work.
@@ -231,9 +252,19 @@ impl PendingDurabilityState {
         self.targets.contains_key(&table_id)
     }
 
-    /// Clones the current pending targets for status polling.
-    fn targets(&self) -> Vec<(TableId, PendingDurabilityTarget)> {
-        self.targets.iter().map(|(table_id, target)| (*table_id, target.clone())).collect()
+    /// Clones the targets of tables matched by `include`, ordered by table.
+    fn targets(
+        &self,
+        include: impl Fn(TableId) -> bool,
+    ) -> Vec<(TableId, PendingDurabilityTarget)> {
+        let mut targets: Vec<_> = self
+            .targets
+            .iter()
+            .filter(|(table_id, _)| include(**table_id))
+            .map(|(table_id, target)| (*table_id, target.clone()))
+            .collect();
+        targets.sort_by_key(|(table_id, _)| *table_id);
+        targets
     }
 
     /// Discards one table's pending target and updates aggregate accounting.
@@ -258,17 +289,13 @@ impl PendingDurabilityState {
         Ok(())
     }
 
-    /// Removes targets whose current offset is covered by the proven target.
-    fn clear_committed(&mut self, committed: &[(TableId, OffsetToken)]) -> Result<()> {
-        for (table_id, committed_target) in committed {
-            let should_clear = self
-                .targets
-                .get(table_id)
-                .is_some_and(|target| &target.target_offset <= committed_target);
-
-            if should_clear {
-                self.discard(*table_id)?;
-            }
+    /// Removes one table's target when `committed` covers its current offset.
+    ///
+    /// A target that advanced after the committed offset was observed stays
+    /// pending.
+    fn clear_committed(&mut self, table_id: TableId, committed: &OffsetToken) -> Result<()> {
+        if self.targets.get(&table_id).is_some_and(|target| &target.target_offset <= committed) {
+            self.discard(table_id)?;
         }
 
         Ok(())
@@ -738,7 +765,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         truncate_offset: &OffsetToken,
     ) -> Result<()> {
         loop {
-            self.wait_for_pending_durability().await?;
+            self.wait_for_table_durability(table_id).await?;
             let mut guard = self.get_channel(table_id).await?.lock_owned().await;
 
             // A sender holds this channel lock until it records any accepted
@@ -864,7 +891,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
     ///
     /// Ref: <https://docs.snowflake.com/en/user-guide/snowpipe-streaming/snowpipe-streaming-classic-recommendation>
     pub async fn refresh_table(&self, table_id: &TableId, columns: &[ColumnSchema]) -> Result<()> {
-        self.wait_for_pending_durability().await?;
+        self.wait_for_table_durability(*table_id).await?;
         let channel = self.get_channel(*table_id).await?;
         let mut channel = channel.lock().await;
         let table_name = channel.table_name().to_owned();
@@ -884,10 +911,24 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
 
     /// Sends one streaming request and records its accepted-but-not-durable
     /// target.
-    pub async fn send_streaming_batch(&self, table_id: TableId, batch: RowBatch) -> Result<()> {
+    ///
+    /// When the batch would overflow the pending window of tables matched by
+    /// `include_in_wait`, that window is made durable first.
+    pub(super) async fn send_streaming_batch(
+        &self,
+        table_id: TableId,
+        batch: RowBatch,
+        include_in_wait: impl Fn(TableId) -> bool,
+    ) -> Result<()> {
         let channel = self.get_channel(table_id).await?;
-        if self.pending_durability.lock().await.would_exceed_limits(batch.size()) {
-            self.wait_for_pending_durability().await?;
+        if self
+            .pending_durability
+            .lock()
+            .await
+            .window(&include_in_wait)
+            .would_exceed_limits(batch.size())
+        {
+            self.wait_for_pending_durability(&include_in_wait).await?;
         }
 
         let mut channel = channel.lock().await;
@@ -936,22 +977,53 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         Ok(channel.is_offset_committed(offset))
     }
 
-    /// Returns whether pending streaming work has reached the durability wait
-    /// threshold.
-    pub async fn pending_durability_limits_reached(&self) -> bool {
-        self.pending_durability.lock().await.limits_reached()
+    /// Returns whether pending streaming work of tables matched by `include`
+    /// has reached the durability wait threshold.
+    pub(super) async fn pending_durability_limits_reached(
+        &self,
+        include: impl Fn(TableId) -> bool,
+    ) -> bool {
+        self.pending_durability.lock().await.window(include).limits_reached()
     }
 
-    /// Returns whether there is no accepted-but-not-durable streaming work.
-    pub async fn pending_durability_is_empty(&self) -> bool {
-        self.pending_durability.lock().await.is_empty()
+    /// Returns whether no table matched by `include` has accepted-but-not-
+    /// durable streaming work.
+    pub(super) async fn pending_durability_is_empty(
+        &self,
+        include: impl Fn(TableId) -> bool,
+    ) -> bool {
+        self.pending_durability.lock().await.is_empty(include)
     }
 
-    /// Wait until all accepted streaming rows have committed.
-    pub async fn wait_for_pending_durability(&self) -> Result<()> {
+    /// Discards the pending streaming targets of `table_ids`.
+    pub(super) async fn discard_pending_durability(
+        &self,
+        table_ids: impl IntoIterator<Item = TableId>,
+    ) -> Result<()> {
+        let mut pending = self.pending_durability.lock().await;
+        for table_id in table_ids {
+            pending.discard(table_id)?;
+        }
+        pending.observe_metrics();
+
+        Ok(())
+    }
+
+    /// Waits until the streaming rows of `table_id` accepted before this call
+    /// have committed.
+    pub(super) async fn wait_for_table_durability(&self, table_id: TableId) -> Result<()> {
+        self.wait_for_pending_durability(|id| id == table_id).await
+    }
+
+    /// Waits until the streaming rows of tables matched by `include` accepted
+    /// before this call have committed.
+    pub(super) async fn wait_for_pending_durability(
+        &self,
+        include: impl Fn(TableId) -> bool,
+    ) -> Result<()> {
         let started = Instant::now();
         let mut observed_pending = false;
-        let result = self.wait_for_pending_durability_inner(&mut observed_pending).await;
+        let result = self.wait_for_pending_durability_inner(include, &mut observed_pending).await;
         if observed_pending {
             histogram!(ETL_SNOWFLAKE_STREAMING_DURABILITY_WAIT_SECONDS)
                 .record(started.elapsed().as_secs_f64());
@@ -963,31 +1035,36 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         result
     }
 
-    async fn wait_for_pending_durability_inner(&self, observed_pending: &mut bool) -> Result<()> {
+    async fn wait_for_pending_durability_inner(
+        &self,
+        include: impl Fn(TableId) -> bool,
+        observed_pending: &mut bool,
+    ) -> Result<()> {
+        // The barrier covers only work accepted before it began, so writes
+        // that land while it polls cannot extend it.
+        let mut remaining = self.pending_durability.lock().await.targets(include);
+        if remaining.is_empty() {
+            return Ok(());
+        }
+        *observed_pending = true;
+
         let deadline = Instant::now() + DEFAULT_COMMIT_WAIT_TIMEOUT;
 
         loop {
-            let targets = self.pending_durability.lock().await.targets();
-            if targets.is_empty() {
-                return Ok(());
-            }
-            *observed_pending = true;
-
-            let mut committed = Vec::new();
-            for (table_id, target) in targets {
+            let mut still_pending = Vec::new();
+            for (table_id, target) in remaining {
                 let channel = self.get_channel(table_id).await?;
                 if channel.lock().await.check_durability(&target, deadline).await? {
-                    committed.push((table_id, target.target_offset.clone()));
+                    let mut pending = self.pending_durability.lock().await;
+                    pending.clear_committed(table_id, &target.target_offset)?;
+                    pending.observe_metrics();
+                } else {
+                    still_pending.push((table_id, target));
                 }
             }
 
-            {
-                let mut pending = self.pending_durability.lock().await;
-                pending.clear_committed(&committed)?;
-                pending.observe_metrics();
-                if pending.is_empty() {
-                    return Ok(());
-                }
+            if still_pending.is_empty() {
+                return Ok(());
             }
 
             if Instant::now() >= deadline {
@@ -996,6 +1073,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
                 ));
             }
 
+            remaining = still_pending;
             sleep(DEFAULT_COMMIT_POLL_INTERVAL).await;
         }
     }
@@ -1026,6 +1104,7 @@ mod tests {
         pin::Pin,
         sync::atomic::{AtomicBool, AtomicUsize, Ordering},
         task::{Context, Poll, Waker},
+        time::Duration,
     };
 
     use etl::{
@@ -1035,14 +1114,17 @@ mod tests {
             WriteEventsDurability,
         },
         error::ErrorKind,
+        etl_error,
         event::{DeleteEvent, Event, InsertEvent, RelationEvent, TruncateEvent, UpdateEvent},
         schema::{
-            IdentityMask, ReplicatedTableSchema, ReplicationMask, TableName, TableSchema, Type,
+            IdentityMask, PgLsn, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableName,
+            TableSchema, Type,
         },
-        store::StateStore,
+        store::{SchemaStore, StateStore, TableRetryPolicy, TableState},
         test_utils::{destination::write_events, notifying_store::NotifyingStore},
     };
     use serde_json::{Value, json};
+    use tokio::time::timeout;
 
     use super::*;
     use crate::snowflake::{
@@ -1118,6 +1200,17 @@ mod tests {
         rows: Vec<Value>,
     }
 
+    /// One accepted batch waiting to become visible in simulated channel
+    /// status.
+    struct DelayedCommit {
+        /// Instant at which the batch becomes committed.
+        ready_at: Instant,
+        /// End offset reported once committed.
+        offset: OffsetToken,
+        /// Row count added once committed.
+        rows: u64,
+    }
+
     /// In-memory Snowpipe transport that commits accepted requests immediately.
     #[derive(Default)]
     struct RecordingStreamClient {
@@ -1160,6 +1253,11 @@ mod tests {
         release_status: tokio::sync::Notify,
         /// Signals that another append has committed in the transport model.
         appended: tokio::sync::Notify,
+        /// Optional simulated Snowflake commit lag before appended rows appear
+        /// in `channel_status`.
+        commit_delay: std::sync::Mutex<Option<Duration>>,
+        /// Delayed commits queued per table when `commit_delay` is set.
+        delayed_commits: std::sync::Mutex<HashMap<String, Vec<DelayedCommit>>>,
     }
 
     impl RecordingStreamClient {
@@ -1272,9 +1370,21 @@ mod tests {
             assert_eq!(Some(continuation_token), continuations.get(table).map(String::as_str));
             let continuation_token = format!("append-{append_id}");
             continuations.insert(table.to_owned(), continuation_token.clone());
-            status.rows_inserted += u64::try_from(batch.row_count()).unwrap();
-            status.rows_parsed = status.rows_inserted;
-            status.offset_token = Some(batch.end_offset().clone());
+            let added_rows = u64::try_from(batch.row_count()).unwrap();
+            let commit_delay = *self.commit_delay.lock().unwrap();
+            if let Some(delay) = commit_delay {
+                self.delayed_commits.lock().unwrap().entry(table.to_owned()).or_default().push(
+                    DelayedCommit {
+                        ready_at: Instant::now() + delay,
+                        offset: batch.end_offset().clone(),
+                        rows: added_rows,
+                    },
+                );
+            } else {
+                status.rows_inserted += added_rows;
+                status.rows_parsed = status.rows_inserted;
+                status.offset_token = Some(batch.end_offset().clone());
+            }
             self.appended.notify_one();
             if self.lose_next_append_response.swap(false, Ordering::SeqCst) {
                 return Err(Error::HttpStatus {
@@ -1297,6 +1407,22 @@ mod tests {
             if self.hold_next_status.swap(false, Ordering::SeqCst) || blocked {
                 self.status_entered.notify_one();
                 self.release_status.notified().await;
+            }
+            if let Some(queue) = self.delayed_commits.lock().unwrap().get_mut(table) {
+                let now = Instant::now();
+                let mut statuses = self.statuses.lock().unwrap();
+                let status = statuses.get_mut(table).unwrap();
+                let mut remaining = Vec::new();
+                for commit in queue.drain(..) {
+                    if commit.ready_at <= now {
+                        status.rows_inserted += commit.rows;
+                        status.rows_parsed = status.rows_inserted;
+                        status.offset_token = Some(commit.offset);
+                    } else {
+                        remaining.push(commit);
+                    }
+                }
+                *queue = remaining;
             }
             if self.fail_next_status.swap(false, Ordering::SeqCst)
                 || self.fail_recovery_request(&self.status_failures_remaining)
@@ -1350,7 +1476,7 @@ mod tests {
         client.prepared_views.write().await.insert(schema.id());
     }
 
-    /// Builds applied table metadata and warmed channels without SQL or
+    /// Builds applied table metadata, warmed channels, and store without SQL or
     /// credentials.
     async fn recording_destination(
         tables: u32,
@@ -1360,6 +1486,7 @@ mod tests {
         Arc<RecordingStreamClient>,
         Vec<ReplicatedTableSchema>,
         Client<UnusedTokenProvider, RecordingStreamClient>,
+        NotifyingStore,
     ) {
         let stream = Arc::new(RecordingStreamClient { fail_append, ..Default::default() });
         let client = recording_client(Arc::clone(&stream));
@@ -1381,10 +1508,11 @@ mod tests {
                 ReplicationMask::all(&table),
                 IdentityMask::from_bytes(vec![1, 0]),
             );
+            store.store_table_schema((*table).clone()).await.unwrap();
             prepare_recording_table(&client, &store, &schema, name).await;
             schemas.push(schema);
         }
-        (Destination::new(client.clone(), store), stream, schemas, client)
+        (Destination::new(client.clone(), store.clone()), stream, schemas, client, store)
     }
 
     /// Creates a small row that leaves its table's compressor open until
@@ -1404,7 +1532,7 @@ mod tests {
     async fn cdc_replay_reconciles_before_encoding() {
         for fail_status in [false, true] {
             for operation in ["insert", "update", "delete"] {
-                let (destination, stream, schemas, _) = recording_destination(1, false).await;
+                let (destination, stream, schemas, _, _) = recording_destination(1, false).await;
                 let schema = &schemas[0];
                 let events: Vec<_> = (1..=3)
                     .map(|ordinal| match operation {
@@ -1475,7 +1603,7 @@ mod tests {
     /// writers while another channel's status request is blocked or fails.
     #[tokio::test]
     async fn replay_recovery_is_per_channel() {
-        let (destination, stream, schemas, client) = recording_destination(2, false).await;
+        let (destination, stream, schemas, client, _) = recording_destination(2, false).await;
         for schema in &schemas {
             write_events(
                 &destination,
@@ -1550,7 +1678,7 @@ mod tests {
     #[tokio::test]
     async fn shutdown_joins_replay_recovery() {
         for opening in [false, true] {
-            let (destination, stream, schemas, client) = recording_destination(1, false).await;
+            let (destination, stream, schemas, client, _) = recording_destination(1, false).await;
             let schema = &schemas[0];
             write_events(
                 &destination,
@@ -1615,7 +1743,7 @@ mod tests {
                 DestinationWriteStatus::Durable,
             );
             restarted.shutdown().await.unwrap();
-            assert!(restarted_client.pending_durability_is_empty().await);
+            assert!(restarted_client.pending_durability_is_empty(|_| true).await);
             assert_eq!(stream.open_reads.load(Ordering::SeqCst), if opening { 3 } else { 2 });
             let requests = stream.requests.lock().unwrap();
             let offsets: Vec<_> = requests
@@ -1637,7 +1765,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn shutdown_joins_replay_backoff() {
         for opening in [false, true] {
-            let (destination, stream, schemas, client) = recording_destination(1, false).await;
+            let (destination, stream, schemas, client, _) = recording_destination(1, false).await;
             let schema = &schemas[0];
             write_events(
                 &destination,
@@ -1690,21 +1818,48 @@ mod tests {
         }
     }
 
-    /// Real apply workers use this adapter only to bypass empty-copy SQL setup.
-    /// All CDC dispatch, encoding, channel recovery, and shutdown remain real.
+    /// Holds a table's first copy write until the test releases it.
+    struct CopyGate {
+        /// Table whose first copy write is held.
+        table_id: TableId,
+        /// Whether the gate already held a write.
+        used: AtomicBool,
+        /// Signals that the held copy write started.
+        entered: tokio::sync::Notify,
+        /// Releases the held copy write.
+        release: tokio::sync::Notify,
+    }
+
+    impl CopyGate {
+        /// Creates a gate for `table_id`'s first copy write.
+        fn new(table_id: TableId) -> Self {
+            Self {
+                table_id,
+                used: AtomicBool::new(false),
+                entered: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+            }
+        }
+    }
+
+    /// Real workers use this adapter only to bypass empty-copy SQL setup and,
+    /// optionally, to hold one table's copy. All CDC dispatch, encoding,
+    /// channel recovery, and shutdown remain real.
     #[derive(Clone)]
-    struct ReplayPipelineDestination {
+    struct RecordingPipelineDestination {
         /// Production Snowflake destination using the controlled transport.
         destination: Destination<NotifyingStore, UnusedTokenProvider, RecordingStreamClient>,
         /// Shared channel state for empty-copy setup.
         client: Client<UnusedTokenProvider, RecordingStreamClient>,
         /// Pipeline metadata store.
         store: NotifyingStore,
+        /// Holds one table's copy after its channel opens, when set.
+        copy_gate: Option<Arc<CopyGate>>,
     }
 
-    impl etl::destination::Destination for ReplayPipelineDestination {
+    impl etl::destination::Destination for RecordingPipelineDestination {
         fn name() -> &'static str {
-            "snowflake-replay-test"
+            "snowflake-recording-test"
         }
 
         async fn shutdown(&self) -> etl::error::EtlResult<()> {
@@ -1735,6 +1890,13 @@ mod tests {
                 format!("table_{}", schema.id()),
             )
             .await;
+            if let Some(gate) = &self.copy_gate
+                && gate.table_id == schema.id()
+                && !gate.used.swap(true, Ordering::SeqCst)
+            {
+                gate.entered.notify_one();
+                gate.release.notified().await;
+            }
             result.send(Ok(DestinationWriteStatus::Durable));
             Ok(())
         }
@@ -1747,6 +1909,33 @@ mod tests {
         ) -> etl::error::EtlResult<()> {
             self.destination.write_events(events, durability, result).await
         }
+    }
+
+    /// Waits until `table` has received at least `rows` streamed rows.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the rows do not arrive within 30 seconds.
+    async fn wait_for_streamed_rows(stream: &RecordingStreamClient, table: &str, rows: usize) {
+        timeout(Duration::from_secs(30), async {
+            loop {
+                let appended = stream.appended.notified();
+                let streamed: usize = stream
+                    .requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|request| request.table == table)
+                    .map(|request| request.rows.len())
+                    .sum();
+                if streamed >= rows {
+                    return;
+                }
+                appended.await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     /// Runs real apply-worker replay or shutdown after 63 accepted requests.
@@ -1782,10 +1971,11 @@ mod tests {
         let stream = Arc::new(RecordingStreamClient::default());
         let client = recording_client(Arc::clone(&stream));
         let raw = Destination::new(client.clone(), store.clone());
-        let destination = ReplayPipelineDestination {
+        let destination = RecordingPipelineDestination {
             destination: raw,
             client: client.clone(),
             store: store.clone(),
+            copy_gate: None,
         };
         let pipeline_id = random_pipeline_id();
         let slot: String = EtlReplicationSlot::for_apply_worker(&pipeline_id).try_into().unwrap();
@@ -1909,14 +2099,14 @@ mod tests {
         let checkpoint = store.get_replication_checkpoint(WorkerType::Apply).await.unwrap();
         if shutdown_drain.is_some() {
             assert!(checkpoint.is_none_or(|lsn| lsn < first_lsn));
-            assert!(!client.pending_durability_is_empty().await);
+            assert!(!client.pending_durability_is_empty(|_| true).await);
             assert!(
                 replication_slot_state(database.client.as_ref().unwrap(), &slot).await.0
                     < first_lsn
             );
         } else {
             assert!(checkpoint.unwrap() >= first_lsn);
-            assert!(client.pending_durability_is_empty().await);
+            assert!(client.pending_durability_is_empty(|_| true).await);
         }
         let requests = stream.requests.lock().unwrap();
         assert_eq!(requests.len(), 63);
@@ -1962,12 +2152,145 @@ mod tests {
         assert_postgres_replay(true, Some(false), 0).await;
     }
 
+    /// Rows Snowflake rejects during one table's catchup error that table
+    /// alone; the apply worker keeps confirming another table's changes.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires local PostgreSQL"]
+    async fn postgres_rejected_catchup_rows_do_not_stop_apply_worker() {
+        use etl::{
+            config::BatchConfig,
+            store::TableStateType,
+            test_utils::{
+                database::{
+                    spawn_source_database, test_table_name, wait_for_replication_slot_flush_lsn,
+                },
+                pipeline::{PipelineBuilder, random_pipeline_id},
+            },
+        };
+        use etl_postgres::slots::EtlReplicationSlot;
+
+        // GIVEN: an apply table and a catchup table in one publication, with
+        // the catchup table's copy held after its snapshot.
+        let database = spawn_source_database().await;
+        let apply_table = test_table_name("catchup_isolation_apply");
+        let catchup_table = test_table_name("catchup_isolation_catchup");
+        let apply_table_id = database
+            .create_table(apply_table.clone(), true, &[("value", "int4 not null")])
+            .await
+            .unwrap();
+        let catchup_table_id = database
+            .create_table(catchup_table.clone(), true, &[("value", "int4 not null")])
+            .await
+            .unwrap();
+        let publication = "catchup_isolation_publication";
+        database
+            .create_publication(publication, &[apply_table.clone(), catchup_table.clone()])
+            .await
+            .unwrap();
+        let store = NotifyingStore::new();
+        let stream = Arc::new(RecordingStreamClient::default());
+        let client = recording_client(Arc::clone(&stream));
+        let copy_gate = Arc::new(CopyGate::new(catchup_table_id));
+        let destination = RecordingPipelineDestination {
+            destination: Destination::new(client.clone(), store.clone()),
+            client,
+            store: store.clone(),
+            copy_gate: Some(Arc::clone(&copy_gate)),
+        };
+        let pipeline_id = random_pipeline_id();
+        let slot: String = EtlReplicationSlot::for_apply_worker(&pipeline_id).try_into().unwrap();
+        let mut pipeline = PipelineBuilder::new(
+            database.config.clone(),
+            pipeline_id,
+            publication.to_owned(),
+            store.clone(),
+            destination,
+        )
+        .with_batch_config(BatchConfig {
+            max_bytes: NonZeroU64::MIN,
+            max_fill_ms: 100,
+            memory_budget_ratio: 0.2,
+        })
+        .with_settle_durable_interval_ms(Some(1))
+        .with_retry_config(600_000, 1)
+        .build();
+        let apply_channel = format!("table_{apply_table_id}");
+        let catchup_channel = format!("table_{catchup_table_id}");
+        let apply_table_synced = store.notify_on_table_sync_complete(apply_table_id).await;
+        let catchup_table_errored =
+            store.notify_on_table_state_type(catchup_table_id, TableStateType::Errored).await;
+        let catchup_copy_held = copy_gate.entered.notified();
+
+        pipeline.start().await.unwrap();
+
+        apply_table_synced.notified().await;
+        timeout(Duration::from_secs(30), catchup_copy_held).await.unwrap();
+
+        // One transaction gives catchup a row to replay. Its apply-table row
+        // shows the apply worker has received the transaction, so catchup
+        // must cover it.
+        database
+            .run_sql(&format!(
+                "with apply_row as (insert into {} (value) values (1)) insert into {} (value) \
+                 values (1)",
+                apply_table.as_quoted_identifier(),
+                catchup_table.as_quoted_identifier(),
+            ))
+            .await
+            .unwrap();
+        wait_for_streamed_rows(&stream, &apply_channel, 1).await;
+
+        // WHEN: Snowflake rejects the catchup table's rows and catchup starts.
+        stream.statuses.lock().unwrap().get_mut(&catchup_channel).unwrap().rows_error_count = 1;
+        copy_gate.release.notify_one();
+
+        catchup_table_errored.notified().await;
+
+        // THEN: the apply worker streams and confirms the next apply-table
+        // change.
+        database
+            .run_sql(&format!(
+                "insert into {} (value) values (2)",
+                apply_table.as_quoted_identifier()
+            ))
+            .await
+            .unwrap();
+        wait_for_streamed_rows(&stream, &apply_channel, 2).await;
+        let last_apply_commit_lsn = stream
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .rfind(|request| request.table == apply_channel)
+            .unwrap()
+            .start
+            .decode()
+            .unwrap()
+            .0;
+        // A stalled apply worker never confirms, so fail well before the
+        // helper's 10-minute bound.
+        timeout(
+            Duration::from_secs(60),
+            wait_for_replication_slot_flush_lsn(
+                database.client.as_ref().unwrap(),
+                &slot,
+                last_apply_commit_lsn,
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(
+            stream.requests.lock().unwrap().iter().any(|request| request.table == catchup_channel)
+        );
+        timeout(Duration::from_secs(5), pipeline.shutdown_and_wait()).await.unwrap().unwrap();
+    }
+
     /// Internal window drains can repeatedly leave an accepted tail even
     /// though the transport has committed every request. The apply loop needs
     /// a later cumulative confirmation to checkpoint these calls.
     #[tokio::test]
     async fn cdc_window_drains_can_keep_returning_accepted() {
-        let (destination, stream, schemas, _) = recording_destination(65, false).await;
+        let (destination, stream, schemas, _, _) = recording_destination(65, false).await;
         let mut ordinal = 0;
         for (iteration, count) in [65, 64, 64].into_iter().enumerate() {
             let events = schemas[..count]
@@ -2001,7 +2324,7 @@ mod tests {
 
     #[tokio::test]
     async fn cdc_many_interleaved_tables_preserve_packing_order_and_replay() {
-        let (destination, stream, schemas, _) = recording_destination(512, false).await;
+        let (destination, stream, schemas, _, _) = recording_destination(512, false).await;
         let mut events = Vec::new();
         for phase in 0..3 {
             for (index, schema) in schemas.iter().enumerate() {
@@ -2074,7 +2397,7 @@ mod tests {
     #[tokio::test]
     async fn cdc_finishes_first_table_before_encoding_later_tables() {
         for fail_append in [false, true] {
-            let (destination, stream, schemas, _) = recording_destination(2, fail_append).await;
+            let (destination, stream, schemas, _, _) = recording_destination(2, fail_append).await;
             // The later table must not be encoded until the first request was
             // sent.
             let invalid_delete = Event::Delete(DeleteEvent {
@@ -2107,7 +2430,7 @@ mod tests {
     #[tokio::test]
     async fn cdc_relation_and_truncate_remain_write_barriers() {
         for truncate in [false, true] {
-            let (destination, stream, schemas, _) = recording_destination(1, false).await;
+            let (destination, stream, schemas, _, _) = recording_destination(1, false).await;
             let schema = &schemas[0];
             let barrier = if truncate {
                 Event::Truncate(TruncateEvent {
@@ -2175,7 +2498,7 @@ mod tests {
 
         state.record(first_table_id, accepted_batch(10, 1, 2, 20)).unwrap();
         state.record(second_table_id, accepted_batch(11, 1, 3, 30)).unwrap();
-        state.clear_committed(&[(first_table_id, OffsetToken::new(10_u64.into(), 1))]).unwrap();
+        state.clear_committed(first_table_id, &OffsetToken::new(10_u64.into(), 1)).unwrap();
 
         assert_eq!(state.targets.len(), 1);
         assert!(state.targets.contains_key(&second_table_id));
@@ -2189,9 +2512,9 @@ mod tests {
         let mut state = PendingDurabilityState::default();
 
         state.record(table_id, accepted_batch(10, 1, 2, 20)).unwrap();
-        let stale_committed_target = (table_id, OffsetToken::new(10_u64.into(), 1));
+        let stale_committed_offset = OffsetToken::new(10_u64.into(), 1);
         state.record(table_id, accepted_batch(10, 2, 3, 30)).unwrap();
-        state.clear_committed(&[stale_committed_target]).unwrap();
+        state.clear_committed(table_id, &stale_committed_offset).unwrap();
 
         let target = state.targets.get(&table_id).unwrap();
         assert_eq!(target.target_offset, OffsetToken::new(10_u64.into(), 2));
@@ -2206,12 +2529,12 @@ mod tests {
         let table_id = TableId::new(1);
         let mut state = PendingDurabilityState::default();
 
-        assert!(!state.would_exceed_limits(STREAMING_PENDING_MAX_BYTES + 1));
+        assert!(!state.window(|_| true).would_exceed_limits(STREAMING_PENDING_MAX_BYTES + 1));
 
         state.record(table_id, accepted_batch(10, 1, 1, STREAMING_PENDING_MAX_BYTES + 1)).unwrap();
 
-        assert!(state.limits_reached());
-        assert!(state.would_exceed_limits(1));
+        assert!(state.window(|_| true).limits_reached());
+        assert!(state.window(|_| true).would_exceed_limits(1));
     }
 
     #[test]
@@ -2420,7 +2743,7 @@ mod tests {
         assert!(!client.channels.read().await.contains_key(&table_id));
         assert!(!client.prepared_views.read().await.contains(&table_id));
         let pending = client.pending_durability.lock().await;
-        assert!(pending.is_empty());
+        assert!(pending.is_empty(|_| true));
         assert_eq!(pending.row_batches, 0);
         assert_eq!(pending.bytes, 0);
         drop(pending);
@@ -2429,5 +2752,290 @@ mod tests {
         assert!(matches!(error, Error::Auth(_)));
         let mut next_setup = Box::pin(client.lock_table(table_id));
         assert!(poll_once(next_setup.as_mut()).is_ready());
+    }
+
+    #[tokio::test]
+    async fn failed_catchup_write_leaves_no_debt_for_apply_barriers() {
+        // GIVEN: a ready apply table with pending rows and a catchup table
+        // whose write failed because Snowflake rejected its rows.
+        let (destination, stream, schemas, client, store) = recording_destination(2, false).await;
+        let apply_schema = &schemas[0];
+        let catchup_schema = &schemas[1];
+        store.update_table_state(apply_schema.id(), TableState::Ready).await.unwrap();
+        store.update_table_state(catchup_schema.id(), TableState::FinishedCopy).await.unwrap();
+        let status = write_events(
+            &destination,
+            WriteEventsDurability::MayDefer,
+            vec![insert_event(apply_schema, 1)],
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, DestinationWriteStatus::Accepted);
+
+        stream.statuses.lock().unwrap().get_mut("table_2").unwrap().rows_error_count = 1;
+        let catchup_err = write_events(
+            &destination,
+            WriteEventsDurability::MayDefer,
+            vec![insert_event(catchup_schema, 1)],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(catchup_err.kind(), ErrorKind::DestinationError);
+        store
+            .update_table_state(
+                catchup_schema.id(),
+                TableState::Errored {
+                    reason: "Snowflake rejected rows".to_owned(),
+                    solution: None,
+                    retry_policy: TableRetryPolicy::ManualRetry,
+                    source_err: etl_error!(ErrorKind::DestinationError, "Rejected rows"),
+                },
+            )
+            .await
+            .unwrap();
+
+        // WHEN: the apply worker runs a barrier and writes another batch.
+        let barrier_status =
+            write_events(&destination, WriteEventsDurability::RequireDurable, vec![])
+                .await
+                .unwrap();
+        let next_status = write_events(
+            &destination,
+            WriteEventsDurability::RequireDurable,
+            vec![insert_event(apply_schema, 2)],
+        )
+        .await
+        .unwrap();
+
+        // THEN: both succeed and none of the failed catchup rows stay pending.
+        assert_eq!(barrier_status, DestinationWriteStatus::Durable);
+        assert_eq!(next_status, DestinationWriteStatus::Durable);
+        assert!(client.pending_durability_is_empty(|_| true).await);
+        destination.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn apply_barrier_does_not_wait_for_in_flight_catchup_write() {
+        // GIVEN: a ready apply table with pending rows and a catchup write held
+        // while it waits for its own rows to commit.
+        let (destination, stream, schemas, _, store) = recording_destination(2, false).await;
+        let apply_schema = &schemas[0];
+        let catchup_schema = schemas[1].clone();
+        store.update_table_state(apply_schema.id(), TableState::Ready).await.unwrap();
+        store.update_table_state(catchup_schema.id(), TableState::FinishedCopy).await.unwrap();
+        let status = write_events(
+            &destination,
+            WriteEventsDurability::MayDefer,
+            vec![insert_event(apply_schema, 1)],
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, DestinationWriteStatus::Accepted);
+        *stream.blocked_status_table.lock().unwrap() = Some("table_2".to_owned());
+        let catchup_status_entered = stream.status_entered.notified();
+
+        let catchup_destination = destination.clone();
+        let catchup = tokio::spawn(async move {
+            write_events(
+                &catchup_destination,
+                WriteEventsDurability::MayDefer,
+                vec![insert_event(&catchup_schema, 1)],
+            )
+            .await
+        });
+
+        catchup_status_entered.await;
+
+        // WHEN: the apply worker requests a durability barrier.
+        let barrier = timeout(
+            DEFAULT_COMMIT_WAIT_TIMEOUT,
+            write_events(&destination, WriteEventsDurability::RequireDurable, vec![]),
+        )
+        .await;
+
+        // THEN: the barrier settles the apply table without the held catchup
+        // write, which completes once released.
+        assert_eq!(barrier.unwrap().unwrap(), DestinationWriteStatus::Durable);
+        *stream.blocked_status_table.lock().unwrap() = None;
+        stream.release_status.notify_one();
+        assert_eq!(catchup.await.unwrap().unwrap(), DestinationWriteStatus::Durable);
+        destination.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failing_catchup_table_does_not_poison_other_catchup_table() {
+        // GIVEN: two catchup tables, and Snowflake rejected table 2's rows.
+        let (destination, stream, schemas, _, store) = recording_destination(2, false).await;
+        let healthy_catchup = &schemas[0];
+        let broken_catchup = &schemas[1];
+        store.update_table_state(healthy_catchup.id(), TableState::FinishedCopy).await.unwrap();
+        store.update_table_state(broken_catchup.id(), TableState::FinishedCopy).await.unwrap();
+        stream.statuses.lock().unwrap().get_mut("table_2").unwrap().rows_error_count = 1;
+        let broken_err = write_events(
+            &destination,
+            WriteEventsDurability::MayDefer,
+            vec![insert_event(broken_catchup, 1)],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(broken_err.kind(), ErrorKind::DestinationError);
+
+        // WHEN: table 1's catchup worker writes a batch.
+        let status = write_events(
+            &destination,
+            WriteEventsDurability::MayDefer,
+            vec![insert_event(healthy_catchup, 1)],
+        )
+        .await
+        .unwrap();
+
+        // THEN: table 1 confirms durably without waiting on table 2.
+        assert_eq!(status, DestinationWriteStatus::Durable);
+        destination.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn apply_table_with_permanent_channel_error_still_fails_apply_durability_barrier() {
+        // GIVEN: two ready apply tables with pending rows, and Snowflake
+        // rejected table 2's rows.
+        let (destination, stream, schemas, _, store) = recording_destination(2, false).await;
+        for schema in &schemas {
+            store.update_table_state(schema.id(), TableState::Ready).await.unwrap();
+            let status = write_events(
+                &destination,
+                WriteEventsDurability::MayDefer,
+                vec![insert_event(schema, 1)],
+            )
+            .await
+            .unwrap();
+            assert_eq!(status, DestinationWriteStatus::Accepted);
+        }
+        stream.statuses.lock().unwrap().get_mut("table_2").unwrap().rows_error_count = 1;
+
+        // WHEN: the apply worker requests a durability barrier.
+        let error = write_events(&destination, WriteEventsDurability::RequireDurable, vec![])
+            .await
+            .unwrap_err();
+
+        // THEN: the barrier fails instead of confirming table 2's rows.
+        assert_eq!(error.kind(), ErrorKind::DestinationError);
+        destination.shutdown().await.unwrap();
+    }
+
+    /// Single-table operations that make their table durable before SQL.
+    #[derive(Clone, Copy, Debug)]
+    enum SingleTableOperation {
+        Truncate,
+        Refresh,
+        SchemaChange,
+    }
+
+    #[tokio::test]
+    async fn single_table_operations_do_not_wait_on_unrelated_pending_tables() {
+        for operation in [
+            SingleTableOperation::Truncate,
+            SingleTableOperation::Refresh,
+            SingleTableOperation::SchemaChange,
+        ] {
+            // GIVEN: healthy table 1 and broken table 2 both have pending rows.
+            let (destination, stream, schemas, client, store) =
+                recording_destination(2, false).await;
+            let healthy = &schemas[0];
+            for schema in &schemas {
+                let status = write_events(
+                    &destination,
+                    WriteEventsDurability::MayDefer,
+                    vec![insert_event(schema, 1)],
+                )
+                .await
+                .unwrap();
+                assert_eq!(status, DestinationWriteStatus::Accepted);
+            }
+            stream.statuses.lock().unwrap().get_mut("table_2").unwrap().rows_error_count = 1;
+
+            // WHEN: the operation runs for table 1.
+            let reached_sql = match operation {
+                SingleTableOperation::Truncate => matches!(
+                    client.truncate_table(healthy.id(), &OffsetToken::new(10.into(), 2)).await,
+                    Err(Error::Auth(_))
+                ),
+                SingleTableOperation::Refresh => {
+                    let columns: Vec<_> = healthy.column_schemas().cloned().collect();
+                    matches!(
+                        client.refresh_table(&healthy.id(), &columns).await,
+                        Err(Error::Auth(_))
+                    )
+                }
+                SingleTableOperation::SchemaChange => {
+                    let mut evolved_table = healthy.inner().clone();
+                    evolved_table.snapshot_id = SnapshotId::new(PgLsn::from(20), PgLsn::from(20));
+                    evolved_table.column_schemas.push(ColumnSchema::new(
+                        "email".to_owned(),
+                        Type::TEXT,
+                        -1,
+                        3,
+                        true,
+                    ));
+                    store.store_table_schema(evolved_table.clone()).await.unwrap();
+                    let evolved = ReplicatedTableSchema::all(Arc::new(evolved_table));
+                    write_events(
+                        &destination,
+                        WriteEventsDurability::MayDefer,
+                        vec![Event::Relation(RelationEvent { replicated_table_schema: evolved })],
+                    )
+                    .await
+                    .is_err_and(|error| error.kind() == ErrorKind::DestinationAuthenticationError)
+                }
+            };
+
+            // THEN: it drains only table 1 and reaches SQL, which fails here
+            // because the test client has no credentials.
+            assert!(reached_sql, "{operation:?} did not reach SQL");
+            destination.shutdown().await.unwrap();
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn durability_barrier_covers_only_rows_accepted_before_it() {
+        // GIVEN: Snowflake commits each append 5 s after accepting it, and one
+        // batch is pending.
+        let (destination, stream, schemas, _, _) = recording_destination(1, false).await;
+        let schema = &schemas[0];
+        *stream.commit_delay.lock().unwrap() = Some(Duration::from_secs(5));
+        let status = write_events(
+            &destination,
+            WriteEventsDurability::MayDefer,
+            vec![insert_event(schema, 1)],
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, DestinationWriteStatus::Accepted);
+
+        // WHEN: a barrier starts, and another batch is accepted 4 s later.
+        let started = Instant::now();
+        let barrier_destination = destination.clone();
+        let barrier = tokio::spawn(async move {
+            write_events(&barrier_destination, WriteEventsDurability::RequireDurable, vec![]).await
+        });
+        sleep(Duration::from_secs(4)).await;
+        let status = write_events(
+            &destination,
+            WriteEventsDurability::MayDefer,
+            vec![insert_event(schema, 2)],
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, DestinationWriteStatus::Accepted);
+
+        // THEN: the barrier returns once its own rows commit, and a later
+        // barrier still waits for the newer batch.
+        assert_eq!(barrier.await.unwrap().unwrap(), DestinationWriteStatus::Durable);
+        assert!(started.elapsed() < Duration::from_secs(9));
+        let status = write_events(&destination, WriteEventsDurability::RequireDurable, vec![])
+            .await
+            .unwrap();
+        assert_eq!(status, DestinationWriteStatus::Durable);
+        assert!(started.elapsed() >= Duration::from_secs(9));
+        destination.shutdown().await.unwrap();
     }
 }
