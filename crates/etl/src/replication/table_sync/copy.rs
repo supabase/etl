@@ -435,18 +435,17 @@ async fn plan_table_copy_partitions(
     // non-empty table with stale stats is not weighted as zero.
     let use_estimated_rows = table_estimates.values().all(|estimate| estimate.estimated_rows() > 0);
 
-    let total_estimated_rows = use_estimated_rows.then(|| {
-        table_estimates.values().map(|estimate| u128::from(estimate.partition_weight(true))).sum()
-    });
-
-    let target_partitions = target_ctid_partition_count(max_copy_connections, total_estimated_rows);
-
     // Estimate values fit in u64, but totals and weighted multiplication use
     // u128 so large physical-table groups cannot overflow during planning.
     let total_weight: u128 = table_estimates
         .values()
         .map(|estimate| u128::from(estimate.partition_weight(use_estimated_rows)))
         .sum();
+
+    let target_partitions = target_ctid_partition_count(
+        max_copy_connections,
+        use_estimated_rows.then_some(total_weight),
+    );
 
     let mut copy_partitions = Vec::with_capacity(usize::from(target_partitions));
     for (source_table_id, estimate) in table_estimates {
