@@ -3390,7 +3390,7 @@ async fn schema_change_messages_skip_unpublished_and_temporary_tables() {
     let published_table = test_table_name("ddl_filter_published");
     let unpublished_table = test_table_name("ddl_filter_unpublished");
 
-    database
+    let published_table_id = database
         .create_table(published_table.clone(), true, &[("name", "text not null")])
         .await
         .unwrap();
@@ -3408,10 +3408,6 @@ async fn schema_change_messages_skip_unpublished_and_temporary_tables() {
     let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("ddl_filter_slot");
     let slot = client.create_slot(&slot_name, &Default::default()).await.unwrap();
-    let (stream, _) = client
-        .start_logical_replication(publication_name, &slot_name, slot.consistent_point, None)
-        .await
-        .unwrap();
 
     database
         .alter_table(
@@ -3424,10 +3420,34 @@ async fn schema_change_messages_skip_unpublished_and_temporary_tables() {
     database.run_sql("create temporary table temp_ddl_filter (id integer)").await.unwrap();
     database.run_sql("alter table temp_ddl_filter add column note text").await.unwrap();
 
-    let result = timeout(Duration::from_secs(2), collect_ddl_messages(stream, 1)).await;
-    assert!(
-        result.is_err(),
-        "ddl on unpublished or temporary tables should not emit supabase_etl_ddl messages"
+    database
+        .alter_table(
+            published_table,
+            &[TableModification::AddColumn { name: "ddl_marker", data_type: "integer" }],
+        )
+        .await
+        .unwrap();
+
+    let messages = timeout(
+        Duration::from_secs(10),
+        collect_queued_ddl_messages(
+            &mut client,
+            publication_name,
+            &slot_name,
+            slot.consistent_point,
+            1,
+        ),
+    )
+    .await
+    .expect("timed out waiting for the published table's ddl marker");
+    let message = &messages[0];
+
+    assert_eq!(message["oid"], u64::from(published_table_id.into_inner()));
+    let columns = column_schemas_from_ddl_message(message);
+    assert_eq!(
+        columns.last().unwrap().name,
+        "ddl_marker",
+        "first ddl message should describe the marker change"
     );
 }
 
