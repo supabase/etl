@@ -5458,6 +5458,118 @@ async fn copy_writes_table_parquet_and_inlines_applied_batch() {
     assert_eq!(count_internal_table_files(&data, "__etl_applied_table_batches"), 0);
 }
 
+/// Primitive array COPY preserves values across DuckDB vector boundaries and
+/// Parquet readback.
+#[tokio::test(flavor = "multi_thread")]
+async fn copy_persists_primitive_arrays_across_arrow_chunks() {
+    use duckdb::types::Value;
+    use etl::data::ArrayCell;
+
+    // Exceed two vectors of the pinned DuckDB build (2048 rows each).
+    const ROW_COUNT: i32 = 4_105;
+
+    let lake = create_test_lake("copy_primitive_arrays").await;
+    let schema = TableSchema::new(
+        TableId::new(10_621),
+        TableName::new("public".to_owned(), "primitive_arrays".to_owned()),
+        vec![
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("flags".to_owned(), PgType::BOOL_ARRAY, -1, 2, false),
+            ColumnSchema::new("small".to_owned(), PgType::INT2_ARRAY, -1, 3, false),
+            ColumnSchema::new("regular".to_owned(), PgType::INT4_ARRAY, -1, 4, false),
+            ColumnSchema::new("large".to_owned(), PgType::INT8_ARRAY, -1, 5, false),
+            ColumnSchema::new("oids".to_owned(), PgType::OID_ARRAY, -1, 6, false),
+            ColumnSchema::new("singles".to_owned(), PgType::FLOAT4_ARRAY, -1, 7, false),
+            ColumnSchema::new("doubles".to_owned(), PgType::FLOAT8_ARRAY, -1, 8, true),
+        ],
+    );
+    let replicated = make_replicated_table_schema(&schema);
+    let table = table_name_to_ducklake_table_name(&schema.name).unwrap();
+    let store = MemoryStore::new();
+    store.store_table_schema(schema).await.unwrap();
+    let destination = new_unbuffered_destination(
+        lake.catalog_url.clone(),
+        lake.data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
+
+    let rows = (0..ROW_COUNT)
+        .map(|id| {
+            let flags = match id % 3 {
+                0 => vec![],
+                1 => vec![None],
+                _ => vec![Some(true), None, Some(false)],
+            };
+            let doubles = if id % 2 == 0 {
+                Cell::Null
+            } else {
+                Cell::Array(ArrayCell::F64(vec![Some(f64::from(id)), None]))
+            };
+            TableRow::new(vec![
+                Cell::I32(id),
+                Cell::Array(ArrayCell::Bool(flags)),
+                Cell::Array(ArrayCell::I16(vec![Some(i16::MIN), Some(i16::MAX)])),
+                Cell::Array(ArrayCell::I32(vec![Some(i32::MIN), Some(id), Some(i32::MAX)])),
+                Cell::Array(ArrayCell::I64(vec![Some(i64::MIN), Some(i64::MAX)])),
+                Cell::Array(ArrayCell::U32(vec![Some(0), None, Some(u32::MAX)])),
+                Cell::Array(ArrayCell::F32(vec![Some(1.5), None, Some(-0.5)])),
+                doubles,
+            ])
+        })
+        .collect();
+
+    destination.write_table_rows_for_tests(&replicated, rows).await.unwrap();
+    destination.shutdown().await.unwrap();
+
+    let conn =
+        open_lake_conn_when_tables_visible(&lake.catalog_url, &lake.data_url, &[&table]).await;
+    let target = qualified_lake_table_name(&table);
+    let mut statement = conn
+        .prepare(&format!(
+            "select id, flags, small, regular, large, oids, singles, doubles, typeof(oids) from \
+             {target} order by id"
+        ))
+        .unwrap();
+    let mut rows = statement.query([]).unwrap();
+
+    assert!(count_table_files(&lake.data_dir, &table) > 0);
+    for id in 0..ROW_COUNT {
+        let row = rows.next().unwrap().unwrap();
+        let flags = match id % 3 {
+            0 => vec![],
+            1 => vec![Value::Null],
+            _ => vec![Value::Boolean(true), Value::Null, Value::Boolean(false)],
+        };
+        let doubles = if id % 2 == 0 {
+            Value::Null
+        } else {
+            Value::List(vec![Value::Double(f64::from(id)), Value::Null])
+        };
+        let expected = [
+            Value::Int(id),
+            Value::List(flags),
+            Value::List(vec![Value::SmallInt(i16::MIN), Value::SmallInt(i16::MAX)]),
+            Value::List(vec![Value::Int(i32::MIN), Value::Int(id), Value::Int(i32::MAX)]),
+            Value::List(vec![Value::BigInt(i64::MIN), Value::BigInt(i64::MAX)]),
+            Value::List(vec![Value::UBigInt(0), Value::Null, Value::UBigInt(u64::from(u32::MAX))]),
+            Value::List(vec![Value::Float(1.5), Value::Null, Value::Float(-0.5)]),
+            doubles,
+        ];
+        for (column, expected) in expected.into_iter().enumerate() {
+            assert_eq!(row.get::<_, Value>(column).unwrap(), expected, "row {id}, column {column}");
+        }
+        assert_eq!(row.get::<_, String>(8).unwrap(), "UBIGINT[]");
+    }
+    assert!(rows.next().unwrap().is_none());
+}
+
 /// Mixed table batches remain correct when multiple tables are written
 /// concurrently in one flush, without creating progress Parquet files.
 #[tokio::test(flavor = "multi_thread")]
@@ -6189,9 +6301,9 @@ fn numeric_typmod(precision: i32, scale: i32) -> i32 {
 
 /// FULL-identity deletes compare every column with a SQL literal, while rows
 /// are stored by Arrow (copy), the DuckDB appender (streaming), or SQL
-/// literals (arrays, infinities, `24:00`). DuckLake does not check affected
-/// rows, so a literal that does not equal its stored value would leave the
-/// row behind silently.
+/// literals (fallback cases such as infinities and `24:00`). DuckLake does not
+/// check affected rows, so a literal that does not equal its stored value would
+/// leave the row behind silently.
 #[tokio::test(flavor = "multi_thread")]
 async fn full_identity_delete_matches_stored_value_on_every_write_path() {
     use chrono::{DateTime, FixedOffset, NaiveDate, NaiveTime, Utc};
@@ -6267,7 +6379,14 @@ async fn full_identity_delete_matches_stored_value_on_every_write_path() {
         ("json_key_order", PgType::JSONB, -1, json(r#"{"b":1,"a":2}"#)),
         ("json_unicode", PgType::JSONB, -1, json(r#"{"s":"é😀"}"#)),
     ];
-    // Any of these values sends its whole batch through SQL literals.
+    let float8_array_case = (
+        "float8_array",
+        PgType::FLOAT8_ARRAY,
+        -1,
+        Cell::Array(ArrayCell::F64(vec![Some(f64::NAN), None, Some(-0.0), Some(1e-30)])),
+    );
+
+    // Infinities and 24:00 force SQL literals for the entire COPY batch.
     let sql_literal_cases: Vec<DeleteCase> = vec![
         ("date_infinity", PgType::DATE, -1, Cell::Date(Date::PosInfinity)),
         ("timestamp_infinity", PgType::TIMESTAMP, -1, Cell::Timestamp(Timestamp::PosInfinity)),
@@ -6278,33 +6397,30 @@ async fn full_identity_delete_matches_stored_value_on_every_write_path() {
             Cell::TimestampTz(Timestamp::NegInfinity),
         ),
         ("time_end_of_day", PgType::TIME, -1, Cell::Time(PgTime::EndOfDay)),
-        (
-            "float8_array",
-            PgType::FLOAT8_ARRAY,
-            -1,
-            Cell::Array(ArrayCell::F64(vec![Some(f64::NAN), None, Some(-0.0), Some(1e-30)])),
-        ),
+        float8_array_case.clone(),
     ];
+    // COPY uses Arrow for this group, while the CDC inserts use SQL literals.
+    let arrow_array_cases = [float8_array_case];
 
     let mut surviving = Vec::new();
     for (table_id, table, cases) in [
-        (900, "full_identity_arrow", &arrow_cases),
-        (901, "full_identity_json", &json_cases),
-        (902, "full_identity_sql_literal", &sql_literal_cases),
+        (900, "full_identity_arrow", arrow_cases.as_slice()),
+        (901, "full_identity_json", json_cases.as_slice()),
+        (902, "full_identity_sql_literal", sql_literal_cases.as_slice()),
+        (903, "full_identity_arrow_array", &arrow_array_cases),
     ] {
-        surviving.extend(
-            surviving_full_identity_deletes(
-                &lake.catalog_url,
-                &lake.data_url,
-                table_id,
-                table,
-                cases,
-            )
-            .await,
-        );
+        let table_survivors = surviving_full_identity_deletes(
+            &lake.catalog_url,
+            &lake.data_url,
+            table_id,
+            table,
+            cases,
+        )
+        .await;
+        surviving.extend(table_survivors.into_iter().map(|(path, case)| (table, path, case)));
     }
 
-    assert!(surviving.is_empty(), "deletes left rows behind (path, case): {surviving:?}");
+    assert!(surviving.is_empty(), "deletes left rows behind (table, path, case): {surviving:?}");
 }
 
 /// Partition changes survive restart and preserve rows and historical files.
