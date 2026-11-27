@@ -1201,7 +1201,8 @@ pub enum SchemaOperation {
     },
     /// Add a new logical column.
     AddColumn {
-        /// The state expected immediately after the column is added.
+        /// The target logical state, including the current source default and
+        /// captured add-time value. Destinations render their own DDL steps.
         after_column_schema: ColumnSchema,
         /// Why the column entered the replicated endpoint.
         reason: ColumnPresenceChangeReason,
@@ -1719,7 +1720,8 @@ impl SchemaOperationPlanner {
         Ok(())
     }
 
-    /// Phase 3: emits additions after every reusable name is available.
+    /// Phase 3: emits additions with their final schema and captured add-time
+    /// values for destinations to interpret according to their capabilities.
     fn plan_additions(&mut self, added_columns: &[ColumnAddition]) {
         for change in added_columns {
             self.operations.push(SchemaOperation::AddColumn {
@@ -2631,6 +2633,41 @@ mod tests {
         assert!(added_names.contains("email"));
         assert!(diff.dropped_columns.is_empty());
         assert!(diff.altered_columns.is_empty());
+    }
+
+    /// Logical additions retain both source values without synthesizing a
+    /// destination-specific default change in the shared plan.
+    #[test]
+    fn schema_plan_retains_missing_values_and_future_defaults() {
+        for (future_default, missing_value, initial_default) in [
+            (Some("2"), Some("1"), Some("1")),
+            (Some("2"), None, Some("2")),
+            (None, Some("1"), Some("1")),
+        ] {
+            // GIVEN: a schema diff adding a column with separate future and
+            // add-time defaults.
+            let id = ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false);
+            let before = create_replicated_schema(vec![id.clone()]);
+            let column = ColumnSchema::new("score".to_owned(), Type::INT4, -1, 2, true)
+                .with_default_expression_option(future_default.map(ToOwned::to_owned))
+                .with_missing_value_expression(missing_value.map(ToOwned::to_owned));
+            let after = create_replicated_schema(vec![id, column]);
+
+            // WHEN: the shared schema change plan is computed.
+            let plan = plan_schema_change(&before, &after, ColumnNameMapping::Identity);
+
+            // THEN: one AddColumn operation preserves both defaults and
+            // converges to the target.
+            let [SchemaOperation::AddColumn { after_column_schema, reason }] =
+                plan.ordered_operations()
+            else {
+                panic!("a logical addition must retain its metadata in one operation");
+            };
+            assert_eq!(*reason, ColumnPresenceChangeReason::TableSchema);
+            assert_eq!(after_column_schema.default_expression.as_deref(), future_default);
+            assert_eq!(after_column_schema.initial_default_expression(), initial_default);
+            assert_operations_converge(&before, &after);
+        }
     }
 
     #[test]

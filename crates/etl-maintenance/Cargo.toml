@@ -25,6 +25,7 @@ ducklake = [
     "dep:serde_json",
     "dep:tokio-postgres",
     "dep:url",
+    "tokio/fs",
 ]
 test-utils = []
 

@@ -16,7 +16,7 @@ use etl_config::shared::{
 };
 use etl_postgres::slots::EtlReplicationSlot;
 use tokio::{
-    sync::{Mutex, Semaphore},
+    sync::{Mutex, Semaphore, watch},
     time::Instant,
 };
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
@@ -104,6 +104,7 @@ pub struct Pipeline<S, D> {
     store: S,
     destination: D,
     state: PipelineState,
+    source_network_failures: watch::Sender<()>,
     shutdown_token: CancellationToken,
     /// Time of the first shutdown request; repeated requests cannot extend it.
     shutdown_started: OnceLock<Instant>,
@@ -135,6 +136,7 @@ where
             store,
             destination,
             state: PipelineState::NotStarted,
+            source_network_failures: watch::Sender::new(()),
             shutdown_token: CancellationToken::new(),
             shutdown_started: OnceLock::new(),
         }
@@ -143,6 +145,16 @@ where
     /// Returns the unique identifier for this pipeline.
     pub fn id(&self) -> PipelineId {
         self.pipeline_id.clone()
+    }
+
+    /// Subscribes to failed source TCP connection attempts in running workers.
+    ///
+    /// Notifications coalesce. Use the receiver's `changed()` method to wait
+    /// without holding a watch borrow. For startup errors from
+    /// [`Self::start`], inspect
+    /// [`crate::error::EtlError::is_postgres_dial_failure`].
+    pub fn subscribe_source_network_failures(&self) -> watch::Receiver<()> {
+        self.source_network_failures.subscribe()
     }
 
     /// Starts the pipeline and begins replication processing.
@@ -255,6 +267,7 @@ where
             self.pipeline_id.clone(),
             Arc::clone(&self.config),
             Arc::clone(&pool),
+            self.source_network_failures.clone(),
             self.store.clone(),
             self.destination.clone(),
             replication_lag_monitor,
@@ -525,11 +538,120 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::{net::TcpListener, num::NonZeroUsize};
+
+    use tokio::time::timeout;
+
     use super::*;
-    use crate::test_utils::{
-        memory_destination::MemoryDestination, notifying_store::NotifyingStore,
-        pipeline::PipelineBuilder,
+    use crate::{
+        runtime::{BatchMemoryGovernor, TableSyncWorker},
+        store::{PostgresStore, StateStore},
+        test_utils::{
+            memory_destination::MemoryDestination, notifying_store::NotifyingStore,
+            pipeline::PipelineBuilder,
+        },
     };
+
+    /// Release an ephemeral loopback port so the kernel refuses the source
+    /// connection.
+    fn unreachable_source() -> Pipeline<NotifyingStore, MemoryDestination<NotifyingStore>> {
+        let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let config = serde_json::from_value(serde_json::json!({
+            "host": "localhost", "port": port, "name": "test",
+            "username": "test", "tls": {"enabled": false, "trusted_root_certs": ""}
+        }))
+        .unwrap();
+        let store = NotifyingStore::new();
+        PipelineBuilder::new(
+            config,
+            "1",
+            "test".to_owned(),
+            store.clone(),
+            MemoryDestination::new(store),
+        )
+        .build()
+    }
+
+    #[tokio::test]
+    async fn source_network_failure_reaches_store_and_both_pipeline_startup_dials() {
+        let mut pipeline = unreachable_source();
+        for pin in [None, Some("127.0.0.1".parse().unwrap())] {
+            Arc::make_mut(&mut pipeline.config).pg_connection.hostaddr = pin;
+            let store =
+                PostgresStore::new("1", pipeline.config.pg_connection.clone()).await.unwrap_err();
+            assert_eq!(store.kind(), ErrorKind::SourceError);
+            assert!(store.is_postgres_dial_failure());
+            for migrate in [true, false] {
+                Arc::make_mut(&mut pipeline.config).run_source_migrations = migrate;
+                let error = pipeline.start().await.unwrap_err();
+                assert_eq!(error.kind(), ErrorKind::SourceConnectionFailed);
+                assert!(error.is_postgres_dial_failure());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn source_network_failure_is_reported_from_each_worker_retry() {
+        let pipeline = unreachable_source();
+        let mut failures = pipeline.subscribe_source_network_failures();
+        let id = pipeline.id();
+        let lag = ReplicationLagMonitor::new(
+            id.clone(),
+            &pipeline.config.pg_connection,
+            Duration::from_secs(1),
+        );
+        let slots = SlotCreationMonitor::new(id.clone());
+        let memory = MemoryMonitor::new_for_test();
+        let permits = Arc::new(Semaphore::new(1));
+        let pool = Arc::new(TableSyncWorkerPool::new());
+        let shutdown = CancellationToken::new();
+        let apply = ApplyWorker::new(
+            id.clone(),
+            Arc::clone(&pipeline.config),
+            Arc::clone(&pool),
+            pipeline.source_network_failures.clone(),
+            pipeline.store.clone(),
+            pipeline.destination.clone(),
+            lag.clone(),
+            DurabilityMonitor::new(id.clone()),
+            slots.clone(),
+            shutdown.clone(),
+            Arc::clone(&permits),
+            memory.clone(),
+        )
+        .spawn();
+
+        for _ in 0..2 {
+            timeout(Duration::from_secs(5), failures.changed()).await.unwrap().unwrap();
+        }
+        shutdown.cancel();
+        apply.wait(&CancellationToken::new()).await.unwrap();
+
+        let table_id = TableId::new(42);
+        pipeline.store.update_table_state(table_id, TableState::Init).await.unwrap();
+        let shutdown = CancellationToken::new();
+        let governor = BatchMemoryGovernor::new(id.clone(), memory.clone(), 0.2, NonZeroUsize::MIN);
+        let worker = TableSyncWorker::new(
+            id,
+            pipeline.config,
+            pipeline.source_network_failures,
+            table_id,
+            pipeline.store,
+            pipeline.destination,
+            lag,
+            slots,
+            shutdown.clone(),
+            permits,
+            memory,
+            governor,
+        );
+        Box::pin(worker.spawn_into_pool(&pool)).await.unwrap();
+        for _ in 0..2 {
+            timeout(Duration::from_secs(5), failures.changed()).await.unwrap().unwrap();
+        }
+        shutdown.cancel();
+        pool.wait_all(&CancellationToken::new()).await.unwrap();
+    }
 
     /// A late waiter and repeated stop requests share the original deadline.
     #[tokio::test(start_paused = true)]

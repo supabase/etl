@@ -3,7 +3,10 @@
 //! These tests use a PostgreSQL-backed DuckLake catalog and verify the final
 //! table contents by querying DuckLake directly through DuckDB.
 
-use std::num::{NonZeroU16, NonZeroU64};
+use std::{
+    num::{NonZeroU16, NonZeroU64},
+    time::Duration,
+};
 
 use duckdb::Connection;
 #[cfg(feature = "test-utils")]
@@ -11,16 +14,19 @@ use etl::pipeline::PipelineId;
 use etl::{
     config::BatchConfig,
     event::EventType,
-    store::StateStore,
+    store::{StateStore, TableRetryPolicy, TableState, TableStateType},
     test_utils::{
         database::{spawn_source_database, test_table_name},
         event::EventCondition,
         notifying_store::NotifyingStore,
-        pipeline::{create_pipeline, create_pipeline_with_batch_config, random_pipeline_id},
+        pipeline::{
+            PipelineBuilder, create_pipeline, create_pipeline_with_batch_config, random_pipeline_id,
+        },
         test_destination_wrapper::TestDestinationWrapper,
         test_schema::{TableSelection, insert_mock_data, setup_test_database_schema},
     },
 };
+use etl_config::shared::DuckLakeCopyBufferConfig;
 use etl_destinations::ducklake::{
     DuckLakeDestination, DuckLakeTableName, table_name_to_ducklake_table_name,
 };
@@ -29,6 +35,7 @@ use etl_postgres::{below_version, tokio::test_utils::TableModification, version:
 use etl_telemetry::tracing::init_test_tracing;
 use pg_escape::{quote_identifier, quote_literal};
 use rust_decimal::Decimal;
+use tokio::time::timeout;
 use url::Url;
 
 use crate::support::ducklake::{
@@ -37,6 +44,102 @@ use crate::support::ducklake::{
 
 /// Row size that exceeds the test's preferred 8 MiB batch limit.
 const OVERSIZED_COPY_ROW_BYTES: i32 = 9_000_000;
+
+/// A source decode error must release staging before the pipeline reports it.
+#[tokio::test(flavor = "multi_thread")]
+async fn source_copy_failure_releases_ducklake_session() {
+    assert_failed_copy_releases_session(
+        "text[]",
+        "(array['valid']), (array[['two'], ['dimensions']])",
+        "multidimensional",
+    )
+    .await;
+}
+
+/// A rejected destination batch must release rows accepted earlier in the copy.
+#[tokio::test(flavor = "multi_thread")]
+async fn ducklake_copy_failure_releases_ducklake_session() {
+    assert_failed_copy_releases_session(
+        "text",
+        "('valid'), (repeat('x', 8192))",
+        "ducklake copy batch exceeds the configured buffer maximum",
+    )
+    .await;
+}
+
+/// Stages the first row, fails on the second, and checks that maintenance can
+/// acquire the session fence while the table waits for a manual retry.
+async fn assert_failed_copy_releases_session(
+    payload_type: &str,
+    source_values: &str,
+    expected_error: &str,
+) {
+    let database = spawn_source_database().await;
+    let table = test_table_name("failed_copy");
+    let table_id =
+        database.create_table(table.clone(), false, &[("payload", payload_type)]).await.unwrap();
+    let publication = "failed_copy_pub";
+    database.create_publication(publication, std::slice::from_ref(&table)).await.unwrap();
+    database
+        .run_sql(&format!("insert into {} values {source_values}", table.as_quoted_identifier()))
+        .await
+        .unwrap();
+
+    let lake = create_test_lake("failed_copy_session").await;
+    let store = NotifyingStore::new();
+    let destination = DuckLakeDestination::builder(
+        lake.catalog_url.clone(),
+        lake.data_url.clone(),
+        NonZeroU16::MIN,
+        store.clone(),
+    )
+    .copy_buffer(DuckLakeCopyBufferConfig {
+        enabled: true,
+        target_bytes: NonZeroU64::new(1024).unwrap(),
+        max_total_bytes: 4096,
+    })
+    .build()
+    .await
+    .unwrap();
+    let mut pipeline = PipelineBuilder::new(
+        database.config.clone(),
+        random_pipeline_id(),
+        publication.to_owned(),
+        store.clone(),
+        destination.clone(),
+    )
+    .with_batch_config(BatchConfig {
+        max_fill_ms: 1000,
+        memory_budget_ratio: 0.2,
+        max_bytes: NonZeroU64::MIN,
+    })
+    .with_max_copy_connections_per_table(1)
+    .build();
+    let errored = store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
+
+    pipeline.start().await.unwrap();
+
+    timeout(Duration::from_secs(30), errored.notified()).await.unwrap();
+    let Some(TableState::Errored { retry_policy, source_err, .. }) =
+        store.get_table_state(table_id).await.unwrap()
+    else {
+        panic!("expected a table error");
+    };
+    assert_eq!(retry_policy, TableRetryPolicy::ManualRetry);
+    assert!(source_err.to_string().to_ascii_lowercase().contains(expected_error));
+    assert!(destination.copy_buffer_peak_staged_bytes() > 0);
+    let pause = timeout(Duration::from_secs(5), destination.acquire_external_maintenance_pause())
+        .await
+        .unwrap();
+    drop(pause);
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let table_name = table_name_to_ducklake_table_name(&table).unwrap();
+    let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
+    assert_eq!(count_applied_batches(&conn, &table_name, "copy"), 0);
+    assert_eq!(count_applied_batches(&conn, &table_name, "copy_complete"), 0);
+}
 
 /// Expected row shape after adding columns during replication.
 #[derive(Debug, Eq, PartialEq)]
@@ -1069,6 +1172,91 @@ async fn schema_change_add_column() {
                 score: Some(7),
             },
         ]
+    );
+}
+
+/// Ordered and combined DDL retain historical values while native defaults
+/// follow the final source default, including removal.
+#[tokio::test(flavor = "multi_thread")]
+async fn ddl_defaults_preserve_existing_rows_and_future_defaults() {
+    init_test_tracing();
+
+    // GIVEN: a synced table with one existing row before any column additions.
+    let mut database = spawn_source_database().await;
+    let table_name = test_table_name("ordered_ddl_defaults");
+    let table_id =
+        database.create_table(table_name.clone(), true, &[("value", "integer")]).await.unwrap();
+    let table = table_name.as_quoted_identifier();
+    database.run_sql(&format!("insert into {table} default values")).await.unwrap();
+    let publication = "ordered_ddl_defaults_pub";
+    database.create_publication(publication, std::slice::from_ref(&table_name)).await.unwrap();
+    let lake = create_test_lake("ordered_ddl_defaults").await;
+    let store = NotifyingStore::new();
+    let destination = build_destination(&lake.catalog_url, &lake.data_url, store.clone()).await;
+    let mut pipeline = create_pipeline(
+        &database.config,
+        random_pipeline_id().as_str(),
+        publication.to_owned(),
+        store.clone(),
+        destination.clone(),
+    );
+    let synced = store.notify_on_table_sync_complete(table_id).await;
+
+    pipeline.start().await.unwrap();
+
+    synced.notified().await;
+
+    let applied = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
+        .await;
+
+    // WHEN: columns are added with default 1, altered to 2 or dropped, and a
+    // new row is inserted.
+    let transaction = database.begin_transaction().await;
+    for clauses in [
+        "add column ordered_value integer default 1",
+        "alter column ordered_value set default 2",
+        "add column combined_value integer default 1, alter column combined_value set default 2",
+        "add column dropped_default integer default 1",
+        "alter column dropped_default drop default",
+    ] {
+        transaction.run_sql(&format!("alter table {table} {clauses}")).await.unwrap();
+    }
+    transaction.run_sql(&format!("insert into {table} default values")).await.unwrap();
+    transaction.commit_transaction().await;
+
+    applied.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+    drop(destination);
+    checkpoint_lake(&lake.catalog_url, &lake.data_url);
+
+    // THEN: the pre-DDL row keeps 1 while replicated and native post-DDL
+    // inserts use the final default.
+    let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
+    let target =
+        qualified_lake_table_name(&table_name_to_ducklake_table_name(&table_name).unwrap());
+    conn.execute_batch(&format!("insert into {target} (id) values (3)")).unwrap();
+    let mut statement = conn
+        .prepare(&format!(
+            "select id, ordered_value, combined_value, dropped_default from {target} order by id"
+        ))
+        .unwrap();
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<i32>>(1)?,
+                row.get::<_, Option<i32>>(2)?,
+                row.get::<_, Option<i32>>(3)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        [(1, Some(1), Some(1), Some(1)), (2, Some(2), Some(2), None), (3, Some(2), Some(2), None),]
     );
 }
 

@@ -3,6 +3,22 @@ use crate::{
     error::{ErrorKind, EtlResult},
 };
 
+/// Marks input bytes outside the ASCII hexadecimal alphabet.
+const INVALID_DIGIT: u8 = u8::MAX;
+
+/// Maps each input byte to a nibble or [`INVALID_DIGIT`].
+const HEX_DIGITS: [u8; 256] = {
+    let mut digits = [INVALID_DIGIT; 256];
+    let mut nibble = 0_u8;
+    while nibble < 16 {
+        let lower = b"0123456789abcdef"[nibble as usize];
+        digits[lower as usize] = nibble;
+        digits[lower.to_ascii_uppercase() as usize] = nibble;
+        nibble += 1;
+    }
+    digits
+};
+
 /// Converts a Postgres bytea hex string to a byte array.
 ///
 /// This function parses Postgres's hex-encoded bytea format, which uses the
@@ -17,7 +33,6 @@ pub(crate) fn parse_bytea_hex_string(value: &str) -> EtlResult<Vec<u8>> {
         );
     };
 
-    let mut result = Vec::with_capacity(value.len() / 2);
     if !value.len().is_multiple_of(2) {
         bail!(
             ErrorKind::ConversionError,
@@ -26,29 +41,22 @@ pub(crate) fn parse_bytea_hex_string(value: &str) -> EtlResult<Vec<u8>> {
         );
     }
 
+    let mut result = Vec::with_capacity(value.len() / 2);
     for digits in value.chunks_exact(2) {
-        let high = parse_hex_digit(digits[0])?;
-        let low = parse_hex_digit(digits[1])?;
-        result.push((high << 4) | low);
-    }
-
-    Ok(result)
-}
-
-/// Parses one ASCII hexadecimal digit.
-fn parse_hex_digit(byte: u8) -> EtlResult<u8> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        b'A'..=b'F' => Ok(byte - b'A' + 10),
-        _ => {
+        let high = HEX_DIGITS[usize::from(digits[0])];
+        let low = HEX_DIGITS[usize::from(digits[1])];
+        if (high | low) == INVALID_DIGIT {
             bail!(
                 ErrorKind::ConversionError,
                 "Bytea hex string conversion failed",
                 "Invalid hexadecimal digit"
             );
         }
+
+        result.push((high << 4) | low);
     }
+
+    Ok(result)
 }
 
 #[cfg(kani)]
@@ -74,6 +82,16 @@ mod tests {
 
         for (value, expected) in cases {
             assert_eq!(parse_bytea_hex_string(value).unwrap(), *expected, "value: {value:?}");
+        }
+    }
+
+    #[test]
+    fn hex_digits_match_the_ascii_hex_alphabet() {
+        for byte in u8::MIN..=u8::MAX {
+            let expected = char::from(byte).to_digit(16);
+            let digit = HEX_DIGITS[usize::from(byte)];
+
+            assert_eq!((digit != INVALID_DIGIT).then_some(u32::from(digit)), expected);
         }
     }
 

@@ -349,7 +349,7 @@ pub fn numeric_modifiers(modifier: TypeModifier) -> Option<NumericModifiers> {
 ///
 /// This type contains all metadata about a column including its name, data
 /// type, type modifier, ordinal position, primary key information, nullability,
-/// and default expression.
+/// default expression, and captured missing-row value.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ColumnSchema {
     /// The name of the column.
@@ -369,8 +369,18 @@ pub struct ColumnSchema {
     pub primary_key_ordinal_position: Option<i32>,
     /// Whether the column can contain NULL values.
     pub nullable: bool,
-    /// The source default expression for this column, if one is defined.
+    /// The current source expression used when future inserts omit this column.
     pub default_expression: Option<String>,
+    /// The captured SQL literal used for rows missing this physical column.
+    ///
+    /// Destinations with add-time default semantics use this for existing rows
+    /// when adding a physical column. `None` falls back to
+    /// [`Self::default_expression`], including legacy metadata, matching
+    /// expressions, and columns without a stored fast-add value.
+    /// Publication-only additions do not backfill this value. This is not a
+    /// history of values materialized by heap rewrites or volatile
+    /// defaults.
+    pub missing_value_expression: Option<String>,
 }
 
 impl ColumnSchema {
@@ -390,6 +400,7 @@ impl ColumnSchema {
             primary_key_ordinal_position: None,
             nullable,
             default_expression: None,
+            missing_value_expression: None,
         }
     }
 
@@ -420,6 +431,23 @@ impl ColumnSchema {
     pub fn with_default_expression_option(mut self, default_expression: Option<String>) -> Self {
         self.default_expression = default_expression;
         self
+    }
+
+    /// Sets the captured literal for a physically missing column value.
+    pub fn with_missing_value_expression(mut self, expression: Option<String>) -> Self {
+        self.missing_value_expression = expression;
+        self
+    }
+
+    /// Returns the default used to populate existing rows on a physical column
+    /// addition in destinations that support that behavior.
+    ///
+    /// A captured fast-add value takes precedence; otherwise the current
+    /// default applies, including legacy schemas and matching expressions.
+    /// Publication-only additions must not use this value to backfill
+    /// historical rows.
+    pub fn initial_default_expression(&self) -> Option<&str> {
+        self.missing_value_expression.as_deref().or(self.default_expression.as_deref())
     }
 
     /// Returns whether this column is part of the table's primary key.
@@ -506,6 +534,7 @@ impl ColumnSchemaBuilder {
             primary_key_ordinal_position: self.primary_key_ordinal_position,
             nullable: self.nullable,
             default_expression: self.default_expression,
+            missing_value_expression: None,
         }
     }
 }

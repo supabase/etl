@@ -1809,15 +1809,21 @@ fn ensure_bigquery_full_row_matches_schema(
 /// Builds a BigQuery CDC upsert row after checking the source row width.
 fn bigquery_upsert_row(
     replicated_table_schema: &ReplicatedTableSchema,
-    mut table_row: TableRow,
+    table_row: TableRow,
     sequence_number: String,
 ) -> EtlResult<BigQueryTableRow> {
     ensure_bigquery_full_row_matches_schema(replicated_table_schema, &table_row)?;
 
-    table_row.values_mut().push(BigQueryOperationType::Upsert.into_cell());
-    table_row.values_mut().push(Cell::String(sequence_number));
+    let source_column_count = table_row.values().len();
+    let tagged_cells =
+        table_row.into_values().into_iter().enumerate().map(|(index, cell)| (index + 1, cell));
 
-    BigQueryTableRow::try_from(table_row)
+    BigQueryTableRow::try_from_cdc_cells(
+        tagged_cells,
+        source_column_count,
+        BigQueryOperationType::Upsert.as_str(),
+        sequence_number,
+    )
 }
 
 /// Builds one or two BigQuery CDC rows for an update.
@@ -2126,12 +2132,15 @@ fn bigquery_delete_row(
     sequence_number: String,
 ) -> EtlResult<BigQueryTableRow> {
     let source_column_count = replicated_table_schema.column_schemas().len();
-    let mut tagged_cells =
+    let tagged_cells =
         bigquery_primary_key_tagged_cells_from_old_row(replicated_table_schema, old_table_row)?;
-    tagged_cells.push((source_column_count + 1, BigQueryOperationType::Delete.into_cell()));
-    tagged_cells.push((source_column_count + 2, Cell::String(sequence_number)));
 
-    BigQueryTableRow::try_from_tagged_cells(tagged_cells)
+    BigQueryTableRow::try_from_cdc_cells(
+        tagged_cells,
+        source_column_count,
+        BigQueryOperationType::Delete.as_str(),
+        sequence_number,
+    )
 }
 
 /// Calculates the optimal number of batches for table copy operations.
@@ -3288,48 +3297,47 @@ mod tests {
         assert_eq!(calculate_target_batches_for_table_copy(&rows), 3);
     }
 
-    #[test]
-    fn bigquery_delete_key_row_encodes_identity_and_cdc_tags_against_descriptor_numbers() {
+    /// A projected table with a composite key at replicated tags 1 and 3.
+    fn replicated_schema_with_nonadjacent_primary_key() -> ReplicatedTableSchema {
         let table_schema = Arc::new(TableSchema::new(
             TableId::new(1),
             TableName::new("public".to_owned(), "users".to_owned()),
             vec![
-                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
-                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, false),
-                ColumnSchema::new("age".to_owned(), Type::INT4, -1, 3, false),
+                ColumnSchema::new("tenant_id".to_owned(), Type::INT4, -1, 1, false)
+                    .with_primary_key(1),
+                ColumnSchema::new("hidden".to_owned(), Type::TEXT, -1, 2, true),
+                ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 3, false),
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 4, false).with_primary_key(2),
+                ColumnSchema::new("age".to_owned(), Type::INT4, -1, 5, true),
             ],
         ));
-        let replicated_table_schema = ReplicatedTableSchema::from_masks(
+
+        ReplicatedTableSchema::from_mask(
             table_schema,
-            etl::schema::ReplicationMask::from_bytes(vec![1, 1, 1]),
-            IdentityMask::from_bytes(vec![1, 0, 0]),
-        );
+            ReplicationMask::from_bytes(vec![1, 0, 1, 1, 1]),
+        )
+    }
+
+    #[test]
+    fn bigquery_delete_key_row_encodes_identity_and_cdc_tags_against_descriptor_numbers() {
+        let replicated_table_schema = replicated_schema_with_nonadjacent_primary_key();
 
         let row = bigquery_delete_row(
             &replicated_table_schema,
-            OldTableRow::Key(TableRow::new(vec![Cell::I32(42)])),
+            OldTableRow::Key(TableRow::new(vec![Cell::I32(42), Cell::I32(7)])),
             "lsn:1".to_owned(),
         )
         .unwrap();
 
-        let encoded = row.encode_to_vec();
-
-        // Field tags must line up with the descriptor numbering: 1 => id, 4 =>
-        // _CHANGE_TYPE, 5 => _CHANGE_SEQUENCE_NUMBER.
-        assert!(encoded.windows(2).any(|window| window == [0x08, 0x2a]));
-        assert!(
-            encoded
-                .windows(8)
-                .any(|window| window == [0x22, 0x06, b'D', b'E', b'L', b'E', b'T', b'E'])
+        assert_eq!(
+            row.encode_to_vec(),
+            expected_row_bytes(vec![
+                (1, Cell::I32(42)),
+                (3, Cell::I32(7)),
+                (5, Cell::String("DELETE".to_owned())),
+                (6, Cell::String("lsn:1".to_owned())),
+            ])
         );
-        assert!(
-            encoded.windows(7).any(|window| window == [0x2a, 0x05, b'l', b's', b'n', b':', b'1'])
-        );
-
-        // Non-identity source columns are intentionally omitted from sparse
-        // delete rows.
-        assert!(!encoded.contains(&0x12));
-        assert!(!encoded.contains(&0x18));
     }
 
     #[test]
@@ -3382,13 +3390,18 @@ mod tests {
 
     #[test]
     fn bigquery_update_rows_emits_delete_before_upsert_when_primary_key_changes() {
-        let replicated_table_schema = replicated_schema(IdentityType::PrimaryKey);
+        let replicated_table_schema = replicated_schema_with_nonadjacent_primary_key();
         let event_position = EventPosition::new(PgLsn::from(1), 0);
 
         let rows = bigquery_update_rows(
             &replicated_table_schema,
-            TableRow::new(vec![Cell::I32(2), Cell::String("updated".to_owned())]),
-            Some(OldTableRow::Key(TableRow::new(vec![Cell::I32(1)]))),
+            TableRow::new(vec![
+                Cell::I32(42),
+                Cell::String("updated".to_owned()),
+                Cell::I32(2),
+                Cell::Null,
+            ]),
+            Some(OldTableRow::Key(TableRow::new(vec![Cell::I32(42), Cell::I32(1)]))),
             event_position,
         )
         .unwrap();
@@ -3397,18 +3410,20 @@ mod tests {
         assert_eq!(
             rows[0].encode_to_vec(),
             expected_row_bytes(vec![
-                (1, Cell::I32(1)),
-                (3, Cell::String("DELETE".to_owned())),
-                (4, Cell::String("0000000000000001/0000000000000000/0000000000000000".to_owned(),),),
+                (1, Cell::I32(42)),
+                (3, Cell::I32(1)),
+                (5, Cell::String("DELETE".to_owned())),
+                (6, Cell::String("0000000000000001/0000000000000000/0000000000000000".to_owned(),),),
             ])
         );
         assert_eq!(
             rows[1].encode_to_vec(),
             expected_row_bytes(vec![
-                (1, Cell::I32(2)),
+                (1, Cell::I32(42)),
                 (2, Cell::String("updated".to_owned())),
-                (3, Cell::String("UPSERT".to_owned())),
-                (4, Cell::String("0000000000000001/0000000000000000/0000000000000001".to_owned(),),),
+                (3, Cell::I32(2)),
+                (5, Cell::String("UPSERT".to_owned())),
+                (6, Cell::String("0000000000000001/0000000000000000/0000000000000001".to_owned(),),),
             ])
         );
     }

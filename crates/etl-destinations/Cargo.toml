@@ -51,6 +51,7 @@ bigquery = [
     "dep:serde_json",
     "dep:prost",
     "dep:rand",
+    "dep:reqwest",
     "dep:tonic",
     "dep:tracing",
     "dep:tokio",

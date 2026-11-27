@@ -12,7 +12,7 @@ use etl_postgres::slots::EtlReplicationSlot;
 use futures::FutureExt;
 use metrics::counter;
 use tokio::{
-    sync::{Mutex, MutexGuard, Notify, Semaphore},
+    sync::{Mutex, MutexGuard, Notify, Semaphore, watch},
     task::AbortHandle,
 };
 use tokio_util::sync::CancellationToken;
@@ -212,6 +212,12 @@ impl TableSyncWorkerState {
         Self { inner: Arc::new(Mutex::new(inner)) }
     }
 
+    /// Creates a worker state outside the pool for apply handoff tests.
+    #[cfg(test)]
+    pub(crate) fn new_for_test(table_id: TableId, table_state: TableState) -> Self {
+        Self::new(table_id, table_state)
+    }
+
     /// Locks the state for reading or changing it.
     ///
     /// Waiting for another worker's transition goes through
@@ -361,6 +367,7 @@ impl TableSyncWorkerHandle {
 /// operation.
 #[derive(Debug)]
 pub(crate) struct TableSyncWorker<S, D> {
+    source_network_failures: watch::Sender<()>,
     pipeline_id: PipelineId,
     config: Arc<PipelineConfig>,
     table_id: TableId,
@@ -387,6 +394,7 @@ impl<S, D> TableSyncWorker<S, D> {
     pub(crate) fn new(
         pipeline_id: PipelineId,
         config: Arc<PipelineConfig>,
+        source_network_failures: watch::Sender<()>,
         table_id: TableId,
         store: S,
         destination: D,
@@ -400,6 +408,7 @@ impl<S, D> TableSyncWorker<S, D> {
         Self {
             pipeline_id,
             config,
+            source_network_failures,
             table_id,
             store,
             destination,
@@ -668,6 +677,9 @@ where
                     return Ok(result);
                 }
                 Err(err) => {
+                    if err.is_postgres_dial_failure() {
+                        let _ = self.source_network_failures.send(());
+                    }
                     let result = Self::handle_table_sync_worker_error(
                         self.table_id,
                         self.config.as_ref(),

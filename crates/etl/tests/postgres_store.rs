@@ -2352,3 +2352,42 @@ async fn destination_metadata_roundtrip_preserves_previous_logical_endpoint() {
             && previous_replication_mask == &previous_mask
     ));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_schema_roundtrip_preserves_missing_value_expression() {
+    init_test_tracing();
+
+    // GIVEN: a table schema with columns that have and omit
+    // missing_value_expression.
+    let database = spawn_source_database().await;
+    let pipeline_id = "1";
+    let table_id = TableId::new(54323);
+    let schema = TableSchema::new(
+        table_id,
+        TableName::new("public".to_owned(), "missing_values".to_owned()),
+        vec![
+            ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("with_literal".to_owned(), PgType::INT4, -1, 2, true)
+                .with_default_expression("2".to_owned())
+                .with_missing_value_expression(Some("1".to_owned())),
+            ColumnSchema::new("with_null".to_owned(), PgType::INT4, -1, 3, true)
+                .with_default_expression("2".to_owned())
+                .with_missing_value_expression(Some("null".to_owned())),
+            ColumnSchema::new("without_hint".to_owned(), PgType::TEXT, -1, 4, true)
+                .with_default_expression("'x'::text".to_owned()),
+        ],
+    );
+
+    // WHEN: the schema is stored and reloaded from PostgresStore into a fresh
+    // cache.
+    let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+    store.store_table_schema(schema.clone()).await.unwrap();
+
+    let reloaded_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+    reloaded_store.load_cache().await.unwrap();
+    let loaded =
+        reloaded_store.get_table_schema(&table_id, SnapshotId::initial()).await.unwrap().unwrap();
+
+    // THEN: every column's missing_value_expression matches what was written.
+    assert_eq!(*loaded, schema);
+}

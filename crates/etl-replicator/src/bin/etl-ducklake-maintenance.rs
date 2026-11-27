@@ -1,6 +1,6 @@
 //! One-shot DuckLake maintenance binary for Kubernetes maintenance Jobs.
 
-use std::{env, error::Error, process::ExitCode};
+use std::{env, error::Error, path::Path, process::ExitCode};
 
 use etl_config::{
     default_ducklake_s3_url_style, default_ducklake_s3_use_ssl, load_config,
@@ -10,10 +10,14 @@ use etl_config::{
         ReplicatorConfig, Validate,
     },
 };
-use etl_maintenance::ducklake::{
-    CleanupOldFilesMaintenanceConfig, DuckLakeMaintenanceConfig, ExpireSnapshotsMaintenanceConfig,
-    InlineFlushMaintenanceConfig, MergeAdjacentFilesMaintenanceConfig,
-    RewriteDataFilesMaintenanceConfig, S3Config as DuckLakeS3Config, run_maintenance_once,
+use etl_maintenance::{
+    ducklake::{
+        CleanupOldFilesMaintenanceConfig, DuckLakeMaintenanceConfig,
+        ExpireSnapshotsMaintenanceConfig, InlineFlushMaintenanceConfig,
+        MergeAdjacentFilesMaintenanceConfig, RewriteDataFilesMaintenanceConfig,
+        S3Config as DuckLakeS3Config, run_maintenance_once,
+    },
+    report::{MaintenanceResults, MaintenanceRunnerReport},
 };
 use rustls::crypto::aws_lc_rs;
 use secrecy::ExposeSecret;
@@ -45,6 +49,11 @@ fn try_main() -> MaintenanceResult<()> {
 
 /// Runs one async maintenance attempt.
 async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
+    let pipeline_id = config.pipeline.id.clone();
+    let project_ref = config.project_ref().map(ToOwned::to_owned);
+    // A file handoff needs no Kubernetes client or service-account token.
+    let report_path =
+        env::var("ETL_DUCKLAKE_MAINTENANCE_REPORT_PATH").ok().filter(|path| !path.is_empty());
     let DestinationConfig::Ducklake {
         catalog_url,
         catalog_pooler_url,
@@ -166,6 +175,22 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
     );
 
     let outcome = run_maintenance_once(maintenance_config).await?;
+    if let Some(path) = report_path {
+        let report = MaintenanceRunnerReport {
+            version: 1,
+            run_id: env::var("ETL_DUCKLAKE_MAINTENANCE__RUN_ID").unwrap_or_default(),
+            project_ref: project_ref.unwrap_or_default(),
+            pipeline_id,
+            inline_flush: outcome.inline_flush_summaries.clone(),
+            results: MaintenanceResults {
+                merge_adjacent_files_created: outcome.merge_adjacent_files_created,
+                rewrite_data_files_created: outcome.rewrite_data_files_created,
+                expired_snapshots: outcome.expired_snapshots,
+                cleaned_up_files: outcome.cleaned_up_files,
+            },
+        };
+        report.write_termination_message(Path::new(&path)).await;
+    }
     info!(
         applied = outcome.applied(),
         replay_helper_rows_deleted = outcome.replay_helper_rows_deleted,
@@ -205,9 +230,8 @@ fn init_crypto_provider() {
 
 /// Initializes direct stdout logging for short-lived Kubernetes Jobs.
 fn init_stdout_tracing() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new("etl_ducklake_maintenance=info,etl_maintenance::ducklake=info")
-    });
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("etl_ducklake_maintenance=info,etl_maintenance=info"));
     let _ = tracing_subscriber::registry()
         .with(filter)
         .with(tracing_subscriber::fmt::layer().with_target(true))

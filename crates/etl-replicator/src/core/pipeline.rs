@@ -12,6 +12,7 @@ use crate::{
     error::ReplicatorResult,
     health::ReplicatorHealth,
     metrics,
+    source_repair::SourceRepair,
 };
 
 /// Initializes a destination and pipeline, then drains running workers on
@@ -22,11 +23,12 @@ use crate::{
 /// through the tracing wrapper. Current compiler layouts can reserve separate
 /// slots for a future argument and the child being awaited; constructing the
 /// initialization future inside avoids the extra large argument slot.
-#[tracing::instrument(skip(initialize, shutdown_signal, replicator_health))]
+#[tracing::instrument(skip_all)]
 pub(super) async fn start<S, D, F, Fut>(
     initialize: F,
     shutdown_signal: &mut ShutdownSignal,
     replicator_health: &ReplicatorHealth,
+    source_repair: Option<&SourceRepair<'_>>,
 ) -> ReplicatorResult<()>
 where
     S: PipelineStore,
@@ -39,15 +41,28 @@ where
     };
     let mut pipeline = result?;
 
-    let startup_result = with_shutdown!(pipeline.start(), shutdown_signal.wait());
+    let failures =
+        source_repair.map(|repair| (repair, pipeline.subscribe_source_network_failures()));
+    let startup_result = with_shutdown!(
+        async {
+            let result = pipeline.start().await;
+            if let Err(error) = &result
+                && let Some(repair) = source_repair
+            {
+                repair.startup(error).await;
+            }
+            result
+        },
+        shutdown_signal.wait()
+    );
 
     match startup_result {
         Some(Ok(())) => replicator_health.set_replicator_state(ReplicatorState::Running),
         result => {
             replicator_health.set_replicator_state(ReplicatorState::Stopping);
 
-            // Startup failures return immediately. A signal is an orderly
-            // stop, so close the destination constructed before cancellation.
+            // A signal is an orderly stop, including while waiting for repair.
+            // Close the destination constructed before cancellation.
             result.unwrap_or(Ok(()))?;
 
             pipeline.shutdown_and_wait().await?;
@@ -62,7 +77,21 @@ where
     let pipeline_wait = pipeline.wait();
     tokio::pin!(pipeline_wait);
 
-    let pipeline_result = with_shutdown!(&mut pipeline_wait, shutdown_signal.wait());
+    let pipeline_result = with_shutdown!(
+        async {
+            if let Some((repair, failures)) = failures {
+                tokio::select! {
+                    biased;
+
+                    result = &mut pipeline_wait => return result,
+
+                    () = repair.run(failures) => {}
+                }
+            }
+            (&mut pipeline_wait).await
+        },
+        shutdown_signal.wait()
+    );
     replicator_health.set_replicator_state(ReplicatorState::Stopping);
 
     match pipeline_result {

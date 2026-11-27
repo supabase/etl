@@ -75,6 +75,19 @@ impl DuckLakeTableName {
         }
     }
 
+    /// Returns a readable name for metric labels, not a durable key.
+    ///
+    /// Without a namespace this matches the legacy [`Self::id`]. With one, it
+    /// is `namespace.schema.table`. Identifiers are used literally, so the
+    /// name can be ambiguous when they contain dots. Durable state must
+    /// keep using [`Self::id`].
+    pub fn metric_label(&self) -> String {
+        match &self.namespace {
+            None => format!("{}.{}", self.schema, self.table),
+            Some(namespace) => format!("{}.{}.{}", namespace, self.schema, self.table),
+        }
+    }
+
     /// Prefix used to select replay state owned by one source namespace.
     pub fn namespace_id_prefix(namespace: &str) -> String {
         format!("v2:{}:", encode_replay_component(namespace))
@@ -291,5 +304,22 @@ mod tests {
             a
         );
         assert_eq!(dotted.schema_path(), "\"project_a\".\"a.b\"");
+    }
+
+    #[test]
+    fn metric_label_is_readable_and_leaves_id_unchanged() {
+        let legacy = DuckLakeTableName::new("public", "orders");
+        assert_eq!(legacy.metric_label(), "public.orders");
+        assert_eq!(legacy.metric_label(), legacy.id());
+
+        let namespaced =
+            DuckLakeTableName::new("public", "orders").with_namespace(Some("project_a".into()));
+        assert_eq!(namespaced.metric_label(), "project_a.public.orders");
+        assert!(namespaced.id().starts_with("v2:"));
+        assert_ne!(namespaced.id(), namespaced.metric_label());
+
+        let literal =
+            DuckLakeTableName::new("a.b:c", "d\"e").with_namespace(Some("p.q\"r:s".into()));
+        assert_eq!(literal.metric_label(), "p.q\"r:s.a.b:c.d\"e");
     }
 }

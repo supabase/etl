@@ -160,12 +160,13 @@ To use an existing Postgres server, set `SKIP_DOCKER=1` and the matching
 
 ### DuckDB version
 
-DuckLake uses the Git-pinned `duckdb-rs` revision in `Cargo.toml`, which bundles
-stable DuckDB **v2.0.0** (`d54cbbe3df`). A matching crates.io release is
-not yet available. The destination and maintenance runner must load extensions
+DuckLake uses the `duckdb-rs` crates.io release pinned in `Cargo.toml`, whose
+version encodes the bundled engine: `1.20001.0` is stable DuckDB **v2.0.1**
+(`8d78114e90`). The destination and maintenance runner must load extensions
 for that exact engine version; update their extension-version constants, the
-test helpers, and `scripts/bin/vendor-duckdb-extensions.sh` together when changing
-the dependency.
+test helpers, the source-hash assertion in the version unit test, and
+`scripts/bin/vendor-duckdb-extensions.sh` together when changing the
+dependency.
 
 The destination and maintenance runner attach with `AUTOMATIC_MIGRATION false`
 and omit `DUCKLAKE_VERSION`. Existing `1.0` catalogs stay on that format, while
@@ -184,23 +185,17 @@ to upgrade such catalogs to `1.0`, verify the version, then deploy DuckDB 2.0.
 Do not enable automatic migration under DuckDB 2.0 as a workaround for this
 error. Quaxy attaches with `READ_ONLY`, so it cannot create or migrate catalogs.
 
-This upstream revision stamps its bundled sources with a development version
-instead of the published release label. `.cargo/config.toml` supplies the
-matching `CXXFLAGS` version definitions so signed extensions load. Keep those
-definitions in sync with the Git pin as well. If you supply your own `CXXFLAGS`
-or consume these crates from another workspace, include both definitions from
-that config; Cargo does not inherit dependency workspaces' configuration.
-The pinned `cc` build helper also accepts `CXXFLAGS_<target>`,
-`CXXFLAGS_<target_with_underscores>`, and `HOST_CXXFLAGS` or `TARGET_CXXFLAGS`.
-It combines those with `CXXFLAGS`, applying more specific flags last; do not
-redefine or undefine the version macros there. The destination and maintenance
-runner check the linked release label before loading extensions and return a
-rebuild instruction on mismatch. The version unit test also checks the source
-hash to catch a stale override.
+The bundled sources report the published release label, so signed extensions
+load without any build-time version override. Do not set `CXXFLAGS` version
+definitions such as `DUCKDB_VERSION` or `DUCKDB_PATCH_VERSION` in this
+workspace or in another workspace consuming these crates; the destination and
+maintenance runner check the linked release label before loading extensions and
+return a rebuild instruction on mismatch. The version unit test also checks the
+source hash to catch a stale or overridden build.
 
 The `libduckdb-sys` profile overrides in `Cargo.toml` keep the bundled C++ engine
 compatible with the published release extensions during development, tests, and
-benchmarks. This revision enables DuckDB's debug allocator bookkeeping when
+benchmarks. The bundled build enables DuckDB's debug allocator bookkeeping when
 Cargo requests debug information, which conflicts with release extensions.
 Other workspaces consuming these crates must also apply those overrides.
 

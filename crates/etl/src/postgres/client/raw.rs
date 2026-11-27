@@ -13,7 +13,7 @@ use rustls::{
     ClientConfig,
     pki_types::{CertificateDer, pem::PemObject},
 };
-use tokio::{sync::watch, time::timeout};
+use tokio::sync::watch;
 use tokio_postgres::{
     Client, Config, Connection, IsolationLevel, NoTls, SimpleQueryMessage, Socket, Transaction,
     config::ReplicationMode, error::SqlState, tls::MakeTlsConnect, types::PgLsn,
@@ -29,11 +29,14 @@ use super::{
 };
 use crate::{
     bail,
-    config::{IntoConnectOptions, PgConnectionConfig, PgConnectionOptions},
+    config::{IntoConnectOptions, PgConnectionConfig, PgConnectionOptions, PipelineConfig},
     error::{ErrorKind, EtlResult},
     etl_error,
     pipeline::PipelineId,
-    postgres::{FeedbackHandle, ReplicationMessageStream, client::SlotCreationMonitor},
+    postgres::{
+        FeedbackHandle, ReplicationMessageStream, client::SlotCreationMonitor,
+        connect_error::connect_replication,
+    },
     replication::{DEFAULT_WAL_SENDER_TIMEOUT, WorkerType},
     schema::{TableId, TableName},
 };
@@ -46,9 +49,13 @@ use crate::{
 /// default timeout or the deletion fails before the slot is released.
 const DELETE_SLOT_TIMEOUT: Duration = Duration::from_secs(90);
 const _: () = assert!(DELETE_SLOT_TIMEOUT.as_secs() >= DEFAULT_WAL_SENDER_TIMEOUT.as_secs() + 30);
-/// Bounds DNS, socket establishment, TLS negotiation, and authentication
-/// together.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+// Default timed retries must outlast `wal_sender_timeout`, which frees a slot
+// still held by a dead connection.
+const _: () = assert!(
+    PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_DELAY_MS
+        * PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS.get() as u64
+        > DEFAULT_WAL_SENDER_TIMEOUT.as_millis() as u64
+);
 /// Default duration unit used when `pg_settings.unit` is empty.
 const PG_SETTINGS_DEFAULT_DURATION_UNIT: &str = "ms";
 /// Base application name for ETL logical replication connections.
@@ -318,17 +325,11 @@ impl PgReplicationClient {
         connection_config: PgReplicationConnectionConfig,
         kind: ConnectionKind,
     ) -> EtlResult<Self> {
-        timeout(CONNECT_TIMEOUT, async {
-            match connection_config.pg_connection_config().tls.enabled {
-                true => PgReplicationClient::connect_tls(connection_config, kind).await,
-                false => PgReplicationClient::connect_no_tls(connection_config, kind).await,
-            }
-        })
-        .await
-        .map_err(|error| {
-            etl_error!(ErrorKind::SourceConnectionFailed, "Postgres connection timed out")
-                .with_source(error)
-        })?
+        if connection_config.pg_connection_config().tls.enabled {
+            Self::connect_tls(connection_config, kind).await
+        } else {
+            Self::connect_no_tls(connection_config, kind).await
+        }
     }
 
     /// Establishes a connection to Postgres without TLS encryption.
@@ -340,7 +341,7 @@ impl PgReplicationClient {
             connection_config.pg_connection_config().with_db(Some(connection_config.options()));
         kind.configure(&mut config);
 
-        let (client, connection) = config.connect(NoTls).await?;
+        let (client, connection) = connect_replication(&config, NoTls).await?;
 
         let server_version =
             connection.parameter("server_version").and_then(extract_server_version);
@@ -371,7 +372,7 @@ impl PgReplicationClient {
             etl_error!(ErrorKind::InvalidState, "TLS client config missing for TLS connection")
         })?;
         let (client, connection) =
-            config.connect(MakeRustlsConnect::from_shared_config(tls_config)).await?;
+            connect_replication(&config, MakeRustlsConnect::from_shared_config(tls_config)).await?;
 
         let server_version =
             connection.parameter("server_version").and_then(extract_server_version);
@@ -859,7 +860,20 @@ impl PgReplicationClient {
             options
         );
 
-        let copy_stream = self.client.copy_both_simple::<bytes::Bytes>(&query).await?;
+        let copy_stream = match self.client.copy_both_simple::<bytes::Bytes>(&query).await {
+            Ok(copy_stream) => copy_stream,
+            // After a lost connection, the old walsender keeps the slot active
+            // until `wal_sender_timeout` expires. Retry instead of failing.
+            Err(err) if err.code() == Some(&SqlState::OBJECT_IN_USE) => {
+                bail!(
+                    ErrorKind::ReplicationSlotInUse,
+                    "Replication slot is active for another session",
+                    format!("Waiting for replication slot '{slot_name}' to be released"),
+                    source: err
+                );
+            }
+            Err(err) => return Err(err.into()),
+        };
 
         Ok(ReplicationMessageStream::create(copy_stream, keep_alive_deadline_duration))
     }
@@ -924,7 +938,7 @@ mod tests {
         net::TcpListener,
         spawn,
         sync::oneshot,
-        time::{Instant, pause, resume, timeout_at},
+        time::{Instant, pause, resume, timeout, timeout_at},
     };
     use tokio_util::task::AbortOnDropHandle;
 
@@ -976,6 +990,7 @@ mod tests {
             assert_eq!(error.kind(), ErrorKind::SourceConnectionFailed);
             assert_eq!(error.retryability(), Retryability::Retryable);
             assert!(error.source().is_some());
+            assert!(!error.is_postgres_dial_failure());
             assert_eq!(error.description(), Some("Postgres connection timed out"));
 
             let mut remaining = Vec::new();

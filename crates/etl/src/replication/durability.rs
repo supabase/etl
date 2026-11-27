@@ -1,4 +1,7 @@
 //! Live main apply-worker durability observations, independent of write waits.
+//!
+//! The apply worker's retry loop also reads the persisted replication
+//! checkpoint from here to tell whether a failed attempt made progress.
 
 use std::{
     sync::{Arc, Mutex, MutexGuard, PoisonError},
@@ -36,13 +39,16 @@ struct OutstandingDurability {
     replay_until: Option<PgLsn>,
 }
 
-/// Coherent state shared by the main apply worker and its independent sampler.
+/// Coherent state shared by the main apply worker, its retry loop, and its
+/// independent sampler.
 #[derive(Debug, Default)]
 struct DurabilityState {
     /// Whether the main apply loop has completed its replication handshake.
     observing: bool,
     /// Work remains pending through errors, retries, and shutdown draining.
     outstanding: Option<OutstandingDurability>,
+    /// Highest replication checkpoint any main apply attempt has persisted.
+    persisted_checkpoint: Option<PgLsn>,
 }
 
 impl DurabilityState {
@@ -63,7 +69,9 @@ impl DurabilityState {
 /// until a durable commit covers the previous dispatch frontier. This
 /// conservatively retains the original age while part of that interval may
 /// already be replayed. No per-batch history or table labels accumulate during
-/// an indefinite stall.
+/// an indefinite stall. The highest persisted replication checkpoint is kept
+/// too, so the retry loop can tell progress from repeated failure without a
+/// store read.
 #[derive(Clone, Debug)]
 pub(crate) struct DurabilityMonitor {
     /// Age series registered once for this pipeline. Set only while holding
@@ -118,6 +126,17 @@ impl DurabilityMonitor {
             state.outstanding = None;
         }
         self.gauge.set(state.age());
+    }
+
+    /// Records a replication checkpoint that the store confirmed as persisted.
+    pub(crate) fn checkpoint_persisted(&self, checkpoint_lsn: PgLsn) {
+        let mut state = self.lock_state();
+        state.persisted_checkpoint = state.persisted_checkpoint.max(Some(checkpoint_lsn));
+    }
+
+    /// Returns the highest replication checkpoint any attempt has persisted.
+    pub(crate) fn persisted_checkpoint(&self) -> Option<PgLsn> {
+        self.lock_state().persisted_checkpoint
     }
 
     /// Starts the sampler whose owner must abort and join it during teardown.

@@ -104,7 +104,7 @@ use crate::{
             build_drop_default_sql_ducklake, build_drop_not_null_sql_ducklake,
             build_partition_by_sql_ducklake, build_rename_column_sql_ducklake,
             build_reset_sorted_by_sql_ducklake, build_set_default_sql_ducklake,
-            build_set_sorted_by_sql_ducklake,
+            build_set_sorted_by_sql_ducklake, ducklake_default_expression,
         },
         sql::{qualified_lake_table_name, quote_identifier},
     },
@@ -678,10 +678,10 @@ pub struct DuckLakeDestination<S> {
     copy_buffer_peak_staged_bytes: Arc<AtomicU64>,
     /// Admission permits for connection-pinned initial-copy sessions.
     copy_session_slots: Arc<Semaphore>,
-    /// Live connection-local buffers keyed by destination table.
-    copy_buffers: Arc<Mutex<HashMap<DuckLakeTableName, Arc<DuckLakeCopyBufferHandle>>>>,
-    /// Attempts invalidated by a staging or flush failure until table reset.
-    failed_copy_buffers: Arc<Mutex<HashSet<DuckLakeTableName>>>,
+    /// Live connection-local buffers keyed by source table ID.
+    copy_buffers: Arc<Mutex<HashMap<TableId, Arc<DuckLakeCopyBufferHandle>>>>,
+    /// Abandoned attempts and staging failures fenced until table reset.
+    failed_copy_buffers: Arc<Mutex<HashSet<TableId>>>,
     /// Shared-instance tables currently forced to write COPY rows to Parquet.
     copy_direct_to_parquet_tables: Arc<Mutex<HashSet<DuckLakeTableName>>>,
     store: S,
@@ -1018,6 +1018,10 @@ where
         Ok(())
     }
 
+    async fn abort_table_copy(&self, table_id: TableId) {
+        self.invalidate_copy_buffer(table_id);
+    }
+
     async fn drop_table_for_copy(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
@@ -1326,6 +1330,47 @@ fn ensure_ducklake_schema_plan_recoverable(
     Ok(())
 }
 
+/// Renders the final default after a physical addition or its replay.
+///
+/// When `drop_if_unsupported` is true, an unsupported future default emits
+/// `DROP DEFAULT` so an add-time default is not left installed for future
+/// inserts.
+fn plan_ducklake_column_default(
+    table_name: &DuckLakeTableName,
+    column: &ColumnSchema,
+    drop_if_unsupported: bool,
+) -> Option<DuckLakeSchemaDdlStatement> {
+    if let Some(expression) = column.default_expression.as_deref() {
+        if let Some(sql) = build_set_default_sql_ducklake(
+            table_name,
+            &column.name,
+            &column.typ,
+            column.modifier,
+            expression,
+        ) {
+            return Some(DuckLakeSchemaDdlStatement {
+                sql,
+                error_description: "DuckLake alter table set default failed",
+            });
+        }
+
+        warn!(
+            table_name = %table_name,
+            column_name = %column.name,
+            "skipping unsupported source column default for ducklake"
+        );
+
+        if !drop_if_unsupported {
+            return None;
+        }
+    }
+
+    Some(DuckLakeSchemaDdlStatement {
+        sql: build_drop_default_sql_ducklake(table_name, &column.name),
+        error_description: "DuckLake alter table drop default failed",
+    })
+}
+
 /// Renders a shared plan using live DuckLake name and nullability state.
 fn plan_ducklake_schema_ddl_with_nullability(
     table_name: &DuckLakeTableName,
@@ -1441,6 +1486,18 @@ fn plan_ducklake_schema_ddl_with_nullability(
                     );
                 }
 
+                if *reason == ColumnPresenceChangeReason::ReplicationMask
+                    && after_column_schema.default_expression.is_some()
+                {
+                    warn!(
+                        table_name = %table_name,
+                        column_name = %after_column_schema.name,
+                        "not applying the source default to a publication-added ducklake \
+                         column; the destination schema will differ from the logical source \
+                         schema"
+                    );
+                }
+
                 if find_ducklake_column(&column_names, &after_column_schema.name).is_some() {
                     debug!(
                         table = %table_name,
@@ -1448,37 +1505,25 @@ fn plan_ducklake_schema_ddl_with_nullability(
                         "ducklake add column skipped because destination column already exists"
                     );
 
-                    if *reason == ColumnPresenceChangeReason::ReplicationMask {
-                        if after_column_schema.default_expression.is_some() {
-                            warn!(
-                                table_name = %table_name,
-                                column_name = %after_column_schema.name,
-                                "not applying the source default to a publication-added ducklake \
-                                 column; the destination schema will differ from the logical source \
-                                 schema"
-                            );
+                    if *reason == ColumnPresenceChangeReason::TableSchema {
+                        let rendered_initial =
+                            after_column_schema.initial_default_expression().and_then(|expr| {
+                                ducklake_default_expression(
+                                    expr,
+                                    &after_column_schema.typ,
+                                    after_column_schema.modifier,
+                                )
+                            });
+
+                        if after_column_schema.default_expression.is_some()
+                            || rendered_initial.is_some()
+                        {
+                            statements.extend(plan_ducklake_column_default(
+                                table_name,
+                                after_column_schema,
+                                rendered_initial.is_some(),
+                            ));
                         }
-                    } else if let Some(default_expression) =
-                        after_column_schema.default_expression.as_deref()
-                    {
-                        let Some(sql) = build_set_default_sql_ducklake(
-                            table_name,
-                            &after_column_schema.name,
-                            &after_column_schema.typ,
-                            after_column_schema.modifier,
-                            default_expression,
-                        ) else {
-                            warn!(
-                                table_name = %table_name,
-                                column_name = %after_column_schema.name,
-                                "skipping unsupported source column default for ducklake"
-                            );
-                            continue;
-                        };
-                        statements.push(DuckLakeSchemaDdlStatement {
-                            sql,
-                            error_description: "DuckLake alter table set default failed",
-                        });
                     }
 
                     continue;
@@ -1487,20 +1532,43 @@ fn plan_ducklake_schema_ddl_with_nullability(
                 let mut destination_column_schema = after_column_schema.clone();
                 if *reason == ColumnPresenceChangeReason::ReplicationMask {
                     destination_column_schema.default_expression = None;
-                    if after_column_schema.default_expression.is_some() {
-                        warn!(
-                            table_name = %table_name,
-                            column_name = %after_column_schema.name,
-                            "not applying the source default to a publication-added ducklake \
-                             column; the destination schema will differ from the logical source \
-                             schema"
-                        );
-                    }
+                } else {
+                    destination_column_schema.default_expression =
+                        after_column_schema.initial_default_expression().map(ToOwned::to_owned);
                 }
+
                 statements.push(DuckLakeSchemaDdlStatement {
                     sql: build_add_column_sql_ducklake(table_name, &destination_column_schema),
                     error_description: "DuckLake alter table add column failed",
                 });
+
+                if *reason == ColumnPresenceChangeReason::TableSchema {
+                    let rendered_initial =
+                        destination_column_schema.default_expression.as_deref().and_then(|expr| {
+                            ducklake_default_expression(
+                                expr,
+                                &after_column_schema.typ,
+                                after_column_schema.modifier,
+                            )
+                        });
+                    let rendered_final =
+                        after_column_schema.default_expression.as_deref().and_then(|expr| {
+                            ducklake_default_expression(
+                                expr,
+                                &after_column_schema.typ,
+                                after_column_schema.modifier,
+                            )
+                        });
+
+                    if rendered_initial != rendered_final {
+                        statements.extend(plan_ducklake_column_default(
+                            table_name,
+                            after_column_schema,
+                            rendered_initial.is_some(),
+                        ));
+                    }
+                }
+
                 column_names.push(after_column_schema.name.clone());
                 nullable_column_names.insert(after_column_schema.name.clone());
             }
@@ -2405,7 +2473,7 @@ where
     ) -> EtlResult<()> {
         let table_name = self.resolve_destination_table_name(replicated_table_schema).await?;
         let table_write_permit = self.acquire_table_write_slot(&table_name).await?;
-        self.copy_buffers.lock().remove(&table_name);
+        self.discard_copy_buffer(replicated_table_schema.id());
         #[cfg(feature = "test-utils")]
         maybe_fail_drop_table_for_copy_for_tests()?;
         self.ensure_applied_batches_table_exists().await?;
@@ -2466,7 +2534,7 @@ where
         );
 
         self.applied_tables.lock().remove(&table_name);
-        self.failed_copy_buffers.lock().remove(&table_name);
+        self.failed_copy_buffers.lock().remove(&replicated_table_schema.id());
         self.copy_direct_to_parquet_tables.lock().remove(&table_name);
 
         Ok(())
@@ -2628,6 +2696,7 @@ where
         batch_id: Option<TableCopyBatchId>,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
+        let table_id = replicated_table_schema.id();
         let table_name = self.prepare_table_for_writes(replicated_table_schema).await?;
         self.ensure_applied_batches_table_exists().await?;
         let table_write_permit = self.acquire_table_write_slot(&table_name).await?;
@@ -2641,7 +2710,7 @@ where
         }
         let replay_epoch = self.read_table_replay_epoch(&table_name).await?;
 
-        if self.failed_copy_buffers.lock().contains(&table_name) {
+        if self.failed_copy_buffers.lock().contains(&table_id) {
             return Err(Self::invalidated_copy_buffer_error(&table_name));
         }
 
@@ -2653,7 +2722,7 @@ where
                 ));
             }
             let copy_complete = prepare_copy_complete_table_batch(table_name.clone(), replay_epoch);
-            let handle = self.copy_buffers.lock().get(&table_name).cloned();
+            let handle = self.copy_buffers.lock().get(&table_id).cloned();
             let Some(handle) = handle else {
                 let checkpoint_guard = self.acquire_mutation_guard().await;
                 apply_table_batch_with_retry(
@@ -2675,7 +2744,7 @@ where
                 .flush_copy_buffer(&handle, Some(copy_complete), Arc::clone(&table_write_permit))
                 .await
             {
-                self.invalidate_copy_buffer(&table_name);
+                self.invalidate_copy_buffer(table_id);
                 return Err(error);
             }
             self.restore_streaming_data_inlining(
@@ -2684,7 +2753,7 @@ where
             )
             .await?;
             handle.reservations.lock().clear();
-            self.copy_buffers.lock().remove(&table_name);
+            self.copy_buffers.lock().remove(&table_id);
             return Ok(());
         }
 
@@ -2699,31 +2768,31 @@ where
             table_rows,
         )?;
         self.validate_copy_buffer_batch_size(prepared_batch.estimated_bytes())?;
-        let handle = self.copy_buffer_handle(&table_name, &prepared_batch).await?;
+        let handle = self.copy_buffer_handle(table_id, &table_name, &prepared_batch).await?;
         let reservation = self
             .reserve_copy_buffer_capacity(
-                &table_name,
+                table_id,
                 &handle,
                 prepared_batch.estimated_bytes(),
                 Arc::clone(&table_write_permit),
             )
             .await?;
         // Store the reservation before the blocking call starts. If the async
-        // caller is cancelled, the detached blocking task and live session
-        // retain both the capacity and copy-session fences until reset.
+        // caller is cancelled, the blocking task retains the staged bytes and
+        // the table and session fences even if the attempt is abandoned.
         handle.reservations.lock().push(reservation);
-        let blocking_handle = Arc::clone(&handle);
+        let accumulator = Arc::clone(&handle.accumulator);
         let connection = handle.connection.clone();
         let target_bytes = self.copy_buffer_config.target_bytes.get();
         let table_write_permit = Arc::clone(&table_write_permit);
         let append_result = run_duckdb_dedicated_blocking_with_context(
             connection,
             Arc::clone(&self.blocking_slots),
+            (Arc::clone(&handle), table_write_permit),
             move |conn, _operation_context| {
-                let _table_write_permit = table_write_permit;
                 #[cfg(feature = "test-utils")]
                 wait_if_copy_append_paused_for_tests();
-                let mut accumulator = blocking_handle.accumulator.lock();
+                let mut accumulator = accumulator.lock();
                 let appended = accumulator.append(conn, prepared_batch)?;
                 let flushed = appended && accumulator.staged_bytes() >= target_bytes;
                 if flushed {
@@ -2737,7 +2806,7 @@ where
         let (appended, flushed) = match append_result {
             Ok(result) => result,
             Err(error) => {
-                self.invalidate_copy_buffer(&table_name);
+                self.invalidate_copy_buffer(table_id);
                 return Err(error);
             }
         };
@@ -2753,13 +2822,14 @@ where
     /// Returns or creates the dedicated staging session for one copied table.
     async fn copy_buffer_handle(
         &self,
+        table_id: TableId,
         table_name: &DuckLakeTableName,
         batch: &PreparedDuckLakeCopyBatch,
     ) -> EtlResult<Arc<DuckLakeCopyBufferHandle>> {
-        if let Some(handle) = self.copy_buffers.lock().get(table_name).cloned() {
+        if let Some(handle) = self.copy_buffers.lock().get(&table_id).cloned() {
             return Ok(handle);
         }
-        if self.failed_copy_buffers.lock().contains(table_name) {
+        if self.failed_copy_buffers.lock().contains(&table_id) {
             return Err(Self::invalidated_copy_buffer_error(table_name));
         }
 
@@ -2771,10 +2841,10 @@ where
             Arc::clone(&self.copy_session_slots).acquire_owned().await.map_err(|_| {
                 etl_error!(ErrorKind::InvalidState, "DuckLake copy session semaphore closed")
             })?;
-        if let Some(handle) = self.copy_buffers.lock().get(table_name).cloned() {
+        if let Some(handle) = self.copy_buffers.lock().get(&table_id).cloned() {
             return Ok(handle);
         }
-        if self.failed_copy_buffers.lock().contains(table_name) {
+        if self.failed_copy_buffers.lock().contains(&table_id) {
             return Err(Self::invalidated_copy_buffer_error(table_name));
         }
 
@@ -2788,7 +2858,7 @@ where
             session_permit,
             session_guard,
         ));
-        self.copy_buffers.lock().insert(table_name.clone(), Arc::clone(&handle));
+        self.copy_buffers.lock().insert(table_id, Arc::clone(&handle));
         Ok(handle)
     }
 
@@ -2812,7 +2882,7 @@ where
     /// first when its existing staged rows are preventing progress.
     async fn reserve_copy_buffer_capacity(
         &self,
-        table_name: &DuckLakeTableName,
+        table_id: TableId,
         handle: &Arc<DuckLakeCopyBufferHandle>,
         estimated_bytes: u64,
         table_write_permit: Arc<OwnedSemaphorePermit>,
@@ -2843,7 +2913,7 @@ where
         // This may wait for a cancelled caller's detached append. Both that
         // wait and the conditional DuckDB flush must stay on the blocking pool.
         if let Err(error) = self.flush_copy_buffer(handle, None, table_write_permit).await {
-            self.invalidate_copy_buffer(table_name);
+            self.invalidate_copy_buffer(table_id);
             return Err(error);
         }
         handle.reservations.lock().clear();
@@ -2878,24 +2948,35 @@ where
         copy_complete: Option<crate::ducklake::batches::PreparedDuckLakeTableBatch>,
         table_write_permit: Arc<OwnedSemaphorePermit>,
     ) -> EtlResult<()> {
-        let blocking_handle = Arc::clone(handle);
-        let connection = handle.connection.clone();
+        let accumulator = Arc::clone(&handle.accumulator);
         run_duckdb_dedicated_blocking_with_context(
-            connection,
+            handle.connection.clone(),
             Arc::clone(&self.blocking_slots),
-            move |conn, _operation_context| {
-                let _table_write_permit = table_write_permit;
-                blocking_handle.accumulator.lock().flush(conn, copy_complete)
-            },
+            (Arc::clone(handle), table_write_permit),
+            move |conn, _operation_context| accumulator.lock().flush(conn, copy_complete),
         )
         .await
     }
 
     /// Invalidates a failed table-copy session without allowing transparent
     /// connection replacement.
-    fn invalidate_copy_buffer(&self, table_name: &DuckLakeTableName) {
-        self.copy_buffers.lock().remove(table_name);
-        self.failed_copy_buffers.lock().insert(table_name.clone());
+    fn invalidate_copy_buffer(&self, table_id: TableId) {
+        // Before the first write there is no session to fence. A retry with
+        // no persisted destination metadata can start without a table reset.
+        if self.discard_copy_buffer(table_id) {
+            self.failed_copy_buffers.lock().insert(table_id);
+        }
+    }
+
+    /// Discards staging with its connection, which may still be in native use.
+    fn discard_copy_buffer(&self, table_id: TableId) -> bool {
+        let buffer = self.copy_buffers.lock().remove(&table_id);
+        let Some(buffer) = buffer else {
+            return false;
+        };
+
+        buffer.connection.discard();
+        true
     }
 
     /// Builds the sticky error returned after a buffered copy attempt fails.
@@ -5739,6 +5820,87 @@ mod tests {
     }
 
     #[test]
+    fn plan_ducklake_schema_ddl_restores_future_default_after_addition_and_replay() {
+        for (future_default, restoration) in [
+            (
+                Some("2"),
+                r#"alter table "lake"."public"."users" alter column "score" set default 2"#,
+            ),
+            (None, r#"alter table "lake"."public"."users" alter column "score" drop default"#),
+            (
+                Some("nextval('score_seq'::regclass)"),
+                r#"alter table "lake"."public"."users" alter column "score" drop default"#,
+            ),
+        ] {
+            // GIVEN: an added column whose add-time value differs from its
+            // final source default.
+            let column = ColumnSchema::new("score".to_owned(), PgType::INT4, -1, 2, true)
+                .with_default_expression_option(future_default.map(ToOwned::to_owned))
+                .with_missing_value_expression(Some("1".to_owned()));
+            let shared_plan = shared_schema_plan(
+                SchemaDiff::new(vec![column], Vec::new(), Vec::new()),
+                ["id"],
+                ["id", "score"],
+            );
+
+            for already_added in [false, true] {
+                // WHEN: DuckLake plans the DDL on initial apply and on replay
+                // after column add.
+                let names = if already_added { vec!["id", "score"] } else { vec!["id"] };
+                let plan = plan_ducklake_schema_ddl(
+                    &ducklake_table_name(),
+                    names.into_iter().map(ToOwned::to_owned).collect(),
+                    &shared_plan,
+                )
+                .unwrap();
+
+                // THEN: it installs or drops the final default, and only adds
+                // the column if absent.
+                let sql: Vec<_> =
+                    plan.statements.iter().map(|statement| statement.sql.as_str()).collect();
+                let expected = if already_added {
+                    vec![restoration]
+                } else {
+                    vec![
+                        r#"alter table "lake"."public"."users" add column "score" integer default 1"#,
+                        restoration,
+                    ]
+                };
+
+                assert_eq!(sql, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn plan_ducklake_schema_ddl_omits_redundant_set_default_when_rendered_defaults_match() {
+        // GIVEN: an added column whose missing value and cast default render
+        // identically.
+        let column = ColumnSchema::new("status".to_owned(), PgType::TEXT, -1, 2, true)
+            .with_default_expression("'hello'::text".to_owned())
+            .with_missing_value_expression(Some("'hello'".to_owned()));
+        let shared_plan = shared_schema_plan(
+            SchemaDiff::new(vec![column], Vec::new(), Vec::new()),
+            ["id"],
+            ["id", "status"],
+        );
+
+        // WHEN: DuckLake plans the column addition.
+        let plan =
+            plan_ducklake_schema_ddl(&ducklake_table_name(), vec!["id".to_owned()], &shared_plan)
+                .unwrap();
+
+        // THEN: only ADD COLUMN is emitted without a redundant SET DEFAULT.
+        let sql: Vec<_> = plan.statements.iter().map(|statement| statement.sql.as_str()).collect();
+        assert_eq!(
+            sql,
+            vec![
+                r#"alter table "lake"."public"."users" add column "status" varchar default 'hello'"#
+            ]
+        );
+    }
+
+    #[test]
     fn plan_ducklake_schema_ddl_adds_publication_column_nullable_without_default() {
         let table_schema = Arc::new(TableSchema::new(
             TableId::new(1),
@@ -6181,7 +6343,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         for root in candidate_roots {
-            let extension_dir = root.join("2.0.0").join(platform_dir);
+            let extension_dir = root.join("2.0.1").join(platform_dir);
             let ducklake_extension = extension_dir.join("ducklake.duckdb_extension");
             let postgres_scanner_extension = extension_dir.join(POSTGRES_SCANNER_EXTENSION_FILE);
 

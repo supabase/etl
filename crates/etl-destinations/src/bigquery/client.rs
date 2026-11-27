@@ -1,7 +1,6 @@
 use std::{error::Error as _, fmt, io, num::NonZeroU16};
 
 use etl::{
-    data::Cell,
     error::{ErrorKind, EtlError, EtlResult, Retryability},
     etl_error,
     pipeline::PipelineId,
@@ -31,6 +30,7 @@ use gcp_bigquery_client::{
 use metrics::counter;
 use prost::Message;
 use rand::{random, random_range};
+use reqwest::Client as HttpClient;
 use serde::{
     Deserialize, Deserializer,
     de::{self, MapAccess, Visitor},
@@ -79,6 +79,21 @@ const STORAGE_WRITE_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// Maximum backoff when retrying locally retryable Storage Write errors.
 const STORAGE_WRITE_MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
+
+/// Bounds TCP and TLS setup for each BigQuery REST connection.
+///
+/// Fails an unreachable endpoint sooner than [`REST_REQUEST_TIMEOUT`], leaving
+/// more of the query deadline for retries.
+const REST_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Bounds each BigQuery REST request, from connect until the body is read.
+///
+/// Must exceed the server-side wait that `jobs.query` and `getQueryResults`
+/// request, so a healthy long poll is never cut off. A stalled connection then
+/// fails as a retryable request error instead of hanging until the query
+/// deadline, or forever for calls without one.
+pub(super) const REST_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// BigQuery response reasons that are transient even when surfaced with a 4xx
 /// status code.
 const TRANSIENT_BIGQUERY_RESPONSE_REASONS: &[&str] = &[
@@ -292,16 +307,11 @@ pub(super) enum BigQueryOperationType {
 
 impl BigQueryOperationType {
     /// Returns the BigQuery CDC operation string.
-    fn as_str(&self) -> &'static str {
+    pub(super) fn as_str(&self) -> &'static str {
         match self {
             Self::Upsert => "UPSERT",
             Self::Delete => "DELETE",
         }
-    }
-
-    /// Converts the operation type into a [`Cell`] for streaming.
-    pub(super) fn into_cell(self) -> Cell {
-        Cell::String(self.as_str().to_owned())
     }
 }
 
@@ -393,15 +403,29 @@ fn compute_max_inflight_requests(connection_pool_size: NonZeroU16) -> usize {
         .min(MAX_SAFE_INFLIGHT_REQUESTS)
 }
 
-/// Builds the Storage Write API configuration for a connection pool size.
-fn storage_api_config(connection_pool_size: NonZeroU16) -> StorageApiConfig {
-    StorageApiConfig {
+/// Builds an SDK client builder with bounded REST requests and the Storage
+/// Write API configuration for a connection pool size.
+///
+/// Token fetches use the authenticator's own HTTP client and are not bounded
+/// by these timeouts.
+fn client_builder(connection_pool_size: NonZeroU16) -> EtlResult<ClientBuilder> {
+    let http_client = HttpClient::builder()
+        .connect_timeout(REST_CONNECT_TIMEOUT)
+        .timeout(REST_REQUEST_TIMEOUT)
+        .build()
+        .map_err(|error| bq_error_to_etl_error(BQError::RequestError(error)))?;
+    let storage_config = StorageApiConfig {
         connection_pool_size: usize::from(connection_pool_size.get()),
         max_inflight_requests: compute_max_inflight_requests(connection_pool_size),
         // Gzip is CPU-bound on every append with no compression-level control,
         // and rows can carry large text/JSON payloads.
         compression: false,
-    }
+    };
+
+    let mut builder = ClientBuilder::new();
+    builder.with_client(http_client).with_storage_config(storage_config);
+
+    Ok(builder)
 }
 
 /// Adds equal jitter to a retry delay.
@@ -853,11 +877,8 @@ impl BigQueryClient {
         sa_key_file: &str,
         connection_pool_size: NonZeroU16,
     ) -> EtlResult<BigQueryClient> {
-        let storage_config = storage_api_config(connection_pool_size);
-
         let sa_key = read_service_account_key(sa_key_file).await.map_err(bq_error_to_etl_error)?;
-        let client = ClientBuilder::new()
-            .with_storage_config(storage_config)
+        let client = client_builder(connection_pool_size)?
             .build_from_service_account_key(sa_key, false)
             .await
             .map_err(bq_error_to_etl_error)?;
@@ -874,11 +895,8 @@ impl BigQueryClient {
         sa_key: &str,
         connection_pool_size: NonZeroU16,
     ) -> EtlResult<BigQueryClient> {
-        let storage_config = storage_api_config(connection_pool_size);
-
         let sa_key = parse_service_account_key(sa_key.as_bytes()).map_err(bq_error_to_etl_error)?;
-        let client = ClientBuilder::new()
-            .with_storage_config(storage_config)
+        let client = client_builder(connection_pool_size)?
             .build_from_service_account_key(sa_key, false)
             .await
             .map_err(bq_error_to_etl_error)?;
@@ -895,10 +913,7 @@ impl BigQueryClient {
         project_id: BigQueryProjectId,
         connection_pool_size: NonZeroU16,
     ) -> EtlResult<BigQueryClient> {
-        let storage_config = storage_api_config(connection_pool_size);
-
-        let client = ClientBuilder::new()
-            .with_storage_config(storage_config)
+        let client = client_builder(connection_pool_size)?
             .build_from_application_default_credentials()
             .await
             .map_err(bq_error_to_etl_error)?;
@@ -917,10 +932,7 @@ impl BigQueryClient {
         persistent_file_path: P,
         connection_pool_size: NonZeroU16,
     ) -> EtlResult<BigQueryClient> {
-        let storage_config = storage_api_config(connection_pool_size);
-
-        let client = ClientBuilder::new()
-            .with_storage_config(storage_config)
+        let client = client_builder(connection_pool_size)?
             .build_from_installed_flow_authenticator(secret, persistent_file_path)
             .await
             .map_err(bq_error_to_etl_error)?;

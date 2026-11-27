@@ -51,6 +51,29 @@ superuser. Either run the pipeline as a superuser, or apply the source
 migrations in `crates/etl/migrations/source/` as an admin and set
 `run_source_migrations: false`.
 
+The installing role owns the `etl` schema, its helpers, and the event trigger.
+Running the pipeline as that role needs no further grants. If an admin installs
+the helpers for a different replication role, grant that role access to them:
+
+```sql
+GRANT USAGE ON SCHEMA etl TO etl_user;
+GRANT EXECUTE ON FUNCTION etl.describe_table_schema(oid),
+  etl.describe_base_type(oid, int4), etl.describe_table_columns(oid),
+  etl.describe_table_identity(oid),
+  etl.describe_table_publication_columns(oid, text) TO etl_user;
+```
+
+Repeat these grants after upgrades that add helpers; upgrades grant new helpers
+only to the event trigger function's owner. The legacy `describe_table_schema`
+grant supports older binaries.
+Keep the `etl` schema and its owner trusted; the replication role needs USAGE,
+not CREATE, on that schema.
+
+Capture failures never block DDL: the event trigger warns and the DDL commits
+without a schema snapshot. To stop capture, the owner or a superuser runs
+`ALTER EVENT TRIGGER supabase_etl_ddl_message_trigger DISABLE`. Upgrades keep
+it disabled. DDL without a snapshot can require resynchronizing affected tables.
+
 ## Replication Slots
 
 A replication slot records a consumer's progress and retains the WAL it still
@@ -63,6 +86,14 @@ for initial sync and drop them after catch-up completes. By default, both use
 permanent PostgreSQL slots. Table-sync slots can remain after a failed or
 interrupted sync.
 
+After a host or network failure, PostgreSQL keeps the previous session's slot
+active until it detects the lost connection. ETL retries while that slot is
+still held. Keep the retry window, `table_error_retry_delay_ms` times
+`table_error_retry_max_attempts`, longer than PostgreSQL's
+[`wal_sender_timeout`](https://www.postgresql.org/docs/current/runtime-config-replication.html#GUC-WAL-SENDER-TIMEOUT),
+which defaults to 60 seconds. The defaults allow eight retries ten seconds
+apart.
+
 ### Temporary Slots
 
 For ephemeral pipelines, such as an in-memory cache rebuilt from Postgres on
@@ -73,8 +104,6 @@ pipeline:
   replication_slot:
     persistence:
       type: temporary
-  table_error_retry_delay_ms: 10000
-  table_error_retry_max_attempts: 8
 ```
 
 This applies to both apply-worker and table-sync slots. PostgreSQL drops them
@@ -86,14 +115,6 @@ snapshot. You can reuse the same store and destination. Losing the apply slot
 during a run stops the pipeline; starting it again resynchronizes its tables.
 Wait for the previous run's table-sync sessions to end before restarting.
 `failover: true` requires permanent slots.
-
-After a host or network failure, PostgreSQL may keep the previous session's
-temporary slot until it detects the lost connection. ETL retries while that
-slot is still held. Set the retry window longer than PostgreSQL's
-[`wal_sender_timeout`](https://www.postgresql.org/docs/current/runtime-config-replication.html#GUC-WAL-SENDER-TIMEOUT),
-which defaults to 60 seconds. The example allows eight retries ten seconds
-apart; the default retry settings allow only five. A clean session exit or
-an error in the session drops the slot immediately.
 
 ### Viewing Replication Slots
 

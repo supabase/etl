@@ -215,7 +215,7 @@ fn quote_numeric_literal_as_string(expression: &str) -> String {
 }
 
 /// Returns a rendered DuckLake default expression for a column, if supported.
-fn ducklake_default_expression(
+pub(super) fn ducklake_default_expression(
     default_expression: &str,
     typ: &Type,
     modifier: i32,
