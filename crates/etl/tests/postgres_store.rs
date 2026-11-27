@@ -18,7 +18,7 @@ use etl::{
     },
     test_utils::database::spawn_source_database,
 };
-use etl_postgres::source::connect_to_source_database;
+use etl_postgres::{source::connect_to_source_database, store::schema::load_table_schemas};
 use etl_telemetry::tracing::init_test_tracing;
 use futures::FutureExt;
 use sqlx::postgres::types::Oid as SqlxTableId;
@@ -922,19 +922,19 @@ async fn schema_store_upsert_replaces_columns_atomically_in_batches() {
         *store.get_table_schema(&original.id, SnapshotId::max()).await.unwrap().unwrap(),
         original
     );
-    let loaded = etl_postgres::store::schema::load_table_schemas(&pool, "1").await.unwrap();
+    let loaded = load_table_schemas(&pool, "1").await.unwrap();
     assert_eq!(loaded, [original]);
 
     store.store_table_schema(wide.clone()).await.unwrap();
 
     assert_eq!(*store.get_table_schema(&wide.id, SnapshotId::max()).await.unwrap().unwrap(), wide);
-    let loaded = etl_postgres::store::schema::load_table_schemas(&pool, "1").await.unwrap();
+    let loaded = load_table_schemas(&pool, "1").await.unwrap();
     assert_eq!(loaded.as_slice(), std::slice::from_ref(&wide));
 
     wide.column_schemas.clear();
     store.store_table_schema(wide.clone()).await.unwrap();
 
-    let loaded = etl_postgres::store::schema::load_table_schemas(&pool, "1").await.unwrap();
+    let loaded = load_table_schemas(&pool, "1").await.unwrap();
     assert_eq!(loaded, [wide]);
     let counts: (i64, i64) = sqlx::query_as(
         "select (select count(*) from etl.table_schemas), (select count(*) from etl.table_columns)",
@@ -943,6 +943,27 @@ async fn schema_store_upsert_replaces_columns_atomically_in_batches() {
     .await
     .unwrap();
     assert_eq!(counts, (1, 0));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn schema_store_load_propagates_error_after_valid_rows() {
+    let database = spawn_source_database().await;
+    let store = PostgresStore::new("1", database.config.clone()).await.unwrap();
+    let pool = connect_to_source_database(&database.config, 0, 1, None).await.unwrap();
+    let mut schema = create_sample_table_schema();
+    store.store_table_schema(schema.clone()).await.unwrap();
+
+    schema.snapshot_id = test_snapshot_id(100, 100);
+    schema.name.name.push('€');
+    store.store_table_schema(schema).await.unwrap();
+
+    // Encoding fails only when PostgreSQL sends the later row.
+    let mut transaction = pool.begin().await.unwrap();
+    sqlx::query("set local client_encoding = 'LATIN1'").execute(&mut *transaction).await.unwrap();
+    let error = load_table_schemas(&mut *transaction, "1").await.unwrap_err();
+    transaction.rollback().await.unwrap();
+
+    assert_eq!(error.as_database_error().unwrap().code().as_deref(), Some("22P05"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
