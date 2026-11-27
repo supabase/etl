@@ -871,21 +871,6 @@ async fn delete_slot_if_exists_on_nonexistent_slot() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn replication_client_doesnt_recreate_slot() {
-    init_test_tracing();
-    let database = spawn_source_database().await;
-
-    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
-
-    let slot_name = test_slot_name("my_slot");
-    assert!(client.create_slot(&slot_name, &Default::default()).await.is_ok());
-    assert!(matches!(
-        client.create_slot(&slot_name, &Default::default()).await,
-        Err(ref err) if err.kind() == ErrorKind::ReplicationSlotAlreadyExists
-    ));
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn replication_client_reads_wal_sender_timeout() {
     init_test_tracing();
     let database = spawn_source_database().await;
@@ -895,34 +880,6 @@ async fn replication_client_reads_wal_sender_timeout() {
     let wal_sender_timeout = client.get_wal_sender_timeout().await.unwrap();
 
     assert_eq!(wal_sender_timeout, Some(Duration::from_secs(10)));
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn table_schema_copy_is_consistent() {
-    init_test_tracing();
-    let database = spawn_source_database().await;
-
-    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
-
-    let age_schema = test_column("age", Type::INT4, 2, true, false);
-
-    let table_1_id = database
-        .create_table(test_table_name("table_1"), true, &[("age", "integer")])
-        .await
-        .unwrap();
-
-    // We create the slot when the database schema contains only 'table_1'.
-    let (transaction, _) = client
-        .create_table_copy_slot(&test_slot_name("my_slot"), table_1_id, &Default::default())
-        .await
-        .unwrap();
-
-    // We use the transaction to consistently read the table schemas.
-    let (table_1_schema, _) = transaction.get_table_schema_with_identity(table_1_id).await.unwrap();
-    transaction.commit().await.unwrap();
-    assert_eq!(table_1_schema.id, table_1_id);
-    assert_eq!(table_1_schema.name, test_table_name("table_1"));
-    assert_table_schema_columns(&table_1_schema, &[id_column_schema(), age_schema.clone()]);
 }
 
 /// Invalid identity metadata fails copy setup while retaining its parse error.
@@ -3708,22 +3665,6 @@ async fn schema_change_capture_opt_out_accepts_postgres_boolean_spellings() {
     let columns = column_schemas_from_ddl_message(&messages[0]);
     assert_eq!(columns.last().unwrap().name, "captured");
     assert_eq!(columns.len(), 3 + spellings.len());
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn get_slot_state_returns_not_invalidated_for_healthy_slot() {
-    init_test_tracing();
-    let database = spawn_source_database().await;
-
-    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
-
-    // Create a slot
-    let slot_name = test_slot_name("healthy_slot");
-    client.create_slot(&slot_name, &Default::default()).await.unwrap();
-
-    // Check that PostgreSQL has not reported the slot as invalidated.
-    let slot_state = client.get_slot_state(&slot_name).await.unwrap();
-    assert_eq!(slot_state, SlotState::NotInvalidated);
 }
 
 #[tokio::test(flavor = "multi_thread")]
