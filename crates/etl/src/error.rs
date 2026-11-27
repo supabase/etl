@@ -31,6 +31,8 @@ pub type EtlResult<T> = Result<T, EtlError>;
 #[derive(Debug, Clone)]
 struct ErrorPayload {
     kind: ErrorKind,
+    /// Recorded only at a PostgreSQL TCP connection boundary.
+    postgres_dial_failure: bool,
     /// Whether the failed operation may succeed if it runs again.
     retryability: Retryability,
     description: Cow<'static, str>,
@@ -49,7 +51,15 @@ impl ErrorPayload {
         source: Option<Arc<dyn error::Error + Send + Sync>>,
         backtrace: Arc<Backtrace>,
     ) -> Self {
-        Self { kind, retryability, description, detail, source, backtrace }
+        Self {
+            kind,
+            postgres_dial_failure: false,
+            retryability,
+            description,
+            detail,
+            source,
+            backtrace,
+        }
     }
 }
 
@@ -331,6 +341,27 @@ impl ErrorKind {
 }
 
 impl EtlError {
+    /// Returns whether a PostgreSQL TCP dial failed to resolve or reach its
+    /// address. The caller identifies the database (for example, the source
+    /// or the store).
+    ///
+    /// An aggregate reports true if any member observed such a failure.
+    pub fn is_postgres_dial_failure(&self) -> bool {
+        match &self.repr {
+            ErrorRepr::Single(payload) => payload.postgres_dial_failure,
+            ErrorRepr::Many { errors } => errors.iter().any(Self::is_postgres_dial_failure),
+        }
+    }
+
+    /// Records the dial classification independently of its existing error kind
+    /// and retry policy.
+    pub(crate) fn with_postgres_dial_failure(mut self, failed: bool) -> Self {
+        if let ErrorRepr::Single(payload) = &mut self.repr {
+            payload.postgres_dial_failure = failed;
+        }
+        self
+    }
+
     /// Returns the [`ErrorKind`] of this error.
     ///
     /// For multiple errors, returns the kind of the first error or

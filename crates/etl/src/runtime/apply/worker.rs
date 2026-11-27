@@ -5,7 +5,7 @@ use etl_config::shared::{
 };
 use etl_postgres::slots::EtlReplicationSlot;
 use metrics::counter;
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, watch};
 use tokio_postgres::types::PgLsn;
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use tracing::{Instrument, error, info, warn};
@@ -93,6 +93,7 @@ pub(crate) struct ApplyWorker<S, D> {
     pipeline_id: PipelineId,
     config: Arc<PipelineConfig>,
     pool: Arc<TableSyncWorkerPool>,
+    source_network_failures: watch::Sender<()>,
     store: S,
     destination: D,
     /// Shared sampler and worker progress registrations.
@@ -119,6 +120,7 @@ impl<S, D> ApplyWorker<S, D> {
         pipeline_id: PipelineId,
         config: Arc<PipelineConfig>,
         pool: Arc<TableSyncWorkerPool>,
+        source_network_failures: watch::Sender<()>,
         store: S,
         destination: D,
         replication_lag_monitor: ReplicationLagMonitor,
@@ -139,6 +141,7 @@ impl<S, D> ApplyWorker<S, D> {
             pipeline_id,
             config,
             pool,
+            source_network_failures,
             store,
             destination,
             replication_lag_monitor,
@@ -271,6 +274,10 @@ where
                         retry_attempts = 0;
                     }
 
+                    if err.is_postgres_dial_failure() {
+                        let _ = self.source_network_failures.send(());
+                    }
+
                     let should_shutdown = Self::handle_apply_worker_error(
                         self.config.as_ref(),
                         &self.shutdown_token,
@@ -317,10 +324,11 @@ where
         };
         let (replication_client, start_lsn) = initialized?;
 
-        let worker_context = WorkerContext::Apply(ApplyWorkerContext {
+        let worker_context = WorkerContext::Apply(Box::new(ApplyWorkerContext {
             pipeline_id: self.pipeline_id.clone(),
             config: Arc::clone(&self.config),
             pool: Arc::clone(&self.pool),
+            source_network_failures: self.source_network_failures.clone(),
             store: self.store.clone(),
             destination: self.destination.clone(),
             replication_lag_monitor: self.replication_lag_monitor.clone(),
@@ -330,7 +338,7 @@ where
             table_sync_worker_permits: Arc::clone(&self.table_sync_worker_permits),
             memory_monitor: self.memory_monitor.clone(),
             batch_memory_governor: self.batch_memory_governor.clone(),
-        });
+        }));
 
         // Once table-sync workers can exist, resetting their persisted state
         // would race with the state they still hold in memory.

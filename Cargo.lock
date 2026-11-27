@@ -1539,6 +1539,7 @@ dependencies = [
  "etl-telemetry",
  "k8s-openapi",
  "metrics",
+ "rand 0.9.5",
  "reqwest 0.12.28",
  "rustls",
  "secrecy",
@@ -4924,7 +4925,7 @@ dependencies = [
 [[package]]
 name = "sqlx-core"
 version = "0.9.1"
-source = "git+https://github.com/supabase/sqlx?rev=ce568ad9091114be909747a2d906d93dfee2f098#ce568ad9091114be909747a2d906d93dfee2f098"
+source = "git+https://github.com/supabase/sqlx?rev=ed1c63355ad7430f9bfba0f3ea5064d5f03ce2c9#ed1c63355ad7430f9bfba0f3ea5064d5f03ce2c9"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -5026,7 +5027,7 @@ dependencies = [
 [[package]]
 name = "sqlx-postgres"
 version = "0.9.1"
-source = "git+https://github.com/supabase/sqlx?rev=ce568ad9091114be909747a2d906d93dfee2f098#ce568ad9091114be909747a2d906d93dfee2f098"
+source = "git+https://github.com/supabase/sqlx?rev=ed1c63355ad7430f9bfba0f3ea5064d5f03ce2c9#ed1c63355ad7430f9bfba0f3ea5064d5f03ce2c9"
 dependencies = [
  "atoi 2.0.0",
  "base64 0.22.1",

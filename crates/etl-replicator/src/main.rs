@@ -13,7 +13,8 @@ use etl_config::shared::ReplicatorConfig;
 use crate::{
     core::start_replicator_with_config,
     error::{ReplicatorError, ReplicatorResult},
-    error_notification::ErrorNotificationClient,
+    management_api::ManagementApiClient,
+    source_repair::SourceRepair,
 };
 
 /// The name of the environment variable which contains version information for
@@ -60,14 +61,15 @@ static malloc_conf: &[u8] =
 
 mod core;
 mod error;
-mod error_notification;
 mod error_reporting;
 mod health;
 mod init;
+mod management_api;
 #[cfg(feature = "any-destination")]
 mod metrics;
 mod migration;
 mod sentry;
+mod source_repair;
 
 /// Main async entry point that starts the replicator pipeline.
 ///
@@ -75,17 +77,22 @@ mod sentry;
 /// errors to Sentry and optionally sends notifications to the Supabase API.
 async fn async_main(
     replicator_config: ReplicatorConfig,
-    notification_client: Option<ErrorNotificationClient>,
+    management_api: Option<ManagementApiClient>,
 ) -> ReplicatorResult<()> {
     let metrics_http_listener = init::init_metrics(&replicator_config)?;
 
     // Keep the feature flags client alive for the full async runtime lifetime.
     let _feature_flags_client = init::init_feature_flags(&replicator_config)?;
+    let source_repair = management_api.as_ref().and_then(SourceRepair::from_env);
 
     info!("replicator bootstrap completed");
 
-    let Err(error) =
-        start_replicator_with_config(replicator_config, notification_client.clone()).await
+    let Err(error) = start_replicator_with_config(
+        replicator_config,
+        management_api.clone(),
+        source_repair.as_ref(),
+    )
+    .await
     else {
         if let Some(result) = abort_and_join(metrics_http_listener).await? {
             result?;
@@ -97,17 +104,17 @@ async fn async_main(
     sentry::capture_error(&error);
     error!(error = %error, "replicator failed");
 
-    let Some(notification_client) = notification_client else {
+    let Some(management_api) = management_api else {
         return Err(error);
     };
 
     let error_message = error.to_string();
     match &error {
         ReplicatorError::Etl(etl_error) => {
-            notification_client.notify_error(error_message, etl_error).await;
+            management_api.notify_error(error_message, etl_error).await;
         }
         _ => {
-            notification_client.notify_error(error_message.clone(), error_message).await;
+            management_api.notify_error(error_message.clone(), error_message).await;
         }
     }
 
@@ -117,12 +124,12 @@ async fn async_main(
 /// Builds the Tokio runtime and runs the async replicator entry point.
 fn run_async_runtime(
     replicator_config: ReplicatorConfig,
-    notification_client: Option<ErrorNotificationClient>,
+    management_api: Option<ManagementApiClient>,
 ) -> ReplicatorResult<()> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(async_main(replicator_config, notification_client))
+        .block_on(async_main(replicator_config, management_api))
 }
 
 /// Runs the replicator service and propagates typed errors.
@@ -152,13 +159,13 @@ fn try_main() -> ReplicatorResult<()> {
 
     debug!("replicator bootstrap initialized");
 
-    // We prepare the notification client used to send errors.
-    let notification_client = init::init_error_notification(&replicator_config)?;
+    // Prepare the shared client for managed requests.
+    let management_api = init::init_management_api(&replicator_config)?;
 
     debug!("starting tokio runtime");
 
     // Phase 2: start Tokio only once synchronous bootstrap has succeeded.
-    run_async_runtime(replicator_config, notification_client)
+    run_async_runtime(replicator_config, management_api)
 }
 
 /// Entry point for the replicator service.

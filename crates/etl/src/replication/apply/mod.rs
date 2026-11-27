@@ -246,6 +246,9 @@ pub(crate) struct ApplyWorkerContext<S, D> {
     pub(crate) config: Arc<PipelineConfig>,
     /// Pool of table sync workers that this worker coordinates.
     pub(crate) pool: Arc<TableSyncWorkerPool>,
+    /// Coalesces failed source dials across workers without waiting for a
+    /// consumer.
+    pub(crate) source_network_failures: watch::Sender<()>,
     /// State store for tracking table state and persisted checkpoints.
     pub(crate) store: S,
     /// Destination where replicated data is written.
@@ -288,7 +291,7 @@ pub(crate) struct TableSyncWorkerContext<S> {
 #[derive(Debug)]
 pub(crate) enum WorkerContext<S, D> {
     /// Context for the apply worker.
-    Apply(ApplyWorkerContext<S, D>),
+    Apply(Box<ApplyWorkerContext<S, D>>),
     /// Context for a table sync worker.
     TableSync(TableSyncWorkerContext<S>),
 }

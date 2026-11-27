@@ -59,17 +59,12 @@ struct EtlEmailResponse {
     deduplicated: bool,
 }
 
-/// Client for sending error notifications to Supabase API.
-///
-/// Provides async methods to notify external systems about errors that occur
-/// during replication. Callers dispatch requests in owned background tasks with
-/// bounded timeouts. Failures are logged without propagating them to the
-/// pipeline.
+/// Authenticated client for the managed project's replication endpoints.
 #[derive(Debug, Clone)]
-pub(crate) struct ErrorNotificationClient {
+pub(crate) struct ManagementApiClient {
     /// HTTP client for making requests.
     client: reqwest::Client,
-    /// Supabase API URL for error notifications.
+    /// Base URL for the managed system routes.
     api_url: String,
     /// Supabase API key for authentication.
     api_key: SecretString,
@@ -79,11 +74,8 @@ pub(crate) struct ErrorNotificationClient {
     pipeline_id: String,
 }
 
-impl ErrorNotificationClient {
-    /// Creates a new error notification client.
-    ///
-    /// The client is configured with the necessary credentials and endpoints to
-    /// send error notifications to the Supabase API.
+impl ManagementApiClient {
+    /// Creates the authenticated client shared by managed system requests.
     pub(crate) fn new(
         api_url: String,
         api_key: SecretString,
@@ -96,7 +88,6 @@ impl ErrorNotificationClient {
             .local_address(IpAddr::V6(Ipv6Addr::UNSPECIFIED))
             .no_proxy()
             .connect_timeout(Duration::from_secs(2))
-            .timeout(Duration::from_secs(10))
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
 
@@ -107,6 +98,11 @@ impl ErrorNotificationClient {
             project_ref,
             pipeline_id,
         })
+    }
+
+    /// Identifies the project used in the system route.
+    pub(crate) fn project_ref(&self) -> &str {
+        &self.project_ref
     }
 
     /// Sends an error notification to the Supabase API.
@@ -140,9 +136,22 @@ impl ErrorNotificationClient {
         }
     }
 
-    /// Returns the URL for the ETL email endpoint.
-    fn etl_email_url(&self) -> String {
-        format!("{}/system/replication/{}/emails", self.api_url, self.project_ref)
+    /// Builds a request under the configured project's system route.
+    fn post(&self, path: &str) -> reqwest::RequestBuilder {
+        self.client.post(format!("{}/system/replication/{}/{path}", self.api_url, self.project_ref))
+    }
+
+    /// Sends a bodyless source repair request with the managed system key.
+    pub(crate) async fn request_source_repair(
+        &self,
+        source_id: &str,
+        cluster_id: &str,
+        phase: &str,
+    ) -> Result<reqwest::Response, reqwest::Error> {
+        let request = self
+            .post(&format!("sources/{source_id}"))
+            .query(&[("cluster_id", cluster_id), ("repair_phase", phase)]);
+        self.client.execute(self.authenticated_request(request)?).await
     }
 
     /// Builds a pipeline error email request.
@@ -169,12 +178,14 @@ impl ErrorNotificationClient {
         &self,
         email: &EtlEmailRequest<'_>,
     ) -> Result<reqwest::Request, reqwest::Error> {
-        let mut request = self
-            .client
-            .post(self.etl_email_url())
-            .header("apikey", self.api_key.expose_secret())
-            .json(email)
-            .build()?;
+        self.authenticated_request(self.post("emails").timeout(Duration::from_secs(10)).json(email))
+    }
+
+    fn authenticated_request(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Request, reqwest::Error> {
+        let mut request = request.header("apikey", self.api_key.expose_secret()).build()?;
 
         if let Some(api_key) = request.headers_mut().get_mut("apikey") {
             api_key.set_sensitive(true);
@@ -227,8 +238,8 @@ mod tests {
 
     use super::*;
 
-    fn error_notification_client(api_url: &str) -> ErrorNotificationClient {
-        ErrorNotificationClient::new(
+    fn error_notification_client(api_url: &str) -> ManagementApiClient {
+        ManagementApiClient::new(
             api_url.to_owned(),
             "fake-api-key".into(),
             "abcdefghijklmnopqrst".to_owned(),
@@ -302,6 +313,7 @@ mod tests {
         let request = client.build_email_request(&email).expect("request should build");
 
         assert_eq!(request.method(), reqwest::Method::POST);
+        assert_eq!(request.timeout(), Some(&Duration::from_secs(10)));
         assert!(request.headers()["apikey"].is_sensitive());
         assert_eq!(
             request.url().as_str(),
