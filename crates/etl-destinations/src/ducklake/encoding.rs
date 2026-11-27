@@ -56,7 +56,8 @@ pub(super) fn prepare_copy_rows(
     replicated_table_schema: &ReplicatedTableSchema,
     table_rows: Vec<TableRow>,
 ) -> EtlResult<PreparedRows> {
-    prepare_copy_rows_with_list_limit(replicated_table_schema, table_rows, i32::MAX as usize)
+    let list_limit = usize::try_from(i32::MAX).expect("Arrow's list offset limit fits in usize");
+    prepare_copy_rows_with_list_limit(replicated_table_schema, table_rows, list_limit)
 }
 
 /// Prepares COPY rows with a maximum child offset for each Arrow list column.
