@@ -1228,7 +1228,7 @@ pub(super) mod tests {
                         format!("v{index}"),
                         typ.clone(),
                         -1,
-                        index as i32 + 2,
+                        i32::try_from(index + 2).unwrap(),
                         index % 2 == 0,
                     )
                 }))
