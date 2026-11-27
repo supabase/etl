@@ -27,6 +27,7 @@ use std::fmt;
 
 use etl::{
     error::{ErrorKind, EtlResult, Retryability},
+    etl_error,
     schema::{ColumnNameMapping, TableName},
 };
 pub use etl_config::shared::DuckLakeWriterConfig;
@@ -36,6 +37,13 @@ use crate::retry::{ClassifiedError, classified_error, classified_error_with_deta
 
 /// The DuckDB catalog alias used in every `lake.<table>` qualified name.
 pub(super) const LAKE_CATALOG: &str = "lake";
+/// Default DuckLake schema containing the ETL-managed replay helpers.
+const REPLAY_HELPER_SCHEMA: &str = "main";
+/// ETL-managed marker table storing per-table applied copy batches.
+const APPLIED_BATCHES_TABLE: &str = "__etl_applied_table_batches";
+/// ETL-managed per-table streaming replay progress for steady-state CDC
+/// retries.
+const STREAMING_PROGRESS_TABLE: &str = "__etl_streaming_progress";
 /// Column-name mapping used at every DuckLake destination boundary.
 ///
 /// DuckLake identifiers are canonicalized to deterministic ASCII lowercase.
@@ -63,6 +71,9 @@ impl DuckLakeTableName {
     }
 
     /// Creates a table reference that mirrors a source Postgres table.
+    ///
+    /// This preserves names without validating replication targets. Use
+    /// [`table_name_to_ducklake_table_name`] for a validated legacy mapping.
     pub fn from_source(table_name: &TableName) -> Self {
         Self::new(table_name.schema.clone(), table_name.name.clone())
     }
@@ -113,21 +124,48 @@ impl DuckLakeTableName {
         })
     }
 
-    /// Parses a durable destination metadata table reference.
+    /// Parses and validates a stored replication target before restoring it.
     pub(super) fn from_metadata_id(value: &str) -> EtlResult<Self> {
-        serde_json::from_str(value).map_err(|source| {
+        let table_name: Self = serde_json::from_str(value).map_err(|source| {
             classified_error_with_detail(
                 ErrorKind::InvalidState,
                 "DuckLake destination table metadata is invalid",
                 format!("destination_table_id={value}"),
                 source,
             )
-        })
+        })?;
+        table_name.validate_source_target()?;
+
+        Ok(table_name)
     }
 
     /// Returns whether this is an internal ETL helper table.
     pub(super) fn is_internal_helper(&self) -> bool {
         self.0.is_internal_helper()
+    }
+
+    /// Rejects physical replay helpers as source-driven mutation targets.
+    ///
+    /// DuckDB compares even quoted identifiers without ASCII case distinctions.
+    /// Other schemas and nested namespaces do not collide with replay state.
+    fn validate_source_target(&self) -> EtlResult<()> {
+        if self.namespace().is_none()
+            && self.schema().eq_ignore_ascii_case(REPLAY_HELPER_SCHEMA)
+            && (self.table().eq_ignore_ascii_case(APPLIED_BATCHES_TABLE)
+                || self.table().eq_ignore_ascii_case(STREAMING_PROGRESS_TABLE))
+        {
+            return Err(etl_error!(
+                ErrorKind::DestinationTableNameInvalid,
+                "DuckLake destination table name is reserved",
+                format!(
+                    "Table '{self}' is an internal ETL replay helper. Exclude the source table \
+                     from replication or use a different source schema/table; existing \
+                     destination metadata must be resolved before retrying."
+                )
+            ));
+        }
+
+        Ok(())
     }
 }
 
@@ -186,3 +224,93 @@ pub use external_maintenance::{
     ExternalMaintenanceStore, ExternalMaintenanceWatcherConfig, PostgresExternalMaintenanceStore,
     run_external_maintenance_watcher,
 };
+
+#[cfg(test)]
+mod tests {
+    use etl::{
+        error::{ErrorKind, Retryability},
+        schema::TableName,
+    };
+
+    use crate::ducklake::{DuckLakeTableName, table_name_to_ducklake_table_name};
+
+    /// Source mapping and metadata restoration reject every case-equivalent
+    /// helper target.
+    #[test]
+    fn replay_helpers_reject_reserved_names() {
+        for table in ["__etl_applied_table_batches", "__etl_streaming_progress"] {
+            for schema in ["main", "MAIN", "MaIn"] {
+                for table in [table.to_owned(), table.to_ascii_uppercase()] {
+                    let source = TableName::new(schema.to_owned(), table.clone());
+                    let target = DuckLakeTableName::new(schema, table);
+
+                    for result in [
+                        table_name_to_ducklake_table_name(&source),
+                        DuckLakeTableName::from_metadata_id(&target.to_metadata_id().unwrap()),
+                    ] {
+                        let error = result.unwrap_err();
+                        assert_eq!(error.kind(), ErrorKind::DestinationTableNameInvalid);
+                        assert_eq!(error.retryability(), Retryability::Permanent);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Reservation applies to decoded identifiers, including JSON escape
+    /// sequences.
+    #[test]
+    fn replay_helpers_reject_escaped_metadata() {
+        let error = DuckLakeTableName::from_metadata_id(
+            r#"{"schema":"m\u0061in","table":"__etl_\u0073treaming_progress"}"#,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::DestinationTableNameInvalid);
+    }
+
+    /// Nested helper basenames never address the top-level replay helpers.
+    #[test]
+    fn replay_helpers_allow_namespaced_metadata() {
+        for namespace in ["project_a", "main", "project.\"a"] {
+            for table in ["__etl_streaming_progress", "__ETL_APPLIED_TABLE_BATCHES"] {
+                let target = DuckLakeTableName::new("MAIN", table)
+                    .with_namespace(Some(namespace.to_owned()));
+
+                assert_eq!(
+                    DuckLakeTableName::from_metadata_id(&target.to_metadata_id().unwrap()).unwrap(),
+                    target
+                );
+            }
+        }
+    }
+
+    /// Noncolliding identifiers retain their spelling and serialized
+    /// representation.
+    #[test]
+    fn replay_helpers_preserve_allowed_names() {
+        for (schema, table) in [
+            ("public", "__etl_streaming_progress"),
+            ("public", "__ETL_APPLIED_TABLE_BATCHES"),
+            ("main", "__etl_streaming_progress_extra"),
+            ("main", "__etl_applied_table_batches_extra"),
+            ("main", "__etl_replay_epochs"),
+            ("main", "__etl_other"),
+            ("main", "orders"),
+            ("main.extra", "__etl_streaming_progress"),
+            ("maın", "__etl_streaming_progress"),
+            ("main", "__etl_ſtreaming_progress"),
+            ("public", "main.__etl_streaming_progress"),
+            ("main", "\"__etl_streaming_progress\""),
+        ] {
+            let expected = DuckLakeTableName::new(schema, table);
+            let source = TableName::new(schema.to_owned(), table.to_owned());
+
+            assert_eq!(table_name_to_ducklake_table_name(&source).unwrap(), expected);
+            assert_eq!(
+                DuckLakeTableName::from_metadata_id(&expected.to_metadata_id().unwrap()).unwrap(),
+                expected
+            );
+        }
+    }
+}

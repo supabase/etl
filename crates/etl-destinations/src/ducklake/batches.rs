@@ -39,7 +39,8 @@ use tracing::{Instrument, debug, trace, warn};
 
 use crate::{
     ducklake::{
-        DUCKLAKE_COLUMN_NAME_MAPPING, DuckLakeTableName, LAKE_CATALOG,
+        APPLIED_BATCHES_TABLE, DUCKLAKE_COLUMN_NAME_MAPPING, DuckLakeTableName, LAKE_CATALOG,
+        STREAMING_PROGRESS_TABLE,
         client::{
             DuckLakeBlockingOperationContext, DuckLakeConnectionManager, FOREGROUND_QUERY_TIMEOUT,
             format_query_error_detail, is_ducklake_shutdown_requested_error, run_duckdb_blocking,
@@ -82,8 +83,6 @@ const SQL_DELETE_BATCH_SIZE: usize = 16;
 /// throughput on interleaved workloads while still capping transaction lifetime
 /// for DuckLake conflict handling.
 const CDC_MUTATION_BATCH_SIZE: usize = 16;
-/// ETL-managed marker table storing per-table applied copy batches.
-const APPLIED_BATCHES_TABLE: &str = "__etl_applied_table_batches";
 /// Data inlining limit for append-only DuckLake helper tables.
 ///
 /// This per-table option intentionally overrides the COPY pool's attach-level
@@ -188,9 +187,6 @@ fn format_update_mutation_error_detail(
     )
 }
 
-/// ETL-managed per-table streaming replay progress for steady-state CDC
-/// retries.
-const STREAMING_PROGRESS_TABLE: &str = "__etl_streaming_progress";
 /// Maximum number of times a failed write attempt is retried before giving up.
 const MAX_COMMIT_RETRIES: u32 = 10;
 /// Initial backoff duration before the first retry.

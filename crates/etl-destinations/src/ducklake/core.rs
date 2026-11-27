@@ -4315,7 +4315,11 @@ where
 
     /// Builds a physical path only when no durable destination identity exists.
     fn source_table_name(&self, source: &TableName) -> EtlResult<DuckLakeTableName> {
-        Ok(DuckLakeTableName::from_source(source).with_namespace(self.table_namespace.clone()))
+        let table_name =
+            DuckLakeTableName::from_source(source).with_namespace(self.table_namespace.clone());
+        table_name.validate_source_target()?;
+
+        Ok(table_name)
     }
 
     /// Prevents configuration edits from redirecting an existing pipeline.
@@ -5097,9 +5101,13 @@ pub(super) fn wait_if_copy_append_paused_for_tests() {
 /// Converts a Postgres [`TableName`] to the matching DuckLake schema/table.
 ///
 /// Source schemas are preserved in DuckLake. For example, `public.my_table`
-/// becomes the DuckLake table `lake.public.my_table`.
+/// becomes the DuckLake table `lake.public.my_table`. Names that collide with
+/// internal replay helpers return [`ErrorKind::DestinationTableNameInvalid`].
 pub fn table_name_to_ducklake_table_name(table_name: &TableName) -> EtlResult<DuckLakeTableName> {
-    Ok(DuckLakeTableName::from_source(table_name))
+    let table_name = DuckLakeTableName::from_source(table_name);
+    table_name.validate_source_target()?;
+
+    Ok(table_name)
 }
 
 #[cfg(test)]
