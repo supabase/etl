@@ -283,6 +283,7 @@ passing password flags to keep secrets out of process arguments.
 | `--clickhouse-engine`          | `replacing_merge_tree` | Table engine: `replacing_merge_tree` or `merge_tree`          |
 | `--max-batch-fill-duration-ms` | `5000`                 | Max time to wait before flushing a batch                      |
 | `--max-table-sync-workers`     | `4`                    | Concurrent workers during initial copy                        |
+| `--max-copy-connections-per-table` | `2`                | Parallel copy connections per table                           |
 | `--publication`                | _(required)_           | Postgres publication name                                     |
 
 ## Metrics

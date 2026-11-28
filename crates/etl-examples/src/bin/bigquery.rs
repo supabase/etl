@@ -116,6 +116,10 @@ struct BqArgs {
     /// initial sync, more resource usage)
     #[arg(long, default_value = "4")]
     max_table_sync_workers: NonZeroU16,
+    /// Maximum number of parallel copy connections per table during initial
+    /// sync (higher values = faster copy of large tables, more source load)
+    #[arg(long, default_value = "2")]
+    max_copy_connections_per_table: NonZeroU16,
 }
 
 /// Entry point — handles error reporting and process exit.
@@ -210,7 +214,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         memory_backpressure: Some(MemoryBackpressureConfig::default()),
         table_sync_copy: TableSyncCopyConfig::default(),
         invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
-        max_copy_connections_per_table: NonZeroU16::new(2).unwrap(),
+        max_copy_connections_per_table: args.bq_args.max_copy_connections_per_table,
     };
 
     // Initialize BigQuery destination with service account authentication

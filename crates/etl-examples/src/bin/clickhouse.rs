@@ -135,6 +135,10 @@ struct ClickHouseArgs {
     /// initial sync, more resource usage)
     #[arg(long, default_value = "4")]
     max_table_sync_workers: NonZeroU16,
+    /// Maximum number of parallel copy connections per table during initial
+    /// sync (higher values = faster copy of large tables, more source load)
+    #[arg(long, default_value = "2")]
+    max_copy_connections_per_table: NonZeroU16,
 }
 
 /// CLI-facing engine choice. Converts to `ClickHouseEngine` via `From`.
@@ -232,7 +236,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         memory_backpressure: Some(MemoryBackpressureConfig::default()),
         table_sync_copy: TableSyncCopyConfig::default(),
         invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
-        max_copy_connections_per_table: NonZeroU16::new(2).unwrap(),
+        max_copy_connections_per_table: args.clickhouse_args.max_copy_connections_per_table,
     };
 
     let clickhouse_destination = ClickHouseDestination::new(

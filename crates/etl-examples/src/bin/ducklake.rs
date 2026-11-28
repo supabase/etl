@@ -139,6 +139,10 @@ struct DuckLakeArgs {
     /// Maximum number of concurrent table sync workers during initial copy
     #[arg(long, default_value = "4")]
     max_table_sync_workers: NonZeroU16,
+    /// Maximum number of parallel copy connections per table during initial
+    /// copy
+    #[arg(long, default_value = "2")]
+    max_copy_connections_per_table: NonZeroU16,
 
     // S3 / S3-compatible storage credentials.
     /// S3 access key ID
@@ -249,7 +253,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         memory_backpressure: None,
         table_sync_copy: TableSyncCopyConfig::default(),
         invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
-        max_copy_connections_per_table: NonZeroU16::new(2).unwrap(),
+        max_copy_connections_per_table: args.ducklake_args.max_copy_connections_per_table,
     };
 
     let s3_config = Some(S3Config {
