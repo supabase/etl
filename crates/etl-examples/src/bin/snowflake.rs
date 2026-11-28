@@ -96,6 +96,10 @@ struct SnowflakeArgs {
     /// initial sync, more resource usage)
     #[arg(long, default_value = "4")]
     max_table_sync_workers: NonZeroU16,
+    /// Maximum number of parallel copy connections per table during initial
+    /// sync (higher values = faster copy of large tables, more source load)
+    #[arg(long, default_value = "2")]
+    max_copy_connections_per_table: NonZeroU16,
 }
 
 /// Entry point — handles error reporting and process exit.
@@ -190,7 +194,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         run_source_migrations: true,
         drain_on_shutdown: true,
         shutdown_drain_timeout_ms: PipelineConfig::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS,
-        max_copy_connections_per_table: NonZeroU16::new(2).unwrap(),
+        max_copy_connections_per_table: args.sf_args.max_copy_connections_per_table,
     };
 
     let sf_config = Config::require_tests_env()?;

@@ -153,6 +153,7 @@ cargo run --bin bigquery -p etl-examples --features bigquery -- \
 | `--bq-dataset-id`              | _(required)_ | BigQuery dataset ID                      |
 | `--max-batch-fill-duration-ms` | `5000`       | Max time to wait before flushing a batch |
 | `--max-table-sync-workers`     | `4`          | Concurrent workers during initial copy   |
+| `--max-copy-connections-per-table` | `2`      | Parallel copy connections per table      |
 | `--publication`                | _(required)_ | Postgres publication name                |
 
 ---
@@ -275,6 +276,7 @@ vendored extensions at `/app/duckdb_extensions`.
 | `--pool-size`                  | `4`          | DuckDB connection pool size                                       |
 | `--max-batch-fill-duration-ms` | `5000`       | Max time to wait before flushing a batch                          |
 | `--max-table-sync-workers`     | `4`          | Concurrent workers during initial copy                            |
+| `--max-copy-connections-per-table` | `2`      | Parallel copy connections per table                               |
 | `--publication`                | _(required)_ | Postgres publication name                                         |
 | `--s3-access-key-id`           | _(required)_ | S3 access key ID                                                  |
 | `--s3-secret-access-key`       | _(required)_ | S3 secret access key                                              |
@@ -348,4 +350,5 @@ the secret material.
 | `--db-password`                | —            | Postgres password                        |
 | `--max-batch-fill-duration-ms` | `5000`       | Max time to wait before flushing a batch |
 | `--max-table-sync-workers`     | `4`          | Concurrent workers during initial copy   |
+| `--max-copy-connections-per-table` | `2`      | Parallel copy connections per table      |
 | `--publication`                | _(required)_ | Postgres publication name                |
